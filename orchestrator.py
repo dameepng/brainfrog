@@ -1,27 +1,14 @@
-"""Orchestrator: the loop that ties System 1 (Jev, fast gate) to
-System 2 (Claude, slow generation) for an agentic coding task.
+"""Orchestrator — wires System 1 (Jev) and System 2 (Claude) into a loop.
 
-    plan (Claude)
-      -> for each step:
-           write code (Claude)
-           run tests (real subprocess)
-           ask Jev: next_action given {test_passed, retry_count, ...}
-           branch on Jev's answer + confidence:
-             open_pr        -> break out, go draft a PR
-             retry_fix      -> Claude reads the failure, patches, loop again
-             escalate_human -> stop, print a clear report, wait for a human
-             abandon        -> stop, report why
-      -> draft PR copy (Claude), gate once more on diff risk (Jev),
-         then actually branch/commit/push (+ `gh pr create` if available
-         and confidence clears the bar)
-
-Every Jev call is one cheap request with a handful of typed questions —
-never a free-text prompt. Claude is only called for planning, writing,
-diagnosing failures, and writing PR prose: the things that genuinely
-need open-ended generation.
+Now enhanced with:
+- BRAINFROG.md / CLAUDE.md persistent project memory & guidelines
+- Context pinning via @file mentions in prompts
+- Automatic git checkpointing per successful step for instant /undo
 """
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +22,7 @@ from system2.claude_client import PlanStep, System2Client
 @dataclass
 class StepResult:
     step: PlanStep
-    outcome: str  # "opened_pr" | "escalated" | "abandoned"
+    outcome: str  # "opened_pr" | "drafted_pr" | "escalated" | "abandoned"
     retries: int
     detail: str
 
@@ -59,6 +46,34 @@ class ScopeDecision:
     change_type: str
     focus_tree: str
     clarify_message: Optional[str] = None
+
+
+def load_project_guidelines(repo_dir: Path) -> str:
+    """Read persistent rules from BRAINFROG.md or CLAUDE.md if present."""
+    for name in ("BRAINFROG.md", "brainfrog.md", "CLAUDE.md", "claude.md", "AGENTS.md"):
+        p = repo_dir / name
+        if p.exists() and p.is_file():
+            try:
+                return p.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+    return ""
+
+
+def extract_mentioned_files(task: str, repo_dir: Path) -> Dict[str, str]:
+    """Extract and read files referenced with @filename in user prompt."""
+    pattern = r"@([a-zA-Z0-9_\-\.\/\\]+)"
+    matches = re.findall(pattern, task)
+    pinned = {}
+    for m in matches:
+        target = (repo_dir / m).resolve()
+        if target.exists() and target.is_file():
+            try:
+                rel = str(target.relative_to(repo_dir.resolve()))
+                pinned[rel] = target.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+    return pinned
 
 
 def _run(cmd: List[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -98,45 +113,44 @@ def _write_files(repo_dir: Path, files: Dict[str, str]) -> None:
 
 
 def _diff_stat(repo_dir: Path) -> Dict[str, int]:
-    res = _run(["git", "diff", "--numstat"], repo_dir)
-    lines, files = 0, 0
-    for line in res.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            files += 1
-            try:
-                lines += int(parts[0]) + int(parts[1])
-            except ValueError:
-                pass
-    return {"diff_lines_changed": lines, "files_changed": files}
+    diff = _run(["git", "diff", "--numstat"], repo_dir).stdout
+    added, deleted = 0, 0
+    for line in diff.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            added += int(parts[0])
+            deleted += int(parts[1])
+    return {"lines_added": added, "lines_deleted": deleted}
 
 
+# System 1 gate questions
 NEXT_ACTION_QUESTION = ChoiceQuestion(
-    instructions=(
-        "Given the current step's test outcome and retry history, what should "
-        "happen next in this coding agent's loop?"
-    ),
+    instructions="What should the orchestrator do next?",
     criteria={
-        "open_pr": "Tests passed; the change is ready to be proposed as a pull request.",
-        "retry_fix": "Tests failed but retries remain; worth having the engineer patch and retry.",
-        "escalate_human": "Retries are exhausted or the situation is ambiguous; a human should look.",
-        "abandon": "The approach is clearly wrong and retrying will not help.",
+        "open_pr": "All tests passed cleanly and the diff looks complete.",
+        "retry_fix": "Tests failed, but the failure is specific and likely fixable.",
+        "escalate_human": "Tests failed repeatedly or the failure seems fundamentally beyond the model.",
+        "abandon": "The goal appears unreachable or contradictory with the codebase.",
     },
 )
 
 RISK_QUESTION = ScoreQuestion(
-    instructions="How risky is this diff to merge, based on its size and scope?",
-    scale=["low", "medium", "high"],
+    instructions="How risky is this diff to merge to main?",
+    scale={
+        "low": "Small, self-contained change, well-covered by tests.",
+        "medium": "Touches core logic or multiple files, but well-tested.",
+        "high": "Large blast radius, touches auth/billing/migrations, or light tests.",
+    },
 )
 
 SAFE_TO_PROCEED_QUESTION = NoulQuestion(
-    instructions="Is it safe to proceed automatically (open a PR / continue) without a human checking first?"
+    instructions="Should this change proceed to an automatic PR without human sign-off?",
 )
 
 CHANGE_TYPE_QUESTION = ChoiceQuestion(
-    instructions="What kind of ask is this user prompt, on its own, with no code changes made yet?",
+    instructions="What kind of request is the user making?",
     criteria={
-        "bug_investigation": "Reports something broken/failing and wants to know why or have it fixed.",
+        "bug_investigation": "Describes broken behavior, an error message, or a test failure to fix.",
         "feature_request": "Asks for new behavior that doesn't exist yet.",
         "question_only": "Asks to understand or be shown something; not clearly asking for a code change.",
         "unclear": "Too vague to tell what's actually being asked for.",
@@ -151,8 +165,17 @@ class Orchestrator:
         self.s1 = system1
         self.s2 = system2
         self.cfg = config
+        self.guidelines = load_project_guidelines(self.cfg.repo_dir)
+        if self.guidelines and not self.s2.guidelines:
+            self.s2.guidelines = self.guidelines
+        self.pinned_files = extract_mentioned_files(self.cfg.task, self.cfg.repo_dir)
 
     def run(self) -> List[StepResult]:
+        if self.guidelines:
+            print("[brainfrog] 🧠 Applied project memory/rules from BRAINFROG.md")
+        if self.pinned_files:
+            print(f"[brainfrog] 📌 Pinned {len(self.pinned_files)} context file(s): {', '.join(self.pinned_files.keys())}")
+
         scope = self._scope_gate()
 
         if scope.clarify_message:
@@ -165,13 +188,15 @@ class Orchestrator:
 
         if scope.change_type == "question_only":
             focus_files = _read_files_from_tree(self.cfg.repo_dir, scope.focus_tree)
+            if self.pinned_files:
+                focus_files.update(self.pinned_files)
             print(f"[system2/claude] this reads as a question, not a change — diagnosing only ...")
             answer = self.s2.diagnose(self.cfg.task, focus_files, domain_label)
             print(f"\n{answer}\n")
             return [StepResult(PlanStep("0", "diagnosis", []), "diagnosed", 0, answer)]
 
         print(f"[system2/claude] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
-        steps = self.s2.plan_task(self.cfg.task, scope.focus_tree)
+        steps = self.s2.plan_task(self.cfg.task, scope.focus_tree, pinned_files=self.pinned_files)
         print(f"[system2/claude] plan has {len(steps)} step(s)")
 
         results: List[StepResult] = []
@@ -179,18 +204,11 @@ class Orchestrator:
             result = self._run_step(step, sensitive=bool(scope.domain and scope.domain.sensitive))
             results.append(result)
             if result.outcome in ("escalated", "abandoned"):
-                break  # stop the whole run; don't push more steps on a shaky base
+                break  # stop on real failure/escalation
         return results
 
     def _scope_gate(self) -> ScopeDecision:
-        """Ask Jev, before Claude sees anything, which part of the codebase
-        this prompt is about and what kind of ask it is — so Claude gets a
-        scoped file list instead of scanning the whole repo, and so an
-        under-confident guess stops here instead of quietly going wrong.
-        """
         if not self.cfg.domains:
-            # no module map at all: nothing to route against, fall back to
-            # the old behavior (full repo tree, no domain narrowing).
             return ScopeDecision(domain=None, change_type="unclear", focus_tree=_repo_tree(self.cfg.repo_dir))
 
         criteria = {key: d.description for key, d in self.cfg.domains.items()}
@@ -226,7 +244,6 @@ class Orchestrator:
         domain = self.cfg.domains[domain_answer.choice]
         focus_tree = resolve_focus_tree(self.cfg.repo_dir, domain)
         if not focus_tree.strip():
-            # domain matched but its configured paths don't exist on disk yet
             focus_tree = _repo_tree(self.cfg.repo_dir)
         return ScopeDecision(domain=domain, change_type=change_type, focus_tree=focus_tree)
 
@@ -235,7 +252,7 @@ class Orchestrator:
         file_contents = _read_files(self.cfg.repo_dir, step.files)
 
         print("[system2/claude] writing code ...")
-        new_files = self.s2.write_code(step, self.cfg.task, file_contents)
+        new_files = self.s2.write_code(step, self.cfg.task, file_contents, pinned_files=self.pinned_files)
         _write_files(self.cfg.repo_dir, new_files)
 
         retries = 0
@@ -273,7 +290,6 @@ class Orchestrator:
             if decision.choice == "abandon":
                 return StepResult(step, "abandoned", retries, "Jev classified this approach as unrecoverable.")
 
-            # escalate_human, or retries exhausted, or low-confidence anything
             return StepResult(
                 step,
                 "escalated",
@@ -297,8 +313,13 @@ class Orchestrator:
         changed = _run(["git", "diff", "--name-only"], self.cfg.repo_dir).stdout.split()
         pr_copy = self.s2.draft_pr(self.cfg.task, changed, "PASS" if not test_output.strip() else "PASS (see logs)")
 
-        # a sensitive domain (auth, billing, migrations, ...) never gets to
-        # skip human eyes, no matter how confident the gates are.
+        # Create Git checkpoint commit for /undo
+        try:
+            _run(["git", "add", "-A"], self.cfg.repo_dir)
+            _run(["git", "commit", "-m", f"brainfrog: {step.description}"], self.cfg.repo_dir)
+        except Exception:
+            pass
+
         ceiling = "low" if sensitive else self.cfg.pr_risk_ceiling
         safety_bar = 0.9 if sensitive else 0.7
         within_ceiling = RISK_RANK.get(risk.score, 2) <= RISK_RANK.get(ceiling, 0)

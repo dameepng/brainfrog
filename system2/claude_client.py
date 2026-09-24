@@ -1,9 +1,10 @@
 """System2Client — the deliberate, generative layer, backed by Claude.
 
-Everything here is the "slow, string-generating" work Jev deliberately
-gives up: planning, writing code, reading a test failure and figuring
-out why, and drafting human-readable PR copy. Called only when the
-System 1 gate says it's actually needed.
+Features:
+- Full planning, code generation, review/debugging, diagnosis, and PR drafting
+- Integration with BRAINFROG.md project memory/guidelines
+- Token usage and cost tracking (Anthropic API metrics)
+- Support for @file context pinning
 """
 from __future__ import annotations
 
@@ -15,6 +16,45 @@ from typing import Any, Dict, List, Optional
 import anthropic
 
 DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+
+
+@dataclass
+class UsageStats:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    requests_count: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def cost_usd(self) -> float:
+        # Anthropic Claude 3.5/Sonnet 5 pricing: $3.00/M in, $15.00/M out
+        return (self.input_tokens * 3.0 / 1_000_000) + (self.output_tokens * 15.0 / 1_000_000)
+
+
+class UsageTracker:
+    def __init__(self) -> None:
+        self.session = UsageStats()
+        self.last_task = UsageStats()
+
+    def record(self, inp: int, out: int) -> None:
+        self.session.input_tokens += inp
+        self.session.output_tokens += out
+        self.session.requests_count += 1
+        self.last_task.input_tokens += inp
+        self.last_task.output_tokens += out
+        self.last_task.requests_count += 1
+
+    def reset_task(self) -> UsageStats:
+        prev = self.last_task
+        self.last_task = UsageStats()
+        return prev
+
+
+# Global usage tracking singleton
+usage_tracker = UsageTracker()
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
@@ -39,21 +79,40 @@ class PlanStep:
 
 
 class System2Client:
-    def __init__(self, model: str = DEFAULT_MODEL, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        model: str = DEFAULT_MODEL,
+        api_key: Optional[str] = None,
+        guidelines: str = "",
+    ) -> None:
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
+        self.guidelines = guidelines
+
+    def _apply_guidelines(self, system: str) -> str:
+        if self.guidelines.strip():
+            return f"{system}\n\n[Project Guidelines & Memory (from BRAINFROG.md)]\n{self.guidelines.strip()}"
+        return system
 
     def _call(self, system: str, user: str, max_tokens: int = 4000) -> str:
+        full_system = self._apply_guidelines(system)
         resp = self.client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
-            system=system,
+            system=full_system,
             messages=[{"role": "user", "content": user}],
         )
+        if hasattr(resp, "usage") and resp.usage:
+            usage_tracker.record(
+                getattr(resp.usage, "input_tokens", 0),
+                getattr(resp.usage, "output_tokens", 0),
+            )
         return "".join(b.text for b in resp.content if b.type == "text")
 
     # -- 1. planning --------------------------------------------------
-    def plan_task(self, task: str, repo_tree: str) -> List[PlanStep]:
+    def plan_task(
+        self, task: str, repo_tree: str, pinned_files: Optional[Dict[str, str]] = None
+    ) -> List[PlanStep]:
         system = (
             "You are a senior software engineer planning a small, safe change. "
             "Break the task into 1-4 concrete code modification steps. Each step must touch or create specific files. "
@@ -62,13 +121,23 @@ class System2Client:
             '{"steps": [{"id": "1", "description": "...", "files": ["path/a.py"]}]}. '
             "Keep steps small and independently testable. No prose outside the JSON."
         )
-        user = f"Task:\n{task}\n\nRepository file tree:\n{repo_tree}"
-        raw = self._call(system, user, max_tokens=1500)
+        user_parts = [f"Task:\n{task}\n\nRepository file tree:\n{repo_tree}"]
+        if pinned_files:
+            user_parts.append(
+                f"\nUser explicitly pinned files:\n{json.dumps(pinned_files, indent=2)}"
+            )
+        raw = self._call(system, "\n".join(user_parts), max_tokens=1500)
         data = _extract_json(raw)
         return [PlanStep(**s) for s in data["steps"]]
 
     # -- 2. writing code ------------------------------------------------
-    def write_code(self, step: PlanStep, task: str, file_contents: Dict[str, str]) -> Dict[str, str]:
+    def write_code(
+        self,
+        step: PlanStep,
+        task: str,
+        file_contents: Dict[str, str],
+        pinned_files: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, str]:
         """Returns {path: new_full_file_content} for every file touched."""
         system = (
             "You are a senior software engineer implementing one planned step. "
@@ -79,10 +148,14 @@ class System2Client:
             "Return the COMPLETE new content for each file you change, not a diff. "
             "Only include files you actually changed. No prose outside the JSON."
         )
+        all_context = dict(file_contents)
+        if pinned_files:
+            all_context.update(pinned_files)
+
         user = (
             f"Overall task:\n{task}\n\n"
             f"Current step:\n{step.description}\n\n"
-            f"Current file contents:\n{json.dumps(file_contents, indent=2)}"
+            f"Current file contents:\n{json.dumps(all_context, indent=2)}"
         )
         raw = self._call(system, user, max_tokens=8192)
         data = _extract_json(raw)
@@ -104,18 +177,13 @@ class System2Client:
             f"Current file contents:\n{json.dumps(file_contents, indent=2)}\n\n"
             f"Test output (most recent run):\n{test_output[-4000:]}"
         )
-        raw = self._call(system, user, max_tokens=6000)
+        raw = self._call(system, user, max_tokens=8192)
         data = _extract_json(raw)
         return data["files"]
 
     # -- 3b. diagnose only, no code changes ------------------------------
     def diagnose(self, user_prompt: str, focus_files: Dict[str, str], domain: str) -> str:
-        """For change_type == 'question_only': explain, don't edit.
-
-        Used when the scope gate decided the user asked a question
-        ("why can't I log in?") rather than requested a change. Returns
-        prose, not JSON — there's nothing to apply to disk here.
-        """
+        """For change_type == 'question_only': explain, don't edit."""
         system = (
             "You are a senior engineer helping a teammate understand their own "
             f"codebase. They asked a question likely related to the '{domain}' area. "
@@ -126,7 +194,7 @@ class System2Client:
             "guessing. Do not propose a code change unless asked."
         )
         user = f"Question:\n{user_prompt}\n\nRelevant files:\n{json.dumps(focus_files, indent=2)}"
-        return self._call(system, user, max_tokens=1500)
+        return self._call(system, user, max_tokens=2000)
 
     # -- 4. PR copy -------------------------------------------------
     def draft_pr(self, task: str, changed_files: List[str], test_summary: str) -> Dict[str, str]:

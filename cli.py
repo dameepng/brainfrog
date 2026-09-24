@@ -1,10 +1,11 @@
 """BrainFrog CLI — Dual-System Coding Agent (Jev System 1 + Claude System 2).
 
-Can be used in two modes:
-1. Interactive REPL (like Claude Code / OpenCode):
-       brainfrog
-2. Single-shot command:
-       brainfrog "Add currency formatter utility in ui module"
+Equipped with 5 Killer Features:
+1. /undo & /diff — Git-native safety net to inspect diffs and revert unwanted AI changes
+2. BRAINFROG.md — Project memory and custom rules injected into Claude's prompt
+3. @file Context Pinning — Mention @filename in prompts to inject direct file context
+4. !command Terminal Passthrough — Execute shell commands inside REPL without leaving
+5. /cost & /stats — Transparent token usage and API cost tracker
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 
 console = Console()
@@ -126,7 +128,7 @@ def execute_task(
     claude_model: Optional[str] = None,
     test_cmd: Optional[str] = None,
     module_map: Optional[str] = None,
-    min_domain_confidence: float = 0.55,
+    min_domain_confidence: float = 0.45,
     auto_pr: bool = False,
     pr_risk_ceiling: str = "medium",
     max_retries: int = 3,
@@ -135,7 +137,7 @@ def execute_task(
     from config import get_system1
     from modules import load_module_map
     from orchestrator import Orchestrator, RunConfig
-    from system2.claude_client import System2Client
+    from system2.claude_client import System2Client, usage_tracker
 
     if not (repo_dir / ".git").exists():
         console.print(f"[bold red]Error:[/bold red] {repo_dir} is not a git repository.", style="red")
@@ -182,7 +184,17 @@ def execute_task(
     for r in results:
         badge = "[green]SUCCESS[/green]" if r.outcome in ("diagnosed", "opened_pr", "drafted_pr") else f"[yellow]{r.outcome.upper()}[/yellow]"
         console.print(f"  • Step {r.step.id} ({r.step.description}): {badge} (retries: {r.retries})")
-    console.print()
+
+    # Turn token & cost footer
+    task_usage = usage_tracker.reset_task()
+    if task_usage.total_tokens > 0:
+        console.print(
+            f"[dim]⚡ Turn tokens: {task_usage.input_tokens:,} in / {task_usage.output_tokens:,} out "
+            f"({task_usage.total_tokens:,} total) | Est. Cost: ${task_usage.cost_usd:.4f}[/dim]\n"
+        )
+    else:
+        console.print()
+
     return 0
 
 
@@ -195,13 +207,15 @@ def run_interactive(
     claude_model: Optional[str] = None,
     test_cmd: Optional[str] = None,
     module_map: Optional[str] = None,
-    min_domain_confidence: float = 0.55,
+    min_domain_confidence: float = 0.45,
     auto_pr: bool = False,
     pr_risk_ceiling: str = "medium",
     max_retries: int = 3,
 ) -> None:
     """Full-featured interactive TUI session."""
     from modules import load_module_map
+    from orchestrator import load_project_guidelines
+    from system2.claude_client import usage_tracker
 
     repo_dir = find_git_root(initial_repo)
     active_test_cmd = test_cmd or detect_default_test_cmd(repo_dir)
@@ -210,32 +224,42 @@ def run_interactive(
 
     def print_banner() -> None:
         branch = get_git_branch(repo_dir)
-        domains = load_module_map(repo_dir, Path(module_map) if module_map else None)
+        domains = load_module_map(repo_dir, Path(module_map) if module_map else None, auto_create=False)
         domain_list = ", ".join(domains.keys()) if domains else "(auto-discovered)"
+        has_rules = bool(load_project_guidelines(repo_dir))
 
         banner_content = (
-            f"[bold green]🐸 BrainFrog[/bold green] [dim]v0.1.0 — Dual-System Coding Agent[/dim]\n\n"
+            f"[bold green]🐸 BrainFrog[/bold green] [dim]v0.2.0 — Dual-System Coding Agent[/dim]\n\n"
             f"[bold]Workspace[/bold]  : [cyan]{repo_dir}[/cyan] [dim](git: {branch})[/dim]\n"
             f"[bold]System 1[/bold]   : [magenta]{active_backend}[/magenta] [dim](Jev gatekeeper)[/dim]\n"
             f"[bold]System 2[/bold]   : [blue]{active_model}[/blue] [dim](Claude generation)[/dim]\n"
             f"[bold]Domains[/bold]    : [yellow]{domain_list}[/yellow]\n"
-            f"[bold]Test Cmd[/bold]   : [dim]`{active_test_cmd}`[/dim]\n\n"
-            f"[dim]Ketik perintah/pertanyaan Anda, ketik [bold]/help[/bold] untuk menu, atau [bold]/exit[/bold] untuk keluar.[/dim]"
+            f"[bold]Memory[/bold]     : [green]Active (BRAINFROG.md)[/green]" if has_rules else "[bold]Memory[/bold]     : [dim]None (type /rules to add)[/dim]"
+        )
+        banner_content += (
+            f"\n[bold]Test Cmd[/bold]   : [dim]`{active_test_cmd}`[/dim]\n\n"
+            f"[dim]Ketik prompt Anda (bisa gunakan @file), !perintah shell, /help untuk menu, atau /exit.[/dim]"
         )
         console.print(Panel(banner_content, border_style="green", box=box.ROUNDED))
 
     def show_help() -> None:
-        table = Table(title="BrainFrog Slash Commands", box=box.SIMPLE_HEAVY)
+        table = Table(title="BrainFrog Slash Commands & Shortcuts", box=box.SIMPLE_HEAVY)
         table.add_column("Command", style="cyan", no_wrap=True)
         table.add_column("Description", style="white")
         table.add_row("/help, /?", "Show this help table")
+        table.add_row("/undo", "Revert last change or commit cleanly via Git")
+        table.add_row("/diff", "View colored git diff of recent changes")
+        table.add_row("/rules, /memory", "View or create BRAINFROG.md project guidelines")
+        table.add_row("/cost, /stats", "View session token usage and estimated API cost")
+        table.add_row("/init [stack]", "Auto-generate modules.json (web|android|node|python)")
         table.add_row("/status", "Show current workspace & agent status")
         table.add_row("/repo <path>", "Switch target workspace repository")
         table.add_row("/test-cmd <cmd>", "Change test command (e.g. /test-cmd gradlew test)")
-        table.add_row("/backend <mock|typesafe|auto>", "Switch System 1 backend")
+        table.add_row("/backend <name>", "Switch System 1 backend (mock|typesafe|auto)")
         table.add_row("/model <name>", "Switch Claude model (e.g. claude-sonnet-5)")
         table.add_row("/domains", "List detected domain modules and paths")
-        table.add_row("/init [stack]", "Auto-generate modules.json (web|android|node|python)")
+        table.add_row("!command", "Run terminal shell command directly (e.g. !start index.html)")
+        table.add_row("@filename", "Pin file context in prompt (e.g. @app.js)")
         table.add_row("/clear", "Clear terminal screen")
         table.add_row("/exit, /quit", "Exit BrainFrog session")
         console.print(table)
@@ -254,6 +278,18 @@ def run_interactive(
         if not prompt:
             continue
 
+        # Shell command passthrough: !cmd or $cmd
+        if prompt.startswith("!") or prompt.startswith("$"):
+            cmd = prompt[1:].strip()
+            if cmd:
+                console.print(f"[dim]Running shell:[/dim] [bold cyan]{cmd}[/bold cyan]\n")
+                try:
+                    subprocess.run(cmd, shell=True, cwd=repo_dir)
+                except Exception as e:
+                    console.print(f"[red]Error running command:[/red] {e}")
+                console.print()
+            continue
+
         # Slash Commands
         lower = prompt.lower()
         if lower in ("/exit", "/quit", "exit", "quit"):
@@ -268,6 +304,64 @@ def run_interactive(
             continue
         elif lower == "/status":
             print_banner()
+            continue
+        elif lower == "/undo":
+            # 1. Check uncommitted changes first
+            status = subprocess.run(["git", "status", "--porcelain"], cwd=repo_dir, capture_output=True, text=True).stdout.strip()
+            if status:
+                subprocess.run(["git", "restore", "."], cwd=repo_dir)
+                subprocess.run(["git", "clean", "-fd"], cwd=repo_dir)
+                console.print("[bold green]✓ Reverted uncommitted changes! Working directory restored.[/bold green]")
+            else:
+                # 2. Reset last commit
+                log = subprocess.run(["git", "log", "-1", "--oneline"], cwd=repo_dir, capture_output=True, text=True).stdout.strip()
+                if log:
+                    subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=repo_dir, capture_output=True, text=True)
+                    console.print(f"[bold green]✓ Reverted commit:[/bold green] {log}")
+                    console.print("[green]Repository cleanly restored to previous commit![/green]")
+                else:
+                    console.print("[yellow]No commits found to undo.[/yellow]")
+            continue
+        elif lower == "/diff":
+            diff = subprocess.run(["git", "diff", "HEAD"], cwd=repo_dir, capture_output=True, text=True).stdout.strip()
+            if not diff:
+                diff = subprocess.run(["git", "diff", "HEAD~1"], cwd=repo_dir, capture_output=True, text=True).stdout.strip()
+            if diff:
+                console.print(Panel(Syntax(diff, "diff", theme="monokai", line_numbers=True), title="Git Diff", box=box.ROUNDED))
+            else:
+                console.print("[dim]No diffs found (working tree clean).[/dim]")
+            continue
+        elif lower in ("/cost", "/stats", "/tokens"):
+            s = usage_tracker.session
+            table = Table(title="BrainFrog Session Metrics & API Cost", box=box.ROUNDED)
+            table.add_column("Metric", style="cyan")
+            table.add_column("Value", style="green", justify="right")
+            table.add_row("Input Tokens", f"{s.input_tokens:,}")
+            table.add_row("Output Tokens", f"{s.output_tokens:,}")
+            table.add_row("Total Tokens", f"{s.total_tokens:,}")
+            table.add_row("API Requests", f"{s.requests_count:,}")
+            table.add_row("Est. Cost (USD)", f"${s.cost_usd:.4f}")
+            console.print(table)
+            continue
+        elif lower in ("/rules", "/memory"):
+            rules = load_project_guidelines(repo_dir)
+            if rules:
+                console.print(Panel(Markdown(rules), title="Project Rules (BRAINFROG.md)", box=box.ROUNDED, border_style="cyan"))
+            else:
+                console.print("[yellow]No BRAINFROG.md found in this project.[/yellow]")
+                try:
+                    create = console.input("Create a template BRAINFROG.md? (y/n): ").strip().lower()
+                    if create == "y":
+                        tmpl = (
+                            "# Project Guidelines & Conventions\n\n"
+                            "- Code Style: Clean, modern, and self-documenting.\n"
+                            "- UI Theme: Dark mode preferred.\n"
+                            "- Architecture: Follow clean architecture and single responsibility.\n"
+                        )
+                        (repo_dir / "BRAINFROG.md").write_text(tmpl, encoding="utf-8")
+                        console.print("[green]Created BRAINFROG.md template![/green]")
+                except Exception:
+                    pass
             continue
         elif lower.startswith("/repo"):
             parts = prompt.split(maxsplit=1)
@@ -307,7 +401,7 @@ def run_interactive(
                 console.print(f"Current model: {active_model}")
             continue
         elif lower == "/domains":
-            domains = load_module_map(repo_dir, Path(module_map) if module_map else None)
+            domains = load_module_map(repo_dir, Path(module_map) if module_map else None, auto_create=False)
             table = Table(title="Configured Scope Domains", box=box.SIMPLE)
             table.add_column("Domain", style="cyan")
             table.add_column("Description", style="white")
@@ -362,8 +456,8 @@ def main() -> int:
     p.add_argument("--pr-risk-ceiling", choices=["low", "medium", "high"], default="medium")
     p.add_argument("--max-retries", type=int, default=3)
     p.add_argument("--module-map", default=None, help="Path to custom modules.json")
-    p.add_argument("--min-domain-confidence", type=float, default=0.55)
-    p.add_argument("-v", "--version", action="version", version="BrainFrog 0.1.0")
+    p.add_argument("--min-domain-confidence", type=float, default=0.45)
+    p.add_argument("-v", "--version", action="version", version="BrainFrog 0.2.0")
 
     args = p.parse_args()
 
@@ -374,7 +468,6 @@ def main() -> int:
     chosen_task = args.task or args.flag_task
 
     if chosen_task:
-        # Single-shot mode
         active_test_cmd = args.test_cmd or detect_default_test_cmd(repo_dir)
         return execute_task(
             task=chosen_task,
@@ -389,7 +482,6 @@ def main() -> int:
             max_retries=args.max_retries,
         )
     else:
-        # Interactive mode
         run_interactive(
             initial_repo=repo_dir,
             backend=args.backend,

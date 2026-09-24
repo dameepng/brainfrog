@@ -157,7 +157,7 @@ class MockSystemOne(SystemOneClient):
         return Answer(choice=options[0], confidence=max(0.3, min(conf, 0.7)))
 
     def _answer_score(self, key: str, state: Dict[str, Any], q: ScoreQuestion) -> Answer:
-        scale = q.scale
+        scale = list(q.scale.keys()) if isinstance(q.scale, dict) else list(q.scale)
         if key in ("diff_risk", "pr_risk"):
             lines = int(state.get("diff_lines_changed", 0))
             files = int(state.get("files_changed", 1))
