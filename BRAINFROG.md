@@ -1429,9 +1429,242 @@ Jika terjadi anomali atau tes gagal, developer dapat langsung membuka file `diag
 
 ---
 
+## Product Thinking
+
+Bagian ini mengatur bagaimana agent dan developer merancang, memprioritaskan, dan menyempurnakan fitur BrainFrog agar benar-benar memberikan nilai nyata bagi pengembang perangkat lunak (**User Value**), bukan sekadar menambahkan kompleksitas kode atau fitur baru demi kecanggihan teknologi.
+
+Prinsip utamanya adalah **memecahkan masalah nyata pengguna dengan friksi seminimal mungkin**. CLI yang hebat tidak dinilai dari banyaknya subcommand atau panjangnya keluaran teks, melainkan dari seberapa cepat dan tanpa hambatan alat tersebut membantu pengguna menyelesaikan tugas rekayasanya.
+
+Pendekatan ini berpegang pada prinsip *User Needs First* dari GOV.UK Service Manual, pemisahan ruang masalah (*problem space*) dan solusi (*solution space*) dari Atlassian Product Discovery, serta prinsip *Heuristik Usabilitas dan Progressive Disclosure* dari Nielsen Norman Group (NN/g) yang disesuaikan secara proporsional untuk interaksi antarmuka baris perintah (CLI).
+
+---
+
+### 1. Berangkat dari Tujuan dan Hambatan Pengguna (Outcome-Driven)
+
+Agent dilarang merespons permintaan fitur atau ide baru hanya dari sudut pandang implementasi teknis. Setiap perubahan harus berakar pada pemahaman apa yang ingin dicapai pengguna dan di mana letak friksinya:
+
+```
+[Permintaan Pengguna / Ide Fitur]
+                 │
+                 ▼
+    ┌─────────────────────────┐
+    │  Apakah tugas kecil &   │──── Ya ──► [Eksekusi Langsung]
+    │   jelas tujuannya?      │            Kerjakan tanpa discovery berlebihan.
+    └─────────────────────────┘
+                 │ Tidak
+                 ▼
+[Eksplorasi Ruang Masalah (Problem Space)]
+  • Apa *job to be done* yang sedang diselesaikan pengguna?
+  • Hambatan apa yang mereka alami pada alur kerja saat ini?
+  • Apa dampak jika masalah ini tidak diselesaikan?
+                 │
+                 ▼
+[Perancangan Solusi Minimal (Solution Space)]
+  • Apa intervensi terkecil yang menghilangkan hambatan tersebut?
+  • Hindari fitur tambahan yang tidak diminta (YAGNI).
+```
+
+1. **Triase Discovery: Tugas Kecil vs Keputusan Produk Struktural:**
+   - **Tugas Langsung (Direct Execution):** Permintaan yang spesifik dan jelas (contoh: *"tambahkan shortcut /diff untuk melihat perubahan git"* atau *"perbaiki typo pada pesan error"*). Kerjakan langsung tanpa memaksakan analisis produk atau wawancara panjang.
+   - **Keputusan Produk Struktural (Discovery Ringan):** Perubahan yang mengubah alur navigasi CLI, memperkenalkan konsep mental baru, atau menambah langkah konfirmasi yang mempengaruhi setiap sesi. Agent wajib membedah kebutuhan di balik permintaan tersebut sebelum mengubah alur.
+
+2. **Membedakan Keinginan (*Want*) dari Kebutuhan Nyata (*Need*):**
+   - Pengguna sering meminta solusi teknis tertentu (misal: *"buatkan file konfigurasi JSON baru dengan 15 opsi"*), padahal kebutuhan aslinya adalah *"saya tidak ingin mengetik ulang perintah tes setiap kali membuka CLI"*.
+   - Temukan akar hambatan (*underlying friction*) dan tawarkan solusi paling elegan dengan beban kognitif terendah.
+
+---
+
+### 2. Kenali Pengguna dan Konteks Lingkungan Terminal
+
+BrainFrog adalah alat bantu developer yang beroperasi di dalam terminal lokal. Pengalaman pengguna (UX) terminal memiliki karakteristik dan keterbatasan fisik yang unik:
+
+1. **Konteks Alur Kerja Developer:**
+   - Developer menggunakan BrainFrog di tengah siklus berpikir coding yang intens. Mereka membutuhkan bantuan yang cepat, fokus, dan tidak merusak alur konsentrasi (*developer flow*).
+   - CLI sering dijalankan di dalam split-terminal yang sempit (misal panel bawah atau samping di VS Code), jendela terminal ukuran standar (80x24 kolom), atau sesi remote SSH dengan latensi tinggi.
+
+2. **Keterbatasan dan Aksesibilitas Terminal:**
+   - **Lebar Layar Terbatas:** Teks panjang atau tabel lebar akan terlipat (*wrap*) dan menjadi tidak terbaca jika melebihi lebar layar. Desain output harus ramah terhadap lebar minimal 80 kolom.
+   - **Dukungan Warna yang Bervariasi:** Jangan mengandalkan warna sebagai satu-satunya penyampai status. Jika environment pengguna menyetel `NO_COLOR=1` atau menggunakan *dumb terminal*, status penting harus tetap terbaca jelas melalui teks dan simbol (misal: `● Ready`, `[PASS]`, `[FAIL]`).
+   - **Latensi Jaringan & Panggilan Model:** Pemanggilan LLM memerlukan waktu beberapa detik. Sistem harus selalu memberikan indikasi visual langsung bahwa proses sedang berjalan, sehingga pengguna tidak mengira aplikasi macet (*hang*).
+
+---
+
+### 3. Membedakan Bukti (*Evidence*) dari Asumsi (*Assumption*)
+
+Dalam merancang produk, asumsi yang tidak diverifikasi adalah sumber utama pemborosan rekayasa (*wasteful engineering*). Agent harus membedakan fakta yang terbukti dari perkiraan subjektif:
+
+| Kategori | Definisi & Karakteristik | Sikap Operasional Agent |
+| :--- | :--- | :--- |
+| **Bukti (*Evidence*)** | Fakta teramati dari perilaku pengguna, bug report riil, log error aktual, atau konvensi standar ekosistem. | Gunakan sebagai fondasi keputusan desain dan implementasi fitur. |
+| **Asumsi (*Assumption*)** | Dugaan tentang preferensi pengguna (misal: *"pengguna pasti lebih suka format output YAML dibanding JSON"*). | Nyatakan secara terbuka sebagai asumsi. Jika berdampak besar, uji dengan perubahan terkecil. |
+
+1. **Kapan Mengajukan Pertanyaan Klarifikasi:**
+   - Ajukan pertanyaan kepada pengguna **HANYA JIKA** keputusan produk memiliki dampak permanen atau mengubah paradigma interaksi utama, sementara buktinya ambigu.
+   - Formulasikan pertanyaan yang tajam, langsung pada opsi trade-off konkrit, bukan pertanyaan terbuka yang membingungkan pengguna.
+
+2. **Validasi Asumsi dengan Solusi Irisan Terkecil (*Tracer Bullet*):**
+   - Sebelum membangun sistem kompleks (misal membuat sistem plugin yang rumit), buat implementasi minimal yang dapat langsung dicoba dan dievaluasi efektivitasnya.
+
+---
+
+### 4. Prioritisasi Pragmatis Tanpa Formula Pseudo-Objektif
+
+Agent dilarang menggunakan formula prioritas yang rumit (seperti scoring RICE atau WSJF buatan) dengan angka-angka arbitrer yang seolah-olah objektif padahal tidak didukung data nyata. Gunakan penalaran kualitatif berbasis empat dimensi utama:
+
+```
+                          [Matriks Prioritisasi Pragmatis]
+                                         │
+        ┌────────────────────────────────┼────────────────────────────────┐
+        ▼                                ▼                                ▼
+  [User Value]                  [Problem Frequency]              [Cost & Friction]
+Seberapa besar manfaat        Seberapa sering masalah         Berapa kompleksitas kode
+atau penghematan waktu        ini dihadapi dalam alur         dan beban kognitif baru
+yang dihasilkan?              kerja sehari-hari?              yang ditambahkan?
+```
+
+1. **Empat Dimensi Evaluasi:**
+   - **Manfaat Pengguna (*User Value*):** Apakah perubahan ini menghilangkan blocker kritis, menghemat waktu yang signifikan, atau mencegah kesalahan fatal?
+   - **Frekuensi Masalah (*Problem Frequency*):** Apakah masalah ini terjadi pada setiap sesi tugas (seperti efisiensi autocomplete prompt) atau hanya sekali saat inisialisasi awal proyek?
+   - **Risiko & Reversibilitas (*Risk*):** Apakah perubahan ini berpotensi memecah kompatibilitas lama (*breaking changes*) atau mudah dibatalkan jika pengguna tidak menyukainya?
+   - **Biaya & Beban Pemeliharaan (*Cost & Friction*):** Berapa baris kode yang harus ditambah, dan apakah fitur baru ini membuat antarmuka menjadi lebih rumit dipelajari?
+
+2. **Aturan Eliminasi Kompleksitas Prematur:**
+   - Jika sebuah fitur memiliki biaya implementasi tinggi, frekuensi penggunaan rendah, dan manfaatnya masih berupa spekulasi: **Tolak atau tunda fitur tersebut (YAGNI).**
+
+---
+
+### 5. Desain Alur Kerja End-to-End yang Terpadu (The CLI User Journey)
+
+Desain produk yang baik memperlakukan CLI sebagai satu perjalanan pengguna yang utuh, dari pembukaan pertama hingga penyelesaian tugas:
+
+```
+[1. Onboarding] ──► [2. Prompting] ──► [3. Progress] ──► [4. Review & Outcome] ──► [5. Recovery]
+ Banner ringkas,     Autocomplete @,    Status visual,    Diff jelas, ringkasan     /undo instan,
+ status kesiapan     petunjuk inline    fase jelas        token & biaya            retry terarah
+```
+
+1. **Onboarding & Orientasi Awal (First Impression):**
+   - Saat CLI dibuka, berikan status kesiapan instan (`● Ready`).
+   - Tampilkan konteks aktif yang esensial: mode kerja, status memori/aturan proyek, dan perintah tes aktif. Hindari banner berukuran raksasa yang menelan seluruh area terminal.
+
+2. **Input & Komposisi Prompt (Recognition over Recall):**
+   - Bantu pengguna mengingat perintah melalui autocomplete cerdas untuk slash command (`/help`, `/undo`, `/diff`, `/stats`) dan penyebutan berkas (`@file`).
+   - Sediakan petunjuk inline yang redup dan tidak mengganggu (`@ file · / perintah · ! shell`).
+
+3. **Indikasi Progres (Visibility of System Status):**
+   - Selalu beri tahu pengguna apa yang sedang dilakukan sistem: klasifikasi scope oleh System 1, perencanaan oleh System 2, penulisan kode, atau eksekusi tes lokal.
+   - Jangan biarkan terminal membisu tanpa output saat menunggu inferensi LLM atau pengujian subprocess yang lama.
+
+4. **Penyajian Hasil & Ringkasan Tugas:**
+   - Tampilkan ringkasan yang jelas di akhir tugas (`=== Run Summary ===`): langkah mana yang berhasil, status pengujian, dan badge keberhasilan (`SUCCESS`, `FAIL`).
+   - Berikan transparansi penggunaan resource melalui footer token dan estimasi biaya per turn (`⚡ Turn tokens: ... | Est. Cost: $...`).
+
+5. **Penanganan Error & Pemulihan (Error Recovery & Freedom):**
+   - Jika terjadi kegagalan, jelaskan *apa yang salah* dan *apa yang dapat dilakukan pengguna selanjutnya*.
+   - Sediakan jalan keluar darurat yang mudah (*emergency exit*): batalkan langkah yang salah dengan `/undo`, bersihkan layar dengan `/clear`, atau keluar dengan `/exit`.
+
+6. **Konsistensi Kosakata Perintah (Consistency & Standards):**
+   - Gunakan kata kerja dan konvensi yang sudah umum di ekosistem CLI (`/help`, `/status`, `/diff`, `/exit`, `/undo`). Jangan menciptakan istilah baru yang tidak lazim jika sudah ada padanan standar.
+
+---
+
+### 6. Pengalaman CLI Cepat, Scannable, dan Progressive Disclosure
+
+Pengguna terminal memindai teks (*scanning*) secara cepat, bukan membaca kata per kata seperti novel:
+
+1. **Rasio Sinyal terhadap Kebisingan (Signal-to-Noise Ratio):**
+   - Maksimalkan informasi bernilai operasional tinggi (*signal*) dan minimalkan teks dekoratif atau basa-basi (*noise*).
+   - Hindari border tebal ganda, kotak berlebihan, atau penjelasan paragraf panjang pada layar interaktif utama.
+
+2. **Prinsip *Progressive Disclosure* (Nielsen Norman Group):**
+   - Tampilkan informasi paling penting dan relevan di layar utama secara ringkas.
+   - Tunda rincian mendalam hingga pengguna secara eksplisit memintanya melalui perintah khusus (contoh: isi lengkap aturan ditampilkan via `/rules`, statistik sesi via `/stats`, detail diff via `/diff`, dan log debug via `--verbose`).
+
+3. **Ketahanan Visual (*Visual Resilience*):**
+   - Pastikan teks wrap dengan anggun tanpa merusak tata letak saat terminal dipersempit.
+   - Gunakan indentasi dan pemisah visual sederhana alih-alih karakter tabel ASCII yang kaku.
+
+---
+
+### 7. Definisi Hasil yang Diharapkan Sebelum Membangun
+
+Sebelum menulis kode untuk fitur baru, definisikan hasil yang diharapkan (*expected user outcome*) dalam bentuk pernyataan perilaku yang dapat diuji:
+
+1. **Formulasi Indikator Keberhasilan Produk:**
+   - *"Setelah fitur @file autocomplete ditambahkan, pengguna dapat memilih file dalam 2 ketukan tombol tanpa harus mengingat atau mengetik path lengkap."*
+   - *"Dengan perintah /undo, pengguna dapat membatalkan langkah salah dalam waktu kurang dari 2 detik tanpa risiko kehilangan riwayat commit kerja utama."*
+
+2. **Validasi Berbasis Realitas Penggunaan:**
+   - Uji fitur menggunakan skenario tugas nyata di repositori aktual.
+   - **Dilarang keras mengarang metrik fiktif** (seperti mengklaim "meningkatkan produktivitas pengembang sebesar 42%") atau membuat persona pengguna khayalan. Validasi harus bertumpu pada observasi alur kerja nyata dan umpan balik pengguna langsung.
+
+---
+
+### 8. Iterasi Pasca-Rilis: Simplifikasi dan Pemangkasan Alur (Pruning)
+
+Evolusi produk yang sehat mencakup keberanian untuk menghapus fitur yang tidak efektif atau membingungkan pengguna:
+
+1. **Deteksi Hambatan dan Kebingungan:**
+   - Perhatikan apakah pengguna sering salah mengetik perintah tertentu, sering memicu pesan error yang sama, atau mengabaikan opsi konfigurasi yang rumit.
+   - Jika sebuah alur membutuhkan penjelasan dokumentasi yang berbelit-belit, kemungkinan besar desain alur tersebut cacat secara produk.
+
+2. **Pemangkasan Alur yang Membebani (*Pruning Dead Weight*):**
+   - Jangan ragu untuk menyederhanakan opsi CLI yang berlebihan, menggabungkan flag yang tumpang tindih, atau menghapus perintah yang tidak terpakai demi menjaga kesederhanaan dan kecepatan alat.
+
+---
+
+### 9. Checklist Review Produk
+
+Sebelum agent merilis fitur baru atau mengubah alur interaksi di repositori BrainFrog, verifikasi checklist berikut:
+
+| No | Poin Pemeriksaan Usabilitas & Produk | Status Validasi |
+| :---: | :--- | :---: |
+| 1 | Apakah perubahan berangkat dari hambatan/kebutuhan nyata pengguna, bukan sekadar penambahan fitur teknis tanpa urgensi? | [ ] |
+| 2 | Apakah alur kerja dirancang end-to-end (orientasi awal, input, progres, hasil, penanganan error, dan pemulihan)? | [ ] |
+| 3 | Apakah antarmuka mematuhi prinsip *Recognition over Recall* melalui autocomplete dan petunjuk inline yang jelas? | [ ] |
+| 4 | Apakah informasi yang disajikan mudah dipindai (*scannable*) dan menerapkan *Progressive Disclosure* untuk rincian sekunder? | [ ] |
+| 5 | Apakah tata letak CLI tetap rapi dan terbaca jelas pada terminal sempit (80 kolom) serta lingkungan tanpa warna (`NO_COLOR`)? | [ ] |
+| 6 | Apakah terdapat mekanisme pembatalan atau jalan keluar yang aman (*emergency exit* / `/undo`) jika terjadi kesalahan langkah? | [ ] |
+| 7 | Apakah kosakata perintah konsisten dengan standar ekosistem developer tanpa jargon internal yang membingungkan? | [ ] |
+
+---
+
+### 10. Contoh Nyata Keputusan Produk pada Repositori BrainFrog
+
+Berikut adalah contoh skenario keputusan produk nyata yang diambil dalam perancangan antarmuka BrainFrog:
+
+#### Kasus Keputusan Produk:
+*“Apakah informasi status `Memory` (status file `BRAINFROG.md`) dan `Test Cmd` (perintah pengujian otomatis) perlu selalu terlihat di layar awal terminal atau cukup disembunyikan dan diakses via perintah `/status`?”*
+
+#### 1. Analisis Kebutuhan & Hambatan Pengguna:
+- **Kebutuhan Pengguna:** Developer perlu kepastian apakah aturan proyek (`BRAINFROG.md`) terdeteksi aktif dan perintah pengujian apa yang akan dijalankan oleh agent, agar tidak terjadi eksekusi yang salah atau pengujian yang merusak lingkungan.
+- **Hambatan pada Desain Lama:** Versi lama menampilkan kotak informasi berukuran besar dengan banyak baris teks bantuan, sehingga prompt input terdorong ke bawah dan ruang pandang terminal menjadi sempit.
+- **Risiko jika Disembunyikan Penuh (Hanya via `/status`):** Pengguna berulang kali bertanya-tanya apakah agent membaca pedoman proyek atau menggunakan model mock, sehingga terpaksa mengetik `/status` di setiap awal sesi.
+
+#### 2. Evaluasi Trade-Off:
+- **Opsi A (Layar Bersih Total):** Hanya logo kodok dan prompt input. *Kelebihan:* Sangat bersih. *Kekurangan:* Nol visibilitas status sistem (melanggar Usability Heuristic #1 NN/g).
+- **Opsi B (Kotak Info Lengkap):** Menampilkan kotak panel dengan path lengkap dan daftar perintah panjang. *Kelebihan:* Informatif. *Kekurangan:* Boros ruang vertikal, membebani terminal split (melanggar Usability Heuristic #8 NN/g).
+- **Opsi C (Satu Baris Metadata Ringkas & Progressive Disclosure):** Menampilkan ringkasan status dalam satu baris teks abu-abu redup di bawah wordmark, sementara detail isi lengkap dialihkan ke sub-perintah.
+
+#### 3. Keputusan Produk yang Diterapkan:
+Pilih **Opsi C**. Implementasikan satu baris ringkasan status sistem yang padat informasi namun tetap hemat ruang vertikal:
+```text
+  mode: agentic  ·  memory: active (BRAINFROG.md)  ·  test: pytest
+```
+- **Rincian Mendalam Dialihkan (Progressive Disclosure):**
+  - Untuk melihat isi lengkap aturan proyek, pengguna dapat mengetik `/rules` atau `/memory`.
+  - Untuk melihat rincian konfigurasi modul dan domain, pengguna dapat memeriksa `modules.json` atau mengetik `/help`.
+  - Jika path atau teks terlalu panjang pada terminal sempit, teks dipotong secara anggun (*truncated*) tanpa merusak baris prompt.
+
+#### 4. Cara Memvalidasi Keputusan:
+- **Validasi Keterbacaan:** Buka CLI pada ukuran terminal 80 kolom dan verifikasi bahwa prompt input tetap berada di paruh atas layar tanpa tergulung (*scrolling*).
+- **Observasi Perilaku Pengguna:** Periksa apakah pengguna merasa nyaman langsung mengetik prompt tanpa kebingungan mengenai status memori atau perintah pengujian yang sedang aktif.
+
+---
+
 ## Referensi Riset & Literatur
 
-Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, retrieval, reliabilitas, keamanan, serta evaluasi dan observabilitas di repositori ini:
+Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, retrieval, reliabilitas, keamanan, evaluasi dan observabilitas, serta product thinking di repositori ini:
 
 ### Pilar System Design
 1. **Google Cloud Architecture Framework: System Design**
@@ -1584,6 +1817,26 @@ Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, retrieval, 
       - *Chapter 10 (Practical Alerting):* Prinsip pembedaan peringatan yang memerlukan tindakan pengguna vs informasi diagnostik latar belakang, serta pencegahan kebisingan telemetri (*telemetry noise*).
     - URL: `https://sre.google/sre-book/monitoring-distributed-systems/`
     - Tanggal Akses: 24 September 2026.
+
+### Pilar Product Thinking
+28. **GOV.UK Service Manual: Understanding User Needs & Agile Delivery Principles — Central Digital and Data Office, UK Government**
+    - Fokus: Prinsip mendasar memulai dari kebutuhan dan hambatan nyata pengguna (*user needs first*), observasi langsung konteks kerja pengguna daripada menanyakan fitur yang diinginkan, pengujian prototipe cepat (*throwaway prototypes*), serta desain inklusif/aksesibilitas sejak awal.
+    - URL: `https://www.gov.uk/service-manual/service-standard/point-1-understand-user-needs`
+    - Tanggal Akses: 24 September 2026.
+
+29. **Jira Product Discovery & Agile Prioritization — Atlassian**
+    - Fokus: Pemisahan ruang masalah (*problem space*) dari ruang solusi (*solution space*), validasi hipotesis melalui *continuous discovery*, dan kerangka prioritisasi berbasis bukti (*Impact vs Effort*, risiko, dan frekuensi masalah) tanpa memaksakan kuantifikasi semu.
+    - URL: `https://www.atlassian.com/agile/product-management/prioritization`
+    - Tanggal Akses: 24 September 2026.
+
+30. **10 Usability Heuristics for User Interface Design & Progressive Disclosure — Nielsen Norman Group (NN/g)**
+    - Fokus:
+      - *Jakob Nielsen's 10 Usability Heuristics (2020 Update):* Visibilitas status sistem (*visibility of system status*), kebebasan dan kontrol pengguna (*user control & emergency exits/undo*), pengenalan dibanding mengingat kembali (*recognition over recall*), dan desain minimalis ber-rasio sinyal tinggi.
+      - *Progressive Disclosure (Raluca Budiu):* Pengurangan beban kognitif dengan menampilkan informasi esensial terlebih dahulu dan menunda rincian sekunder ke interaksi sekunder.
+      - *Command-Line Interface Usability:* Mitigasi kelemahan klasik CLI melalui petunjuk konteks langsung dan autocomplete.
+    - URL: `https://www.nngroup.com/articles/ten-usability-heuristics/`
+    - Tanggal Akses: 24 September 2026.
+
 
 
 
