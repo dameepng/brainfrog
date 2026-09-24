@@ -360,11 +360,37 @@ PROVIDER_MODELS = {
 
 
 def select_model_interactive(provider: str, current_model: str) -> Optional[str]:
-    """Display an interactive numerical picker for available AI models."""
+    """Choose a model in a temporary dialog, leaving no table in the chat."""
     models = PROVIDER_MODELS.get(provider, [])
     if not models:
         console.print(f"[yellow]No predefined model list for provider '{provider}'.[/yellow]")
         return None
+
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            from prompt_toolkit.shortcuts import radiolist_dialog
+            from prompt_toolkit.styles import Style
+
+            values = [
+                (m_id, f"{m_name}  ·  {m_desc}" + ("  ● active" if m_id == current_model else ""))
+                for m_id, m_name, m_desc in models
+            ]
+            return radiolist_dialog(
+                title=f"Models · {provider}",
+                text="Choose a model (↑/↓, Enter; Esc to cancel)",
+                values=values,
+                default=current_model,
+                style=Style.from_dict({
+                    "dialog": "bg:#1e1e1e #eeeeee",
+                    "dialog.body": "bg:#1e1e1e #eeeeee",
+                    "dialog frame.label": "#00ff66 bold",
+                    "button.focused": "bg:#00ff66 #0a0a0a bold",
+                }),
+            ).run()
+        except (KeyboardInterrupt, EOFError):
+            return None
+        except ImportError:
+            pass
 
     table = Table(
         title=f"Pick Model — {provider.title()} Provider",
@@ -411,11 +437,37 @@ def select_model_interactive(provider: str, current_model: str) -> Optional[str]
 
 
 def select_provider_interactive(current_provider: str) -> Optional[str]:
-    """Display an interactive numerical picker for AI providers."""
+    """Choose a provider in a temporary dialog, leaving no table in the chat."""
     providers = [
         ("antigravity", "Google Antigravity", "Google Auth Login (No API key, free quota)"),
         ("claude", "Anthropic Claude", "Anthropic API Key (Pay per token)"),
     ]
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            from prompt_toolkit.shortcuts import radiolist_dialog
+            from prompt_toolkit.styles import Style
+
+            values = [
+                (p_id, f"{p_name}  ·  {p_desc}" + ("  ● active" if p_id == current_provider else ""))
+                for p_id, p_name, p_desc in providers
+            ]
+            return radiolist_dialog(
+                title="Providers",
+                text="Choose a provider (↑/↓, Enter; Esc to cancel)",
+                values=values,
+                default=current_provider,
+                style=Style.from_dict({
+                    "dialog": "bg:#1e1e1e #eeeeee",
+                    "dialog.body": "bg:#1e1e1e #eeeeee",
+                    "dialog frame.label": "#00ff66 bold",
+                    "button.focused": "bg:#00ff66 #0a0a0a bold",
+                }),
+            ).run()
+        except (KeyboardInterrupt, EOFError):
+            return None
+        except ImportError:
+            pass
+
     table = Table(
         title="Pick AI Provider",
         box=box.ROUNDED,
@@ -498,14 +550,10 @@ def run_interactive(
         from prompt_toolkit.shortcuts import PromptSession
         from prompt_toolkit.styles import Style
         from prompt_toolkit.history import FileHistory
-        from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout.containers import Window, ConditionalContainer
-        from prompt_toolkit.layout.controls import FormattedTextControl
-        from prompt_toolkit.filters import Condition
 
         pt_style = Style.from_dict({
-            "bottom-toolbar": "noinherit nobold bg:#0a0a0a #555555",
+            "bottom-toolbar": "noinherit nobold bg:#0a0a0a #808080",
             "pad": "bg:#0a0a0a",
             "accent": "#00FF66 bold bg:#0a0a0a",
             "panel-bg": "bg:#1e1e1e",
@@ -516,9 +564,7 @@ def run_interactive(
             "sc-key": "bold #eeeeee",
             "sc-desc": "#808080",
             "footer": "#555555 bg:#0a0a0a",
-            "prompt-name": "#00FF66 bold",
-            "prompt-repo": "#94a3b8",
-            "prompt-arrow": "#64748b bold",
+            "placeholder": "#808080 bg:#1e1e1e",
             "completion-menu.completion": "bg:#111518 #e2e8f0",
             "completion-menu.completion.current": "bg:#00FF66 #000000 bold",
             "completion-menu.meta.completion": "bg:#111518 #718096",
@@ -553,63 +599,27 @@ def run_interactive(
             complete_while_typing=True,
         )
 
-        is_first_turn = True
-
-        # Attach contiguous landing containers (metadata line + shortcuts) directly below prompt buffer
-        try:
-            c0 = session.app.layout.container.children[0].content
-
-            def get_landing_meta():
-                c_cols, c_rows = shutil.get_terminal_size(fallback=(95, 35))
-                c_panel_w = max(40, min(80, int(c_cols * 0.70)))
-                c_margin = max(0, (c_cols - c_panel_w) // 2)
-                c_pad = " " * c_margin
-
-                meta_visible = f"  agentic · {active_model}  {repo_dir.name}"
-                fill_len = max(0, c_panel_w - 1 - len(meta_visible))
-                return [
-                    ("class:pad", c_pad),
-                    ("class:accent", "▌"),
-                    ("class:panel-bg", "  "),
-                    ("class:meta-mode", "agentic"),
-                    ("class:meta-dot", " · "),
-                    ("class:meta-model", active_model),
-                    ("class:meta-repo", f"  {repo_dir.name}{' ' * fill_len}"),
-                ]
-
-            def get_landing_shortcuts():
-                c_cols, c_rows = shutil.get_terminal_size(fallback=(95, 35))
-                c_panel_w = max(40, min(80, int(c_cols * 0.70)))
-                c_margin = max(0, (c_cols - c_panel_w) // 2)
-                c_pad = " " * c_margin
-                return [
-                    ("class:pad", c_pad),
-                    ("class:sc-key", "tab"),
-                    ("class:sc-desc", " mode   "),
-                    ("class:sc-key", "ctrl+p"),
-                    ("class:sc-desc", " commands   "),
-                    ("class:sc-key", "/models"),
-                    ("class:sc-desc", " pick   "),
-                    ("class:sc-key", "@"),
-                    ("class:sc-desc", " file"),
-                ]
-
-            c0.children.append(ConditionalContainer(
-                Window(content=FormattedTextControl(get_landing_meta), height=1),
-                filter=Condition(lambda: is_first_turn)
-            ))
-            c0.children.append(ConditionalContainer(
-                Window(content=FormattedTextControl(lambda: [("", " ")]), height=1),
-                filter=Condition(lambda: is_first_turn)
-            ))
-            c0.children.append(ConditionalContainer(
-                Window(content=FormattedTextControl(get_landing_shortcuts), height=1),
-                filter=Condition(lambda: is_first_turn)
-            ))
-        except Exception:
-            pass
     except Exception:
         session = None
+
+    def get_chat_toolbar():
+        """Render current model and real shortcuts below every input prompt."""
+        cols = shutil.get_terminal_size(fallback=(95, 35)).columns
+        width = max(20, min(cols - 2, 80, int(cols * 0.70)))
+        pad = " " * max(0, (cols - width) // 2)
+        model_label = f"agentic · {active_model} · {repo_dir.name}"
+        shortcuts = "tab models   ctrl+p help   @ file"
+        footer = f"~{' ' * max(1, cols - len(f'v{CLI_VERSION}') - 2)}v{CLI_VERSION}"
+        return [
+            ("class:pad", pad),
+            ("class:accent", "▌ "),
+            ("class:meta-model", model_label[: max(0, width - 2)]),
+            ("", "\n"),
+            ("class:pad", pad),
+            ("class:sc-desc", shortcuts[:width]),
+            ("", "\n"),
+            ("class:footer", footer[:cols]),
+        ]
 
     def print_banner(is_splash: bool = False) -> None:
         cols, rows = shutil.get_terminal_size(fallback=(95, 35))
@@ -659,8 +669,8 @@ def run_interactive(
         table = Table(title="BrainFrog Commands & Shortcuts", box=box.SIMPLE, show_edge=False, header_style="bold #00FF66")
         table.add_column("Command", style="cyan", no_wrap=True)
         table.add_column("Description", style="white")
-        table.add_row("Ctrl+P", "Open command palette directly")
-        table.add_row("Tab", "Cycle model / autocomplete prompt")
+        table.add_row("Ctrl+P", "Show command help")
+        table.add_row("Tab", "Open model picker when input is empty; complete otherwise")
         table.add_row("/help, /?", "Show this help table")
         table.add_row("/undo", "Revert last change or commit cleanly via Git")
         table.add_row("/diff", "View colored git diff of recent changes")
@@ -692,48 +702,24 @@ def run_interactive(
         try:
             repo_name = repo_dir.name
             cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-            panel_w = max(40, min(80, int(cols * 0.70)))
+            panel_w = max(20, min(cols - 2, 80, int(cols * 0.70)))
             margin = max(0, (cols - panel_w) // 2)
             pad = " " * margin
 
-            if is_first_turn:
-                # Clean 1-line footer pinned at the bottom of the window
-                def get_landing_footer():
-                    if not is_first_turn:
-                        return None
-                    c_cols, c_rows = shutil.get_terminal_size(fallback=(95, 35))
-                    v_str = f"v{CLI_VERSION}"
-                    foot_space = " " * max(2, c_cols - 1 - len("~") - len(v_str))
-                    return [("class:footer", f"~{foot_space}{v_str}")]
-
-                prompt_parts = [
-                    ("class:pad", pad),
-                    ("class:accent", "▌"),
-                    ("class:panel-bg", "  "),
-                ]
-
-                if session:
-                    prompt = session.prompt(
-                        prompt_parts,
-                        placeholder='Tanya BrainFrog… "Jelaskan arsitektur proyek ini"',
-                        bottom_toolbar=get_landing_footer,
-                    ).strip()
-                else:
-                    console.print(f"{pad}[bold #00FF66]▌[/bold #00FF66] [dim #808080]Tanya BrainFrog… \"Jelaskan arsitektur proyek ini\"[/dim #808080]")
-                    console.print(f"{pad}[bold #00FF66]▌[/bold #00FF66]  [bold #00FF66]agentic[/bold #00FF66] [#555555]·[/#555555] [bold #eeeeee]{active_model}[/bold #eeeeee]  [#808080]{repo_name}[/#808080]")
-                    console.print()
-                    console.print(f"{pad}[bold #eeeeee]tab[/bold #eeeeee] [#808080]mode[/#808080]   [bold #eeeeee]ctrl+p[/bold #eeeeee] [#808080]commands[/#808080]   [bold #eeeeee]/models[/bold #eeeeee] [#808080]pick[/#808080]   [bold #eeeeee]@[/bold #eeeeee] [#808080]file[/#808080]")
-                    prompt = console.input(f"{pad}[bold #00FF66]▌[/bold #00FF66] ").strip()
+            prompt_parts = [
+                ("class:pad", pad),
+                ("class:accent", "▌"),
+                ("class:panel-bg", "  "),
+            ]
+            if session:
+                prompt = session.prompt(
+                    prompt_parts,
+                    placeholder='Tanya BrainFrog… "Jelaskan arsitektur proyek ini"',
+                    bottom_toolbar=get_chat_toolbar,
+                ).strip()
             else:
-                prompt_parts = [
-                    ("class:prompt-name", "brainfrog "),
-                    ("class:prompt-repo", f"({repo_name})"),
-                    ("class:prompt-arrow", " > "),
-                ]
-                if session:
-                    prompt = session.prompt(prompt_parts).strip()
-                else:
-                    prompt = console.input(f"[bold #00FF66]brainfrog[/bold #00FF66] [dim]({repo_name}) >[/dim] ").strip()
+                console.print(f"{pad}[dim]agentic · {active_model} · {repo_name}[/dim]")
+                prompt = console.input(f"{pad}[bold #00FF66]▌[/bold #00FF66] ").strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Bye! 🐸[/dim]")
             break
