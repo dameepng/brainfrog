@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -78,30 +79,56 @@ class AntigravitySystem2Client:
             "--output-format", "json",
         ]
 
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-        )
-        stdout, stderr = proc.communicate(input=prompt)
+        # Retry up to 2 times on transient "empty model output" errors
+        # (Gemini occasionally returns an empty response on first attempt)
+        _TRANSIENT = "model output must contain either output text or tool calls"
+        max_attempts = 3
+        last_error: Optional[Exception] = None
 
-        if proc.returncode != 0:
-            err_msg = stderr.strip() or stdout.strip() or f"Process exited with code {proc.returncode}"
-            raise RuntimeError(f"Antigravity (Google Auth) error: {err_msg}")
-
-        try:
-            data = json.loads(stdout)
-            usage = data.get("usage") or {}
-            usage_tracker.record(
-                usage.get("input_tokens", 0),
-                usage.get("output_tokens", 0),
+        for attempt in range(max_attempts):
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
             )
-            return data.get("response", "")
-        except json.JSONDecodeError:
-            return stdout.strip()
+            stdout, stderr = proc.communicate(input=prompt)
+
+            if proc.returncode != 0:
+                err_msg = (stderr.strip() or stdout.strip() or
+                           f"Process exited with code {proc.returncode}")
+                if _TRANSIENT in err_msg and attempt < max_attempts - 1:
+                    time.sleep(1.0)
+                    continue
+                raise RuntimeError(f"Antigravity (Google Auth) error: {err_msg}")
+
+            try:
+                data = json.loads(stdout)
+                # agy sometimes returns the error inside the JSON body
+                response_text = data.get("response", "")
+                if not response_text and _TRANSIENT in str(data):
+                    if attempt < max_attempts - 1:
+                        time.sleep(1.0)
+                        continue
+                    raise RuntimeError(
+                        f"Antigravity model returned empty output after {max_attempts} attempts. "
+                        "Try rephrasing your request or switching models with /models."
+                    )
+                usage = data.get("usage") or {}
+                usage_tracker.record(
+                    usage.get("input_tokens", 0),
+                    usage.get("output_tokens", 0),
+                )
+                return response_text
+            except json.JSONDecodeError:
+                return stdout.strip()
+
+        raise RuntimeError(
+            f"Antigravity model returned empty output after {max_attempts} attempts. "
+            "Try rephrasing your request or switching models with /models."
+        )
 
     # -- 1. planning --------------------------------------------------
     def plan_task(

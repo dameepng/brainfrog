@@ -1834,8 +1834,53 @@ Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, retrieval, 
       - *Jakob Nielsen's 10 Usability Heuristics (2020 Update):* Visibilitas status sistem (*visibility of system status*), kebebasan dan kontrol pengguna (*user control & emergency exits/undo*), pengenalan dibanding mengingat kembali (*recognition over recall*), dan desain minimalis ber-rasio sinyal tinggi.
       - *Progressive Disclosure (Raluca Budiu):* Pengurangan beban kognitif dengan menampilkan informasi esensial terlebih dahulu dan menunda rincian sekunder ke interaksi sekunder.
       - *Command-Line Interface Usability:* Mitigasi kelemahan klasik CLI melalui petunjuk konteks langsung dan autocomplete.
-    - URL: `https://www.nngroup.com/articles/ten-usability-heuristics/`
-    - Tanggal Akses: 24 September 2026.
+
+---
+
+## BrainFrog TUI — Design Guidelines
+
+> Panduan visual resmi untuk TUI BrainFrog. Wajib dipatuhi setiap kali agent merancang, memodifikasi, atau memoles kode antarmuka terminal.
+
+### 1. Prinsip Desain
+- **Minim tapi bukan kosong.** Ruang kosong adalah pilihan desain terencana (breathing room), bukan default kelalaian.
+- **Terminal-native, bukan web-in-a-box.** Gunakan karakter box-drawing konsisten, bukan gradasi/blur buatan.
+- **Degradasi anggun.** Tampilan harus tetap terbaca pada terminal 16-color atau saat `NO_COLOR=1` aktif melalui simbol (`✓ ✗ ⚠ ℹ`).
+- **State jelas dari kejauhan.** Loading, error, warning, dan idle memiliki bentuk dan simbol pembeda yang tegas.
+
+### 2. Sistem Warna & Token UI
+Base: hitam pekat (`#0A0A0A`) dengan accent hue hijau konsisten (`#33D17A`), plus warna semantik status:
+
+| Token | Truecolor | 16-color | Simbol | Penggunaan |
+| :--- | :--- | :--- | :---: | :--- |
+| `bg.base` | `#0A0A0A` | black | - | Background terminal utama |
+| `bg.surface` | `#161A16` | black | - | Background panel & baris aktif |
+| `fg.primary` | `#E8E8E8` | white | - | Teks utama, pesan user & assistant |
+| `fg.secondary` | `#9AA09A` | bright black | - | Label, deskripsi, sub-aksi indented |
+| `fg.muted` | `#5C625C` | gray | - | Hint text, placeholder, border idle |
+| `accent` | `#33D17A` | green | `▸` | Cursor prompt, highlight aktif, frog eye |
+| `success` | `#33D17A` | green | `✓` | Notifikasi sukses / commit revert |
+| `warning` | `#E3B341` | yellow | `⚠` | Peringatan, konfirmasi destruktif |
+| `error` | `#E5534B` | red | `✗` | Error, kegagalan eksekusi |
+| `info` | `#58A6FF` | blue | `ℹ` | Notifikasi netral, status, tips |
+
+### 3. Box-Drawing & Tipografi
+- **Border Rounded (`╭╮╰╯`):** Digunakan untuk semua panel konten standar, input composer box, dan semantic banner.
+- **Border Tegas / Square (`┌┐└┘`):** Digunakan khusus untuk overlay modal dialog (seperti `_picker` `/models`, `/provider`, dan help table `/help`).
+- **Logo Collapse:** Logo blocky besar ("BRAIN FROG") HANYA muncul pada empty/splash state. Begitu prompt pertama dikirim, logo otomatis collapse menjadi header 1 baris (`🐸 BrainFrog · model · repo`) agar layar dimanfaatkan sepenuhnya untuk riwayat interaksi.
+
+### 4. Layout & Spacing
+- **Margin:** Konsisten 2 kolom kiri-kanan (`pad = "  "`), 1 baris atas-bawah.
+- **Input Composer:** Selalu di dalam box rounded dengan prefix bar hijau (`▸`). Border ditutup secara permanen saat eksekusi dimulai.
+- **Divider Status Bar:** Wajib ada garis pembatas (`─` sepanjang lebar terminal) di atas status bar.
+- **Status Bar:**
+  - Baris 1: Identitas sesi (bold `fg.primary`): `● model · repo`
+  - Baris 2: Pintasan keyboard (`fg.muted`): `tab models   ctrl+p help   @ file` dan versi `v0.1.0` di ujung kanan.
+- **Loading Spinner:** Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) warna `accent` dengan status dinamis.
+- **Responsif:**
+  - `< 60 kolom`: Logo besar disembunyikan (langsung compact header). Status bar digabung menjadi 1 baris.
+  - `60–100 kolom`: Layout standar lengkap.
+  - `> 100 kolom`: Lebar panel dibatasi (*cap*) maksimal ~96–100 kolom di tengah (*centered*).
+
 
 
 
