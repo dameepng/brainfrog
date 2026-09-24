@@ -327,7 +327,7 @@ def run_interactive(
     active_backend = backend
     active_model = claude_model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
-    app_state = {"status": "Siap", "icon": "●"}
+    app_state = {"status": "Ready", "icon": "●"}
 
     def get_bottom_toolbar():
         from prompt_toolkit.formatted_text import FormattedText
@@ -338,7 +338,7 @@ def run_interactive(
             ("class:tb-accent", "@"),
             ("class:tb-text", " file   "),
             ("class:tb-accent", "/"),
-            ("class:tb-text", " perintah   "),
+            ("class:tb-text", " command   "),
             ("class:tb-accent", "!"),
             ("class:tb-text", " shell"),
         ]
@@ -402,43 +402,37 @@ def run_interactive(
         cols = shutil.get_terminal_size(fallback=(100, 24)).columns
         shell_name = detect_shell_display()
         has_rules = bool(load_project_guidelines(repo_dir))
-        memory_text = "Aktif (BRAINFROG.md)" if has_rules else "Belum diatur"
+        memory_text = "Active (BRAINFROG.md)" if has_rules else "Not set"
 
-        # Frog Pixel Art (7 rows, 22 cols wide)
+        # Frog Pixel Art (5 rows, 22 cols wide)
         frog_lines = [
             r"[bold #00FF66]   ▄▄▄▄        ▄▄▄▄   [/bold #00FF66]",
-            r"[bold #00FF66]  █▀  ▀█  ▄▄  █▀  ▀█  [/bold #00FF66]",
-            r"[bold #00FF66] ▐█ [/bold #00FF66][bold white]0[/bold white][bold #00FF66]  █▌▀▀▀▀▐█  [/bold #00FF66][bold white]0[/bold white][bold #00FF66] █▌ [/bold #00FF66]",
-            r"[bold #00FF66] ▄█▀                ▀█▄[/bold #00FF66]",
-            r"[bold #00FF66]▐█   ▄  ────────  ▄  █▌[/bold #00FF66]",
-            r"[bold #00FF66] ▀█▄                ▄█▀[/bold #00FF66]",
-            r"[bold #00FF66]   ▀▀██████████████▀▀  [/bold #00FF66]",
+            r"[bold #00FF66]  ▐█ [/bold #00FF66][bold white]0[/bold white][bold #00FF66]  █▌  ▄▄  ▐█ [/bold #00FF66][bold white]0[/bold white][bold #00FF66]  █▌ [/bold #00FF66]",
+            r"[bold #00FF66]  ▄█▀                ▀█▄[/bold #00FF66]",
+            r"[bold #00FF66] ▐█   ▄  ────────  ▄  █▌[/bold #00FF66]",
+            r"[bold #00FF66]    ▀▀██████████████▀▀  [/bold #00FF66]",
         ]
 
-        # Full Wordmark (69 cols wide)
+        # Full Wordmark (5 rows, 69 cols wide)
         wordmark_wide = [
             r"[bold #00FF66]██████  ██████   ▄██▄   ████  ██  ██  ██████  ██████   ▄██▄    ▄████ [/bold #00FF66]",
             r"[bold #00FF66]██  ██  ██  ██  ██  ██   ██   ███ ██  ██      ██  ██  ██  ██  ██     [/bold #00FF66]",
             r"[bold #00FF66]█████   █████   ██████   ██   ██████  █████   █████   ██  ██  ██ ███ [/bold #00FF66]",
             r"[bold #00FF66]██  ██  ██  ██  ██  ██   ██   ██ ███  ██      ██  ██  ██  ██  ██  ██ [/bold #00FF66]",
             r"[bold #00FF66]██████  ██   ██ ██  ██  ████  ██  ██  ██      ██   ██  ▀██▀    ▀████ [/bold #00FF66]",
-            r"                                                                      ",
-            r"[dim #2ecc71]───────[/dim #2ecc71]  [#cbd5e0]A I   C O D I N G   C L I   F O R   R E A L   W O R K[/#cbd5e0]  [dim #2ecc71]───────[/dim #2ecc71]",
         ]
 
-        # Compact Wordmark (46 cols wide)
+        # Compact Wordmark (5 rows, 46 cols wide)
         wordmark_compact = [
             r"[bold #00FF66]████▄ ████▄ ▄██▄ ███ █  █ ████ ████▄ ▄██▄ ▄███[/bold #00FF66]",
             r"[bold #00FF66]██  █ ██  █ █  █  █  ██ █ █    ██  █ █  █ █   [/bold #00FF66]",
             r"[bold #00FF66]████▀ ████▀ ████  █  █ ██ ███  ████▀ █  █ █ ██[/bold #00FF66]",
             r"[bold #00FF66]██  █ ██  █ █  █  █  █  █ █    ██  █ █  █ █  █[/bold #00FF66]",
             r"[bold #00FF66]████▀ ██  █ █  █ ███ █  █ █    ██  █ ▀██▀ ▀███[/bold #00FF66]",
-            r"                                               ",
-            r"[dim #2ecc71]──[/dim #2ecc71]  [#cbd5e0]AI CODING CLI FOR REAL WORK[/#cbd5e0]  [dim #2ecc71]──[/dim #2ecc71]",
         ]
 
         cur_icon, cur_text = app_state["icon"], app_state["status"]
-        status_style = "bold #00FF66" if cur_text == "Siap" else ("bold yellow" if "Memproses" in cur_text else ("bold green" if "Selesai" in cur_text else "bold red"))
+        status_style = "bold #00FF66" if cur_text == "Ready" else ("bold yellow" if "Processing" in cur_text else ("bold green" if "Done" in cur_text else "bold red"))
 
         right_lines = [
             f"[#718096]v{CLI_VERSION}[/#718096]",
@@ -446,16 +440,14 @@ def run_interactive(
             "",
             f"[#718096]Mode:[/#718096] [#cbd5e0]agentic[/#cbd5e0]",
             f"[#718096]Shell:[/#718096] [#cbd5e0]{shell_name}[/#cbd5e0]",
-            "",
-            "",
         ]
 
         console.print()
         if cols >= 115:
-            for i in range(7):
+            for i in range(5):
                 console.print(f" {frog_lines[i]}  {wordmark_wide[i]}  [dim #4a5568]│[/dim #4a5568]  {right_lines[i]}")
         elif cols >= 92:
-            for i in range(7):
+            for i in range(5):
                 console.print(f" {frog_lines[i]} {wordmark_compact[i]} [dim #4a5568]│[/dim #4a5568] {right_lines[i]}")
         else:
             for i in range(5):
@@ -478,13 +470,13 @@ def run_interactive(
 
         bottom_text = Text()
         bottom_text.append(" ⓘ  ", style="bold #00FF66")
-        bottom_text.append("Ketik tugas atau pertanyaan... (bisa gunakan ", style="#718096")
+        bottom_text.append("Type a task or question... (use ", style="#718096")
         bottom_text.append("@file", style="bold white")
         bottom_text.append("), ", style="#718096")
-        bottom_text.append("!perintah", style="bold white")
-        bottom_text.append(" shell, ", style="#718096")
+        bottom_text.append("!command", style="bold white")
+        bottom_text.append(" for shell, ", style="#718096")
         bottom_text.append("/help", style="bold white")
-        bottom_text.append(" untuk menu, atau ", style="#718096")
+        bottom_text.append(" for menu, or ", style="#718096")
         bottom_text.append("/exit.", style="bold white")
 
         card_group = Group(top_text, divider, bottom_text)
@@ -535,7 +527,7 @@ def run_interactive(
             else:
                 cols = shutil.get_terminal_size(fallback=(100, 24)).columns
                 console.print(f"[dim]{'─' * cols}[/dim]")
-                console.print(f" [dim]⌨ [/dim]  [bold #00FF66]@[/bold #00FF66] file   [bold #00FF66]/[/bold #00FF66] perintah   [bold #00FF66]![/bold #00FF66] shell")
+                console.print(f" [dim]⌨ [/dim]  [bold #00FF66]@[/bold #00FF66] file   [bold #00FF66]/[/bold #00FF66] command   [bold #00FF66]![/bold #00FF66] shell")
                 prompt = console.input(f"[bold #00FF66]brainfrog[/bold #00FF66] [dim]({repo_name}) >[/dim] ").strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Bye! 🐸[/dim]")
@@ -691,7 +683,7 @@ def run_interactive(
 
         # Execute task
         console.print(f"\n[dim]Executing task:[/dim] [bold]{prompt}[/bold]\n")
-        app_state["status"] = "Memproses..."
+        app_state["status"] = "Processing..."
         app_state["icon"] = "◌"
         exit_code = execute_task(
             task=prompt,
@@ -706,10 +698,10 @@ def run_interactive(
             max_retries=max_retries,
         )
         if exit_code == 0:
-            app_state["status"] = "Selesai"
+            app_state["status"] = "Done"
             app_state["icon"] = "✓"
         else:
-            app_state["status"] = "Gagal"
+            app_state["status"] = "Failed"
             app_state["icon"] = "✗"
 
 
