@@ -86,7 +86,7 @@ def _read_files(repo_dir: Path, paths: List[str]) -> Dict[str, str]:
     out = {}
     for rel in paths:
         f = repo_dir / rel
-        out[rel] = f.read_text() if f.exists() else ""
+        out[rel] = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
     return out
 
 
@@ -94,7 +94,7 @@ def _write_files(repo_dir: Path, files: Dict[str, str]) -> None:
     for rel, content in files.items():
         f = repo_dir / rel
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(content)
+        f.write_text(content, encoding="utf-8")
 
 
 def _diff_stat(repo_dir: Path) -> Dict[str, int]:
@@ -210,7 +210,8 @@ class Orchestrator:
             f"change_type = {answers['change_type']}"
         )
 
-        low_confidence = domain_answer.confidence < self.cfg.min_domain_confidence
+        threshold = 0.35 if len(self.cfg.domains) == 1 else self.cfg.min_domain_confidence
+        low_confidence = domain_answer.confidence < threshold
         unresolved = domain_answer.choice in (None, "unrelated")
         if low_confidence or unresolved:
             options = ", ".join(self.cfg.domains.keys())
@@ -319,7 +320,7 @@ class Orchestrator:
                 f"Title: {pr_copy['title']}\nBody:\n{pr_copy['body']}"
             )
             print("[orchestrator] " + detail)
-        return StepResult(step, "opened_pr" if auto_ok else "escalated", retries, detail)
+        return StepResult(step, "opened_pr" if auto_ok else "drafted_pr", retries, detail)
 
     def _open_pr(self, step: PlanStep, pr_copy: Dict[str, str]) -> None:
         branch = f"{self.cfg.branch_prefix}{step.id}"

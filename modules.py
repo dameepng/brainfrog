@@ -35,7 +35,7 @@ DEFAULT_MAP_FILENAME = "modules.json"
 def load_module_map(repo_dir: Path, map_path: Path | None = None) -> Dict[str, Domain]:
     path = map_path or (repo_dir / DEFAULT_MAP_FILENAME)
     if path.exists():
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
         return {
             key: Domain(
                 key=key,

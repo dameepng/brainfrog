@@ -180,7 +180,7 @@ def execute_task(
 
     console.print("\n[bold cyan]=== Run Summary ===[/bold cyan]")
     for r in results:
-        badge = "[green]SUCCESS[/green]" if r.outcome in ("diagnosed", "opened_pr") else f"[yellow]{r.outcome.upper()}[/yellow]"
+        badge = "[green]SUCCESS[/green]" if r.outcome in ("diagnosed", "opened_pr", "drafted_pr") else f"[yellow]{r.outcome.upper()}[/yellow]"
         console.print(f"  • Step {r.step.id} ({r.step.description}): {badge} (retries: {r.retries})")
     console.print()
     return 0

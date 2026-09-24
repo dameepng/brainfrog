@@ -62,12 +62,17 @@ def _best_overlap(prompt: str, options: Dict[str, str]) -> Tuple[str, float]:
         return fallback_key, 0.15
 
     best_key, best_score = fallback_key, 0.0
+    lower_prompt = prompt.lower()
     for key, desc in options.items():
         if key == "unrelated":
             continue
         desc_tokens = _tokenize(f"{key} {desc}")
         overlap = len(prompt_tokens & desc_tokens)
-        score = overlap / max(1, len(prompt_tokens))
+        # Cap denominator to 8 so rich, detailed prompts aren't penalized for extra words
+        score = overlap / max(1, min(len(prompt_tokens), 8))
+        # If the user explicitly mentioned the domain key in their prompt, strong signal!
+        if key.lower() in lower_prompt:
+            score = max(score, 0.6)
         if score > best_score:
             best_key, best_score = key, score
     return best_key, best_score
