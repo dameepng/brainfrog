@@ -633,9 +633,261 @@ Agent menyajikan rencana modifikasi dengan sitasi terverifikasi:
 
 ---
 
+## Reliability Engineering
+
+Bagian ini mengatur bagaimana agent merancang dan mempertahankan keandalan eksekusi BrainFrog sebagai AI coding CLI di lingkungan lokal. Tujuannya adalah **menjamin penyelesaian tugas yang dapat diprediksi, mencegah proses menggantung tanpa batas (*unbounded hangs*), melindungi integritas file dan state sesi saat terjadi gangguan, serta menyajikan jalur pemulihan yang jelas dan deterministik bagi pengguna**.
+
+---
+
+### 1. Definisi Keberhasilan & Ukuran Reliabilitas Realistis
+
+Reliabilitas sebuah developer CLI tool diukur dari pengalaman kerja nyata pengguna, bukan dari angka SLA cloud artifisial (seperti "99.999% uptime" yang tidak relevan untuk tool lokal):
+
+1. **Definisi Keberhasilan dari Sudut Pandang Developer:**
+   - Tugas selesai atau gagal dengan laporan yang jujur dan dapat ditindaklanjuti.
+   - Sesi interaktif tidak pernah crash mendadak akibat unhandled exception.
+   - Perintah shell atau test runner tidak pernah membeku (*freeze*) tanpa batas waktu.
+   - Operasi rollback `/undo` mengembalikan repositori ke kondisi stabil sebelumnya secara deterministik.
+   - Interupsi pengguna (`Ctrl+C`) keluar secara instan dan bersih tanpa merusak file atau meninggalkan proses zombie.
+
+2. **Metrik Reliabilitas yang Proporsional untuk Proyek Ini:**
+   - **Crash-Free Interactive Rate:** Rasio sesi CLI yang selesai secara normal atau ditutup bersih oleh pengguna tanpa unhandled traceback.
+   - **Bounded Execution Latency:** Seluruh operasi eksternal (API LLM, subprocess shell, pembacaan file) memiliki batas waktu maksimum yang terjamin.
+   - **Zero Partial-Write Incidents:** Tidak ada kejadian di mana file kode atau konfigurasi tertinggal dalam keadaan rusak, terpotong, atau 0 byte saat proses terhenti.
+
+---
+
+### 2. Batas Waktu (Timeout) dan Jalur Pembatalan Bersih
+
+Operasi yang berkomunikasi dengan subprocess atau jaringan adalah sumber utama *unbounded hangs*. Setiap operasi tersebut **wajib memiliki timeout dan jalur terminasi tuntas**:
+
+1. **Batas Timeout Eksplisit per Kategori Operasi:**
+   - **Test Command (`_run(self.cfg.test_command)`):** Default 60 detik (dapat dikonfigurasi via `/test-cmd`).
+   - **Shell Passthrough (`!command`):** Default 60 detik.
+   - **Panggilan Model LLM (`System2Client._call`):** Default 60 detik per turn.
+   - **Pemeriksaan Git / Subprocess Internal:** Default 10–15 detik.
+
+2. **Terminasi Tuntas Pohon Proses Anak (Process Tree Kill):**
+   - Ketika timeout tercapai atau pengguna menekan `Ctrl+C`, memanggil `proc.terminate()` saja sering kali tidak cukup karena proses anak (seperti test runner anak atau build server Gradle/Node) akan tertinggal sebagai proses zombie yang mengunci file atau port.
+   - **Aturan Implementasi:** Wajib membunuh seluruh hierarki proses anak (*process tree*):
+     - **Pada Windows:** Gunakan perintah `taskkill /F /T /PID <pid>` atau terminasi recursive melalui process handle.
+     - **Pada Unix/Linux/macOS:** Gunakan `os.killpg(os.getpgid(proc.pid), signal.SIGKILL)` dengan proses dibuat menggunakan `preexec_fn=os.setsid`.
+   - Pastikan seluruh file lock atau file sementara segera dibersihkan sebelum mengembalikan kendali ke prompt CLI.
+
+---
+
+### 3. Taksonomi Error & Kebijakan Retry Terukur
+
+Kegagalan sistem harus diklasifikasikan secara ketat. Dilarang melakukan retry membabi-buta (*blind retries*) yang memperparah kegagalan:
+
+```
+                            [Terjadi Kegagalan / Error]
+                                         │
+        ┌────────────────────────────────┼────────────────────────────────┐
+        ▼                                ▼                                ▼
+  [Transient Error]              [Permanent Error]              [Interupsi Pengguna]
+• Socket timeout / reset       • HTTP 401 Invalid Key         • KeyboardInterrupt / Ctrl+C
+• HTTP 429 Rate Limit          • HTTP 400 Bad Request         • SIGINT / SIGTERM
+• HTTP 503 Service Overload    • Syntax error pada prompt     • Pembatalan eksplisit
+        │                                │                                │
+        ▼                                ▼                                ▼
+ [Cek Idempotensi]                 [Fail-Fast]                     [Graceful Exit]
+Operasi aman diulang?             Hentikan segera!                Hentikan proses anak,
+  ├── YA  ──► Exponential         Kembalikan error                bersihkan state sementara,
+  │           Backoff + Jitter    actionable tanpa retry.         dan kembali ke prompt/exit.
+  └── TIDAK ─► Laporkan parsial,
+               minta aksi user.
+```
+
+1. **Transient Errors (Gangguan Sementara):**
+   - Karakteristik: Masalah konektivitas jaringan, rate limit sementara (HTTP 429), atau server model overload (HTTP 503).
+   - **Kebijakan Retry:** Boleh di-retry maksimal **3 kali** dengan menerapkan **Exponential Backoff + Full Jitter** (mengadopsi rekomendasi AWS Builders' Library):
+     ```python
+     delay = min(max_delay, base_delay * (2 ** attempt)) + random.uniform(0, jitter)
+     ```
+   - Contoh: Jeda retry 1 = ~1.2s, retry 2 = ~2.4s, retry 3 = ~4.8s.
+
+2. **Permanent Errors (Kegagalan Permanen):**
+   - Karakteristik: Kredensial tidak valid (HTTP 401), request payload melanggar skema (HTTP 400), file tidak ditemukan, atau perintah tidak terdaftar.
+   - **Kebijakan:** **Gagal Cepat (Fail-Fast)**. Dilarang mengulang pemanggilan yang pasti akan gagal kembali.
+
+3. **Verifikasi Idempotensi Sebelum Retry:**
+   - **Aman di-retry (Idempoten):** Operasi pembacaan file, pengecekan git status, penulisan file statis penuh (*overwrite*).
+   - **Berbahaya di-retry (Non-Idempoten):** Operasi penambahan baris (*append*), pembuatan commit git baru, atau pengiriman webhook eksternal. Jika operasi non-idempoten gagal di tengah jalan, laporkan kegagalan kepada pengguna alih-alih mengulanginya secara otomatis.
+
+---
+
+### 4. Pencegahan Anggapan Sukses Parsial (No False Success)
+
+Sistem dilarang menyembunyikan kegagalan parsial di balik status sukses:
+
+1. **Kejujuran Status Eksekusi:**
+   - Jika orkestrasi terdiri dari 3 langkah rencana (PlanStep 1, 2, 3) dan langkah ke-2 gagal:
+     - Dilarang melaporkan bahwa tugas selesai.
+     - Laporkan secara eksplisit: Langkah 1 `SUCCESS`, Langkah 2 `FAILED` (sertakan penyebab spesifik), Langkah 3 `SKIPPED`.
+2. **Panduan Pemulihan Deterministik:**
+   - Saat terjadi kegagalan parsial, sajikan pilihan tindakan konkret bagi pengguna:
+     - Gunakan `/undo` untuk membatalkan modifikasi yang dibuat oleh langkah yang gagal dan mengembalikan working tree ke kondisi bersih.
+     - Periksa pesan log atau ubah test command dengan `/test-cmd`.
+
+---
+
+### 5. Integritas File & Sesi Saat Terhenti (Atomic Writes)
+
+Proses yang terhenti di tengah penulisan file akibat crash, kehabisan disk, atau penekanan `Ctrl+C` dapat merusak kode sumber (*zero-byte / corrupted files*):
+
+1. **Pola Penulisan File Atomik (Atomic File Replacement):**
+   - Dilarang menulis langsung ke file target dengan `open(target, "w")` untuk file kode esensial.
+   - Terapkan pola penulisan atomik sistem operasi:
+     ```python
+     import os, tempfile
+     from pathlib import Path
+
+     def atomic_write_text(target_path: Path, content: str) -> None:
+         target_path.parent.mkdir(parents=True, exist_ok=True)
+         # 1. Tulis ke file temporer pada direktori yang sama (agar partisi disk sama)
+         temp_file = target_path.with_suffix(f".tmp_{os.getpid()}_{id(content)}")
+         try:
+             temp_file.write_text(content, encoding="utf-8")
+             # 2. Penggantian atomik level OS (POSIX rename / Windows MoveFileEx)
+             os.replace(temp_file, target_path)
+         except Exception:
+             if temp_file.exists():
+                 temp_file.unlink()
+             raise
+     ```
+   - Manfaat: Jika proses terhenti di tengah jalan, file asli tidak akan pernah rusak atau terpotong.
+
+2. **Integritas Sesi Interaktif:**
+   - Simpan riwayat prompt (`history.txt`) dan metrik penggunaan token (`usage_tracker`) secara bertahap setelah setiap turn berhasil, bukan hanya di akhir penutupan aplikasi.
+
+---
+
+### 6. Perilaku Terprediksi Menghadapi Dependensi Gagal atau Lambat
+
+Sistem harus tetap dapat beroperasi secara anggun (*graceful degradation*) saat komponen pendukung bermasalah:
+
+1. **Fallback Bertingkat (Graceful Degradation):**
+   - Jika System 1 (Jev API) tidak merespons atau kredensial belum dikonfigurasi, sistem otomatis beralih ke mode heuristik lokal (`--backend mock`) tanpa melempar crash fatal (sebagaimana pola di `config.py`).
+   - Jika Anthropic API terputus di tengah sesi interaktif, simpan input pengguna ke riwayat dan beri tahu pengguna bahwa koneksi terputus, tawarkan opsi mencoba lagi setelah memeriksa jaringan.
+2. **Pencegahan Loop Tak Terbatas (Loop Circuit Breakers):**
+   - Setiap loop evaluasi (seperti retry fix kode pada `orchestrator.py`) **wajib dibatasi oleh konstanta maksimum** (misal: `max_retries = 3`).
+   - Jika batas tercapai dan tes masih gagal, orkestrator wajib menghentikan siklus (*circuit breaker*), mengeskalasikan masalah ke pengguna, dan tidak boleh terus mengulang tanpa batas.
+
+---
+
+### 7. Format Pesan Error CLI: Ringkas, Spesifik, dan Actionable
+
+Tampilan error CLI harus menghormati kognitif developer:
+
+1. **Menyembunyikan Traceback Mentah pada Alur Normal:**
+   - Jangan pernah menampilkan traceback internal Python 50 baris kepada pengguna pada alur kerja biasa. Traceback mentah mengaburkan masalah sebenarnya dan merusak estetika antarmuka minimalis.
+2. **Struktur Pesan Error CLI Standar:**
+   ```text
+   [bold red]Error:[/bold red] Test command timed out after 60 seconds.
+   [dim]Target :[/dim] cmd /c gradlew.bat test
+   [dim]Action :[/dim] Check for infinite loops in test cases, or increase timeout using /test-cmd.
+   ```
+3. **Penyediaan Mode Investigasi (Debug Mode):**
+   - Sediakan flag `--debug` atau variabel lingkungan `BRAINFROG_DEBUG=1`. Hanya cetak full stack trace traceback jika mode ini diaktifkan secara eksplisit oleh developer.
+
+---
+
+### 8. Pengujian Jalur Gagal (Failure Path Verification)
+
+Kualitas reliabilitas kode tidak dibuktikan pada jalur mulus (*happy path*), melainkan pada kemampuannya bertahan pada jalur gagal:
+
+1. **Skenario Wajib yang Harus Diuji:**
+   - **Timeout Subprocess:** Verifikasi bahwa proses yang macet dihentikan secara tepat waktu dan tidak meninggalkan proses zombie di Task Manager / process table.
+   - **Koneksi Jaringan Terputus:** Simulasikan exception koneksi API dan verifikasi bahwa mekanisme exponential backoff berjalan sesuai batas jeda dan tidak melakukan infinite loop.
+   - **Interupsi `Ctrl+C`:** Uji penekanan interupsi saat penulisan file dan verifikasi bahwa file target tidak terkorupsi atau menjadi 0 byte.
+   - **Exit Code Non-Nol:** Verifikasi bahwa kegagalan perintah eksternal dideteksi secara akurat tanpa menabrakkan thread utama CLI.
+
+---
+
+### 9. Checklist Review Reliabilitas
+
+Sebelum agent menyelesaikan perubahan kode atau fitur baru di repositori BrainFrog, periksa checklist berikut:
+
+| No | Poin Pemeriksaan Reliabilitas | Status Validasi |
+| :---: | :--- | :---: |
+| 1 | Apakah semua pemanggilan subprocess dan API jaringan memiliki batas timeout eksplisit? | [ ] |
+| 2 | Apakah pembatalan proses (`Ctrl+C` / timeout) membersihkan seluruh pohon proses anak tanpa meninggalkan zombie? | [ ] |
+| 3 | Apakah error diklasifikasikan dengan benar (hanya transient yang di-retry, fail-fast untuk permanen)? | [ ] |
+| 4 | Apakah retry menerapkan exponential backoff dengan jitter dan dibatasi maksimal 3 kali percobaan? | [ ] |
+| 5 | Apakah penulisan file penting menerapkan pola atomik (*atomic replace*) untuk mencegah file korup? | [ ] |
+| 6 | Apakah pesan error CLI diformat ringkas dan actionable tanpa traceback mentah pada mode standar? | [ ] |
+| 7 | Apakah loop iterasi perbaikan dibatasi batas atas (*circuit breaker*) untuk mencegah infinite loop? | [ ] |
+
+---
+
+### 10. Contoh Penerapan Reliabilitas Nyata di Repositori BrainFrog
+
+Berikut adalah contoh perbaikan reliabilitas nyata pada fungsi eksekusi perintah di repositori ini:
+
+#### Kasus Masalah Awal pada `_run` di `orchestrator.py`:
+Implementasi awal memanggil `subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)` tanpa timeout. Jika test runner pengguna (misal `pytest` atau `gradlew`) masuk ke infinite loop atau menunggu input stdin, orkestrator akan menggantung selamanya tanpa respons.
+
+#### Solusi Berstandar Reliabilitas:
+```python
+import subprocess
+import sys
+import os
+import signal
+from pathlib import Path
+from typing import List
+
+def run_command_safe(cmd: List[str], cwd: Path, timeout_seconds: int = 60) -> subprocess.CompletedProcess:
+    """Eksekusi subprocess dengan batas waktu terjamin dan pembersihan pohon proses anak."""
+    try:
+        if sys.platform == "win32":
+            # Pada Windows, gunakan subprocess creation flags baru jika diperlukan
+            proc = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+            return proc
+        else:
+            # Pada Unix, gunakan process group agar seluruh child tree dapat dihentikan
+            proc = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                preexec_fn=os.setsid,
+            )
+            return proc
+    except subprocess.TimeoutExpired as e:
+        # Bunuh seluruh pohon proses anak secara tuntas
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid if 'proc' in locals() else e.cmd)], capture_output=True)
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=124,  # Standard timeout exit code
+            stdout=e.stdout or "",
+            stderr=f"Error: Process timed out after {timeout_seconds} seconds.",
+        )
+```
+
+Pola di atas menjamin bahwa:
+1. Orkestrator tidak akan pernah freeze melebihi 60 detik.
+2. Proses anak dihentikan tuntas dari memori.
+3. Mengembalikan objek `CompletedProcess` dengan return code 124 dan pesan error terstruktur yang dapat dianalisis oleh System 1 (Jev).
+
+---
+
 ## Referensi Riset & Literatur
 
-Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, dan retrieval di repositori ini:
+Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, retrieval, dan reliabilitas di repositori ini:
 
 ### Pilar System Design
 1. **Google Cloud Architecture Framework: System Design**
@@ -723,5 +975,29 @@ Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, dan retriev
     - Fokus: Mekanisme grounding berbasis sitasi kutipan sumber terverifikasi (*source attribution*), confidence threshold, serta *layout-aware document chunking* untuk mempertahankan heading, tabel, dan struktur kode.
     - URL: `https://cloud.google.com/generative-ai-app-builder/docs/grounding`
     - Tanggal Akses: 24 September 2026.
+
+### Pilar Reliability Engineering
+17. **Timeouts, Retries, and Backoff with Jitter — Marc Brooker (AWS Builders' Library)**
+    - Fokus: Pengelolaan kegagalan transien pada sistem terdistribusi, perancangan batas timeout deterministik, mitigasi masalah thundering herd dengan full jitter, serta algoritma exponential backoff.
+    - URL: `https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/`
+    - Tanggal Akses: 24 September 2026.
+
+18. **Making Retries Safe with Idempotent APIs — Malcolm Featonby (AWS Builders' Library)**
+    - Fokus: Penegakan semantik idempotensi sebelum melakukan percobaan ulang (*safe retries*), pengelolaan mutasi akumulatif, dan pencegahan efek samping ganda akibat kegagalan ambigu.
+    - URL: `https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/`
+    - Tanggal Akses: 24 September 2026.
+
+19. **Site Reliability Engineering (SRE): Service Level Objectives & Addressing Cascading Failures — Google SRE Book**
+    - Fokus:
+      - *Chapter 4 (Service Level Objectives):* Definisi metrik keandalan realistis dari sudut pandang pengalaman pengguna.
+      - *Chapter 22 (Addressing Cascading Failures):* Pencegahan kegagalan beruntun, loop retry tak terbatas, degradasi anggun (*graceful degradation*), dan pemutus arus (*circuit breakers*).
+    - URL: `https://sre.google/sre-book/`
+    - Tanggal Akses: 24 September 2026.
+
+20. **Azure Well-Architected Framework: Reliability Pillar & Transient Fault Handling — Microsoft**
+    - Fokus: Analisis mode kegagalan (*Failure Mode Analysis*), strategi pemulihan mandiri (*self-healing*), isolasi kegagalan proses anak, dan desain degradasi bertingkat.
+    - URL: `https://learn.microsoft.com/en-us/azure/well-architected/reliability/`
+    - Tanggal Akses: 24 September 2026.
+
 
 
