@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,13 +27,31 @@ if sys.platform == "win32":
 
 from dotenv import load_dotenv
 from rich import box
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
 
-console = Console()
+console = Console(legacy_windows=False)
+CLI_VERSION = "0.1.0"
+
+
+def detect_shell_display() -> str:
+    """Detect active shell formatted for the UI header."""
+    if sys.platform == "win32":
+        comspec = os.environ.get("COMSPEC", "")
+        if "cmd.exe" in comspec.lower():
+            return "Windows (cmd)"
+        elif "powershell" in comspec.lower() or "pwsh" in comspec.lower():
+            return "Windows (pwsh)"
+        return "Windows (cmd)"
+    else:
+        sh = Path(os.environ.get("SHELL", "/bin/bash")).name
+        return f"Unix ({sh})"
+
 
 # -------------------------------------------------------------------------
 # Environment & Configuration Resolution
@@ -308,6 +327,39 @@ def run_interactive(
     active_backend = backend
     active_model = claude_model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
+    app_state = {"status": "Siap", "icon": "●"}
+
+    def get_bottom_toolbar():
+        from prompt_toolkit.formatted_text import FormattedText
+        cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        sep_line = "─" * cols
+        left = [
+            ("class:tb-kb", " ⌨   "),
+            ("class:tb-accent", "@"),
+            ("class:tb-text", " file   "),
+            ("class:tb-accent", "/"),
+            ("class:tb-text", " perintah   "),
+            ("class:tb-accent", "!"),
+            ("class:tb-text", " shell"),
+        ]
+        left_len = 34
+        cur_icon, cur_text = app_state["icon"], app_state["status"]
+        right_text = f"│   {cur_icon} {cur_text} "
+        right_len = len(right_text)
+        if cols >= 65:
+            spaces = max(1, cols - left_len - right_len)
+            return FormattedText([
+                ("class:tb-rule", sep_line + "\n"),
+                *left,
+                ("class:tb-bg", " " * spaces),
+                ("class:tb-dim", "│   "),
+                ("class:tb-status", f"{cur_icon} {cur_text} "),
+            ])
+        return FormattedText([
+            ("class:tb-rule", sep_line + "\n"),
+            *left,
+        ])
+
     # Initialize prompt_toolkit session with autocomplete & history
     session = None
     try:
@@ -316,14 +368,23 @@ def run_interactive(
         from prompt_toolkit.history import FileHistory
 
         pt_style = Style.from_dict({
-            "prompt": "#2ecc71 bold",
-            "repo": "#9a9ea7",
-            "completion-menu.completion": "bg:#1a1d24 #e6e6e6",
-            "completion-menu.completion.current": "bg:#6c5ce7 #ffffff bold",
-            "completion-menu.meta.completion": "bg:#1a1d24 #888888",
-            "completion-menu.meta.completion.current": "bg:#6c5ce7 #f1c40f bold",
-            "scrollbar.background": "bg:#0f1115",
-            "scrollbar.button": "bg:#6c5ce7",
+            "prompt-name": "#00FF66 bold",
+            "prompt-repo": "#cbd5e0",
+            "prompt-arrow": "#a0aec0 bold",
+            "bottom-toolbar": "bg:#0a0b0c #a0aec0",
+            "tb-rule": "bg:#0a0b0c #1f2937",
+            "tb-kb": "bg:#0a0b0c #cbd5e0",
+            "tb-accent": "bg:#0a0b0c #00FF66 bold",
+            "tb-text": "bg:#0a0b0c #e2e8f0",
+            "tb-bg": "bg:#0a0b0c",
+            "tb-dim": "bg:#0a0b0c #4a5568",
+            "tb-status": "bg:#0a0b0c #00FF66 bold",
+            "completion-menu.completion": "bg:#111518 #e2e8f0",
+            "completion-menu.completion.current": "bg:#00FF66 #000000 bold",
+            "completion-menu.meta.completion": "bg:#111518 #718096",
+            "completion-menu.meta.completion.current": "bg:#00FF66 #000000 bold",
+            "scrollbar.background": "bg:#0a0b0c",
+            "scrollbar.button": "bg:#00FF66",
         })
         history_file = GLOBAL_CONFIG_DIR / "history.txt"
         GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -331,30 +392,110 @@ def run_interactive(
             completer=BrainFrogCompleter(lambda: repo_dir),
             history=FileHistory(str(history_file)),
             style=pt_style,
+            bottom_toolbar=get_bottom_toolbar,
             complete_while_typing=True,
         )
     except Exception:
         session = None
 
     def print_banner() -> None:
-        branch = get_git_branch(repo_dir)
-        domains = load_module_map(repo_dir, Path(module_map) if module_map else None, auto_create=False)
-        domain_list = ", ".join(domains.keys()) if domains else "(auto-discovered)"
+        cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        shell_name = detect_shell_display()
         has_rules = bool(load_project_guidelines(repo_dir))
+        memory_text = "Aktif (BRAINFROG.md)" if has_rules else "Belum diatur"
 
-        banner_content = (
-            f"[bold green]🐸 BrainFrog[/bold green] [dim]v0.2.0 — Dual-System Coding Agent[/dim]\n\n"
-            f"[bold]Workspace[/bold]  : [cyan]{repo_dir}[/cyan] [dim](git: {branch})[/dim]\n"
-            f"[bold]System 1[/bold]   : [magenta]{active_backend}[/magenta] [dim](Jev gatekeeper)[/dim]\n"
-            f"[bold]System 2[/bold]   : [blue]{active_model}[/blue] [dim](Claude generation)[/dim]\n"
-            f"[bold]Domains[/bold]    : [yellow]{domain_list}[/yellow]\n"
-            f"[bold]Memory[/bold]     : [green]Active (BRAINFROG.md)[/green]" if has_rules else "[bold]Memory[/bold]     : [dim]None (type /rules to add)[/dim]"
+        # Frog Pixel Art (7 rows, 22 cols wide)
+        frog_lines = [
+            r"[bold #00FF66]   ▄▄▄▄        ▄▄▄▄   [/bold #00FF66]",
+            r"[bold #00FF66]  █▀  ▀█  ▄▄  █▀  ▀█  [/bold #00FF66]",
+            r"[bold #00FF66] ▐█ [/bold #00FF66][bold white]0[/bold white][bold #00FF66]  █▌▀▀▀▀▐█  [/bold #00FF66][bold white]0[/bold white][bold #00FF66] █▌ [/bold #00FF66]",
+            r"[bold #00FF66] ▄█▀                ▀█▄[/bold #00FF66]",
+            r"[bold #00FF66]▐█   ▄  ────────  ▄  █▌[/bold #00FF66]",
+            r"[bold #00FF66] ▀█▄                ▄█▀[/bold #00FF66]",
+            r"[bold #00FF66]   ▀▀██████████████▀▀  [/bold #00FF66]",
+        ]
+
+        # Full Wordmark (69 cols wide)
+        wordmark_wide = [
+            r"[bold #00FF66]██████  ██████   ▄██▄   ████  ██  ██  ██████  ██████   ▄██▄    ▄████ [/bold #00FF66]",
+            r"[bold #00FF66]██  ██  ██  ██  ██  ██   ██   ███ ██  ██      ██  ██  ██  ██  ██     [/bold #00FF66]",
+            r"[bold #00FF66]█████   █████   ██████   ██   ██████  █████   █████   ██  ██  ██ ███ [/bold #00FF66]",
+            r"[bold #00FF66]██  ██  ██  ██  ██  ██   ██   ██ ███  ██      ██  ██  ██  ██  ██  ██ [/bold #00FF66]",
+            r"[bold #00FF66]██████  ██   ██ ██  ██  ████  ██  ██  ██      ██   ██  ▀██▀    ▀████ [/bold #00FF66]",
+            r"                                                                      ",
+            r"[dim #2ecc71]───────[/dim #2ecc71]  [#cbd5e0]A I   C O D I N G   C L I   F O R   R E A L   W O R K[/#cbd5e0]  [dim #2ecc71]───────[/dim #2ecc71]",
+        ]
+
+        # Compact Wordmark (46 cols wide)
+        wordmark_compact = [
+            r"[bold #00FF66]████▄ ████▄ ▄██▄ ███ █  █ ████ ████▄ ▄██▄ ▄███[/bold #00FF66]",
+            r"[bold #00FF66]██  █ ██  █ █  █  █  ██ █ █    ██  █ █  █ █   [/bold #00FF66]",
+            r"[bold #00FF66]████▀ ████▀ ████  █  █ ██ ███  ████▀ █  █ █ ██[/bold #00FF66]",
+            r"[bold #00FF66]██  █ ██  █ █  █  █  █  █ █    ██  █ █  █ █  █[/bold #00FF66]",
+            r"[bold #00FF66]████▀ ██  █ █  █ ███ █  █ █    ██  █ ▀██▀ ▀███[/bold #00FF66]",
+            r"                                               ",
+            r"[dim #2ecc71]──[/dim #2ecc71]  [#cbd5e0]AI CODING CLI FOR REAL WORK[/#cbd5e0]  [dim #2ecc71]──[/dim #2ecc71]",
+        ]
+
+        cur_icon, cur_text = app_state["icon"], app_state["status"]
+        status_style = "bold #00FF66" if cur_text == "Siap" else ("bold yellow" if "Memproses" in cur_text else ("bold green" if "Selesai" in cur_text else "bold red"))
+
+        right_lines = [
+            f"[#718096]v{CLI_VERSION}[/#718096]",
+            f"[{status_style}]{cur_icon} {cur_text}[/{status_style}]",
+            "",
+            f"[#718096]Mode:[/#718096] [#cbd5e0]agentic[/#cbd5e0]",
+            f"[#718096]Shell:[/#718096] [#cbd5e0]{shell_name}[/#cbd5e0]",
+            "",
+            "",
+        ]
+
+        console.print()
+        if cols >= 115:
+            for i in range(7):
+                console.print(f" {frog_lines[i]}  {wordmark_wide[i]}  [dim #4a5568]│[/dim #4a5568]  {right_lines[i]}")
+        elif cols >= 92:
+            for i in range(7):
+                console.print(f" {frog_lines[i]} {wordmark_compact[i]} [dim #4a5568]│[/dim #4a5568] {right_lines[i]}")
+        else:
+            for i in range(5):
+                console.print(f"{wordmark_compact[i]}")
+            console.print(f"[{status_style}]{cur_icon} {cur_text}[/{status_style}]  [#718096]v{CLI_VERSION} | Mode: agentic | Shell: {shell_name}[/#718096]")
+
+        console.print()
+
+        # Session Card Panel
+        top_text = Text()
+        top_text.append(" 🧠  ", style="bold #00FF66")
+        top_text.append("Memory    :   ", style="bold white")
+        top_text.append(f"{memory_text}\n", style="#cbd5e0" if not has_rules else "bold #00FF66")
+
+        top_text.append(" >_  ", style="bold #00FF66")
+        top_text.append("Test Cmd  :   ", style="bold white")
+        top_text.append(f"{active_test_cmd}", style="#cbd5e0")
+
+        divider = Rule(style="dim #2d3748")
+
+        bottom_text = Text()
+        bottom_text.append(" ⓘ  ", style="bold #00FF66")
+        bottom_text.append("Ketik tugas atau pertanyaan... (bisa gunakan ", style="#718096")
+        bottom_text.append("@file", style="bold white")
+        bottom_text.append("), ", style="#718096")
+        bottom_text.append("!perintah", style="bold white")
+        bottom_text.append(" shell, ", style="#718096")
+        bottom_text.append("/help", style="bold white")
+        bottom_text.append(" untuk menu, atau ", style="#718096")
+        bottom_text.append("/exit.", style="bold white")
+
+        card_group = Group(top_text, divider, bottom_text)
+        panel = Panel(
+            card_group,
+            border_style="#00FF66",
+            box=box.ROUNDED,
+            padding=(0, 1),
         )
-        banner_content += (
-            f"\n[bold]Test Cmd[/bold]   : [dim]`{active_test_cmd}`[/dim]\n\n"
-            f"[dim]Ketik prompt Anda (bisa gunakan @file dengan auto-complete), !perintah shell, /help, atau /exit.[/dim]"
-        )
-        console.print(Panel(banner_content, border_style="green", box=box.ROUNDED))
+        console.print(panel)
+        console.print()
 
     def show_help() -> None:
         table = Table(title="BrainFrog Slash Commands & Shortcuts", box=box.SIMPLE_HEAVY)
@@ -386,15 +527,20 @@ def run_interactive(
             repo_name = repo_dir.name
             if session:
                 prompt_parts = [
-                    ("class:prompt", "brainfrog "),
-                    ("class:repo", f"({repo_name})> "),
+                    ("class:prompt-name", "brainfrog "),
+                    ("class:prompt-repo", f"({repo_name})"),
+                    ("class:prompt-arrow", " > "),
                 ]
                 prompt = session.prompt(prompt_parts).strip()
             else:
-                prompt = console.input(f"[bold green]brainfrog[/bold green] [dim]({repo_name})>[/dim] ").strip()
+                cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+                console.print(f"[dim]{'─' * cols}[/dim]")
+                console.print(f" [dim]⌨ [/dim]  [bold #00FF66]@[/bold #00FF66] file   [bold #00FF66]/[/bold #00FF66] perintah   [bold #00FF66]![/bold #00FF66] shell")
+                prompt = console.input(f"[bold #00FF66]brainfrog[/bold #00FF66] [dim]({repo_name}) >[/dim] ").strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Bye! 🐸[/dim]")
             break
+
 
         if not prompt:
             continue
@@ -545,7 +691,9 @@ def run_interactive(
 
         # Execute task
         console.print(f"\n[dim]Executing task:[/dim] [bold]{prompt}[/bold]\n")
-        execute_task(
+        app_state["status"] = "Memproses..."
+        app_state["icon"] = "◌"
+        exit_code = execute_task(
             task=prompt,
             repo_dir=repo_dir,
             backend=active_backend,
@@ -557,6 +705,12 @@ def run_interactive(
             pr_risk_ceiling=pr_risk_ceiling,
             max_retries=max_retries,
         )
+        if exit_code == 0:
+            app_state["status"] = "Selesai"
+            app_state["icon"] = "✓"
+        else:
+            app_state["status"] = "Gagal"
+            app_state["icon"] = "✗"
 
 
 # -------------------------------------------------------------------------
@@ -578,7 +732,7 @@ def main() -> int:
     p.add_argument("--max-retries", type=int, default=3)
     p.add_argument("--module-map", default=None, help="Path to custom modules.json")
     p.add_argument("--min-domain-confidence", type=float, default=0.45)
-    p.add_argument("-v", "--version", action="version", version="BrainFrog 0.2.0")
+    p.add_argument("-v", "--version", action="version", version=f"BrainFrog {CLI_VERSION}")
 
     args = p.parse_args()
 
