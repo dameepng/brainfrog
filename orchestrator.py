@@ -10,9 +10,17 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Ensure the package root (directory of this file) is always on sys.path so
+# that `skills.py` and other sibling modules are importable regardless of the
+# working directory from which `brainfrog` is invoked.
+_PACKAGE_DIR = str(Path(__file__).resolve().parent)
+if _PACKAGE_DIR not in sys.path:
+    sys.path.insert(0, _PACKAGE_DIR)
 
 from modules import Domain, resolve_focus_tree
 from system1.base import Answer, ChoiceQuestion, NoulQuestion, ScoreQuestion, SystemOneClient
@@ -169,7 +177,7 @@ class Orchestrator:
         self.guidelines = load_project_guidelines(self.cfg.repo_dir)
 
         # Index available modular skills (metadata only: name & description)
-        from skills import index_skills, select_skill
+        from skills import index_skills, select_skill, load_skill_content  # noqa: PLC0415
         self.available_skills = index_skills(self.cfg.repo_dir)
         self.active_skill, clean_task = select_skill(
             self.cfg.task,
@@ -181,7 +189,6 @@ class Orchestrator:
         # Prepare System 2 guidelines (project memory + active skill if any)
         base_rules = self.guidelines or self.s2.guidelines or ""
         if self.active_skill:
-            from skills import load_skill_content
             skill_text = load_skill_content(self.active_skill, include_references=False)
             self.s2.guidelines = f"{base_rules}\n\n[Active Modular Skill: {self.active_skill.name}]\n{skill_text}".strip()
         elif base_rules:

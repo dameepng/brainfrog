@@ -25,6 +25,12 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+# Ensure package root is on sys.path so sibling modules (skills.py, etc.)
+# are importable regardless of the working directory from which brainfrog runs.
+_PACKAGE_DIR = str(Path(__file__).resolve().parent)
+if _PACKAGE_DIR not in sys.path:
+    sys.path.insert(0, _PACKAGE_DIR)
+
 from dotenv import load_dotenv
 from rich import box
 from rich.console import Console, Group
