@@ -498,8 +498,13 @@ def run_interactive(
         from prompt_toolkit.shortcuts import PromptSession
         from prompt_toolkit.styles import Style
         from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.key_binding import KeyBindings
 
         pt_style = Style.from_dict({
+            "pad": "bg:#0a0a0a",
+            "accent": "#00FF66 bold",
+            "panel-bg": "bg:#1e1e1e",
             "prompt-name": "#00FF66 bold",
             "prompt-repo": "#94a3b8",
             "prompt-arrow": "#64748b bold",
@@ -510,85 +515,85 @@ def run_interactive(
             "scrollbar.background": "bg:#0a0b0c",
             "scrollbar.button": "bg:#00FF66",
         })
+
+        kb = KeyBindings()
+
+        @kb.add("c-p")
+        def _palette(event):
+            event.current_buffer.text = "/help"
+            event.current_buffer.validate_and_handle()
+
+        @kb.add("tab")
+        def _tab_handler(event):
+            b = event.current_buffer
+            if not b.text.strip():
+                b.text = "/models"
+                b.validate_and_handle()
+            else:
+                event.app.current_buffer.start_completion(select_first=False)
+
         history_file = GLOBAL_CONFIG_DIR / "history.txt"
         GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         session = PromptSession(
             completer=BrainFrogCompleter(lambda: repo_dir),
             history=FileHistory(str(history_file)),
             style=pt_style,
+            key_bindings=kb,
             complete_while_typing=True,
         )
     except Exception:
         session = None
 
-    def print_banner() -> None:
-        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
-        has_rules = bool(load_project_guidelines(repo_dir))
-        memory_text = "active (BRAINFROG.md)" if has_rules else "not set"
-        mem_style = "bold #00FF66" if has_rules else "#cbd5e0"
+    def print_banner(is_splash: bool = False) -> None:
+        cols, rows = shutil.get_terminal_size(fallback=(95, 35))
 
-        skill_text = f"skill: {active_skill}" if active_skill else "skill: auto"
-        skill_style = "bold #00FF66" if active_skill else "#cbd5e0"
+        if is_splash:
+            console.clear()
+            # Top padding (~36% down from top)
+            top_pad = max(1, int(rows * 0.36) - 4)
+            for _ in range(top_pad):
+                console.print()
 
-        cur_icon, cur_text = app_state["icon"], app_state["status"]
-        status_style = "bold #00FF66" if cur_text == "Ready" else ("bold yellow" if "Processing" in cur_text else ("bold green" if "Done" in cur_text else "bold red"))
+            # Geometric Monospace Wordmark BRAINFROG
+            wm_lines = [
+                ("█▀▀▄ █▀▀▄ ▄▀▀▄ ▀█▀ █▄  █", "   ", "█▀▀ █▀▀▄ ▄▀ ▀▄ ▄▀▀▀"),
+                ("█▀▀▄ █▀▀▄ █▀▀█  █  █ ▀▄█", "   ", "█▀  █▀▀▄ █▄▄▄█ █ ▀█"),
+                ("▀▀▀  ▀  ▀ ▀  ▀ ▀▀▀ ▀   ▀", "   ", "▀   ▀  ▀ ▀   ▀ ▀▀▀▀"),
+            ]
+            total_wm_w = 46
+            wm_pad = " " * max(0, (cols - total_wm_w) // 2)
 
-        frog_3row = [
-            r"  [bold #00FF66]▄▀▄  ▄▀▄[/bold #00FF66]   ",
-            r" [bold #00FF66]▐█[/bold #00FF66][bold white]0[/bold white][bold #00FF66]█──█[/bold #00FF66][bold white]0[/bold white][bold #00FF66]█▌[/bold #00FF66]  ",
-            r"  [bold #00FF66]▀█▄▄▄▄█▀[/bold #00FF66]   ",
-        ]
+            if cols >= 50:
+                for r_idx, (b_part, g_part, f_part) in enumerate(wm_lines):
+                    if r_idx == 0:
+                        f_styled = "[bold #eeeeee]█▀▀ █▀▀▄ [/bold #eeeeee][bold #00FF66]▄▀ ▀▄[/bold #00FF66][bold #eeeeee] ▄▀▀▀[/bold #eeeeee]"
+                    elif r_idx == 1:
+                        f_styled = "[bold #eeeeee]█▀  █▀▀▄ █▄▄▄█ █ ▀█[/bold #eeeeee]"
+                    else:
+                        f_styled = "[bold #eeeeee]▀   ▀  ▀ ▀   ▀ ▀▀▀▀[/bold #eeeeee]"
+                    console.print(f"{wm_pad}[#808080]{b_part}[/#808080]{g_part}{f_styled}")
+            else:
+                console.print(f"{wm_pad}[bold #00FF66]BRAINFROG[/bold #00FF66]")
 
-        wm_3row = [
-            r"[bold #00FF66]█▀▀▄ █▀▀█ ▄▀▀▄ ▀█▀ █▄  █ █▀▀ █▀▀▄ ▄▀▀▄ ▄▀▀▀[/bold #00FF66]",
-            r"[bold #00FF66]█▀▀▄ █▀▀▄ █▀▀█  █  █ ▀▄█ █▀  █▀▀▄ █  █ █ ▀█[/bold #00FF66]",
-            r"[bold #00FF66]▀▀▀  ▀  ▀ ▀  ▀ ▀▀▀ ▀   ▀ ▀   ▀  ▀  ▀▀  ▀▀▀▀[/bold #00FF66]",
-        ]
-
-        right_3row = [
-            f" [dim #718096]v{CLI_VERSION}[/dim #718096]",
-            f" [{status_style}]{cur_icon} {cur_text}[/{status_style}]",
-            "",
-        ]
-
-        console.print()
-        if cols >= 68:
-            for f, w, r in zip(frog_3row, wm_3row, right_3row):
-                console.print(f"{f} {w}  {r}")
-        elif cols >= 45:
-            console.print(f" [bold #00FF66]▄▀▄ ▄▀▄ BRAINFROG[/bold #00FF66] [dim #718096]v{CLI_VERSION}[/dim #718096]  [{status_style}]{cur_icon} {cur_text}[/{status_style}]")
+            # 2 blank lines (the generous gap from reference)
+            console.print()
+            console.print()
         else:
-            console.print(f" [bold #00FF66]BRAINFROG[/bold #00FF66] [dim #718096]v{CLI_VERSION}[/dim #718096]")
-            console.print(f" [{status_style}]{cur_icon} {cur_text}[/{status_style}]")
-
-        console.print()
-
-        # Compact summary line: mode, provider/model, memory, skill, test command
-        prov_disp = "antigravity (Google Auth)" if active_provider == "antigravity" else "claude"
-        if cols >= 80:
+            # Compact banner for in-conversation status refresh
             console.print(
-                f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  "
-                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]provider:[/dim #718096] [bold #00FF66]{prov_disp}[/bold #00FF66] ([dim]{active_model}[/dim])  "
-                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]memory:[/dim #718096] [{mem_style}]{memory_text}[/{mem_style}]  "
-                f"[dim #4a5568]·[/dim #4a5568]  [{skill_style}]{skill_text}[/{skill_style}]"
+                f"[bold #00FF66]BRAINFROG[/bold #00FF66] [dim #555555]v{CLI_VERSION}[/dim #555555] "
+                f"· [bold #00FF66]agentic[/bold #00FF66] "
+                f"· [bold #eeeeee]{active_model}[/bold #eeeeee] "
+                f"· [dim #808080]{repo_dir.name}[/dim #808080]"
             )
-            console.print(f"  [dim #718096]test:[/dim #718096] [#cbd5e0]{active_test_cmd}[/#cbd5e0]")
-        else:
-            console.print(
-                f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  "
-                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]provider:[/dim #718096] [bold #00FF66]{active_provider}[/bold #00FF66]  "
-                f"[dim #4a5568]·[/dim #4a5568]  [{skill_style}]{skill_text}[/{skill_style}]"
-            )
-            console.print(f"  [dim #718096]model:[/dim #718096] [dim]{active_model}[/dim]  ·  [dim #718096]test:[/dim #718096] [#cbd5e0]{active_test_cmd}[/#cbd5e0]")
-
-        console.print()
-        console.print("  [dim #718096]@ file · / perintah · ! shell[/dim #718096]")
-        console.print()
+            console.print()
 
     def show_help() -> None:
         table = Table(title="BrainFrog Commands & Shortcuts", box=box.SIMPLE, show_edge=False, header_style="bold #00FF66")
         table.add_column("Command", style="cyan", no_wrap=True)
         table.add_column("Description", style="white")
+        table.add_row("Ctrl+P", "Open command palette directly")
+        table.add_row("Tab", "Cycle model / autocomplete prompt")
         table.add_row("/help, /?", "Show this help table")
         table.add_row("/undo", "Revert last change or commit cleanly via Git")
         table.add_row("/diff", "View colored git diff of recent changes")
@@ -606,33 +611,107 @@ def run_interactive(
         table.add_row("/domains", "List detected domain modules and paths")
         table.add_row("!command", "Run terminal shell command directly (e.g. !start index.html)")
         table.add_row("@filename", "Pin file context with live autocomplete popup (e.g. @app.js)")
-        table.add_row("/clear", "Clear terminal screen")
+        table.add_row("/clear", "Clear terminal screen and return to splash screen")
         table.add_row("/exit, /quit", "Exit BrainFrog session")
         console.print(table)
         console.print()
 
     console.clear()
-    print_banner()
+    print_banner(is_splash=True)
+
+    is_first_turn = True
 
     while True:
         try:
             repo_name = repo_dir.name
-            if session:
+            cols, rows = shutil.get_terminal_size(fallback=(95, 35))
+            panel_w = max(40, min(80, int(cols * 0.70)))
+            margin = max(0, (cols - panel_w) // 2)
+            pad = " " * margin
+
+            if is_first_turn:
+                # OpenCode-inspired minimal landing screen input
+                def get_landing_toolbar():
+                    c_cols, c_rows = shutil.get_terminal_size(fallback=(95, 35))
+                    c_panel_w = max(40, min(80, int(c_cols * 0.70)))
+                    c_margin = max(0, (c_cols - c_panel_w) // 2)
+                    c_pad = " " * c_margin
+
+                    meta_visible = f"  agentic · {active_model}  {repo_name}"
+                    fill_len = max(0, c_panel_w - 1 - len(meta_visible))
+                    fill_space = " " * fill_len
+
+                    tb_lines = []
+                    # Row 1: Metadata row inside charcoal panel
+                    tb_lines.append(
+                        f'<style bg="#0a0a0a">{c_pad}</style>'
+                        f'<style color="#00FF66" bold="true">▌</style>'
+                        f'<style bg="#1e1e1e">  </style>'
+                        f'<style color="#00FF66" bold="true" bg="#1e1e1e">agentic</style>'
+                        f'<style color="#555555" bg="#1e1e1e"> · </style>'
+                        f'<style color="#eeeeee" bold="true" bg="#1e1e1e">{active_model}</style>'
+                        f'<style color="#808080" bg="#1e1e1e">  {repo_name}{fill_space}</style>'
+                    )
+                    # Row 2: Gap
+                    tb_lines.append(f'<style bg="#0a0a0a"> </style>')
+                    # Row 3: Shortcuts line aligned with left edge of input panel
+                    tb_lines.append(
+                        f'<style bg="#0a0a0a">{c_pad}</style>'
+                        f'<style color="#eeeeee" bold="true">tab</style><style color="#808080"> mode   </style>'
+                        f'<style color="#eeeeee" bold="true">ctrl+p</style><style color="#808080"> commands   </style>'
+                        f'<style color="#eeeeee" bold="true">/models</style><style color="#808080"> pick   </style>'
+                        f'<style color="#eeeeee" bold="true">@</style><style color="#808080"> file</style>'
+                    )
+                    # Gap down to bottom
+                    c_top_pad = max(1, int(c_rows * 0.36) - 4)
+                    used_lines = c_top_pad + 3 + 2 + 1 + 3
+                    bottom_gap = max(0, c_rows - used_lines - 2)
+                    for _ in range(bottom_gap):
+                        tb_lines.append(f'<style bg="#0a0a0a"> </style>')
+
+                    # Bottom footer line: ~ at left, version at right
+                    v_str = f"v{CLI_VERSION}"
+                    foot_space = " " * max(2, c_cols - 1 - len("~") - len(v_str))
+                    tb_lines.append(f'<style color="#555555" bg="#0a0a0a">~{foot_space}{v_str}</style>')
+
+                    return HTML("\n".join(tb_lines))
+
+                prompt_parts = [
+                    ("class:pad", pad),
+                    ("class:accent", "▌"),
+                    ("class:panel-bg", "  "),
+                ]
+
+                if session:
+                    prompt = session.prompt(
+                        prompt_parts,
+                        placeholder='Tanya BrainFrog… "Jelaskan arsitektur proyek ini"',
+                        bottom_toolbar=get_landing_toolbar,
+                    ).strip()
+                else:
+                    console.print(f"{pad}[bold #00FF66]▌[/bold #00FF66] [dim #808080]Tanya BrainFrog… \"Jelaskan arsitektur proyek ini\"[/dim #808080]")
+                    console.print(f"{pad}[bold #00FF66]▌[/bold #00FF66]  [bold #00FF66]agentic[/bold #00FF66] [#555555]·[/#555555] [bold #eeeeee]{active_model}[/bold #eeeeee]  [#808080]{repo_name}[/#808080]")
+                    console.print()
+                    console.print(f"{pad}[bold #eeeeee]tab[/bold #eeeeee] [#808080]mode[/#808080]   [bold #eeeeee]ctrl+p[/bold #eeeeee] [#808080]commands[/#808080]   [bold #eeeeee]/models[/bold #eeeeee] [#808080]pick[/#808080]   [bold #eeeeee]@[/bold #eeeeee] [#808080]file[/#808080]")
+                    prompt = console.input(f"{pad}[bold #00FF66]▌[/bold #00FF66] ").strip()
+            else:
                 prompt_parts = [
                     ("class:prompt-name", "brainfrog "),
                     ("class:prompt-repo", f"({repo_name})"),
                     ("class:prompt-arrow", " > "),
                 ]
-                prompt = session.prompt(prompt_parts).strip()
-            else:
-                prompt = console.input(f"[bold #00FF66]brainfrog[/bold #00FF66] [dim]({repo_name}) >[/dim] ").strip()
+                if session:
+                    prompt = session.prompt(prompt_parts).strip()
+                else:
+                    prompt = console.input(f"[bold #00FF66]brainfrog[/bold #00FF66] [dim]({repo_name}) >[/dim] ").strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Bye! 🐸[/dim]")
             break
 
-
         if not prompt:
             continue
+
+        is_first_turn = False
 
         # Shell command passthrough: !cmd or $cmd
         if prompt.startswith("!") or prompt.startswith("$"):
@@ -656,10 +735,11 @@ def run_interactive(
             continue
         elif lower == "/clear":
             console.clear()
-            print_banner()
+            is_first_turn = True
+            print_banner(is_splash=True)
             continue
         elif lower == "/status":
-            print_banner()
+            print_banner(is_splash=False)
             continue
         elif lower == "/undo":
             # 1. Check uncommitted changes first
