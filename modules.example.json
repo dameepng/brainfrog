@@ -1,0 +1,22 @@
+{
+  "auth": {
+    "description": "Login, sessions, password reset, OAuth, tokens, permissions.",
+    "paths": ["app/auth/", "app/middleware/session.py"],
+    "sensitive": true
+  },
+  "billing": {
+    "description": "Payments, invoices, subscriptions, refunds, pricing.",
+    "paths": ["app/billing/"],
+    "sensitive": true
+  },
+  "notifications": {
+    "description": "Email, push, and in-app notifications.",
+    "paths": ["app/notifications/"],
+    "sensitive": false
+  },
+  "ui": {
+    "description": "Frontend components, pages, styling, client-side state.",
+    "paths": ["app/ui/", "app/static/"],
+    "sensitive": false
+  }
+}

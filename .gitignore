@@ -1,0 +1,21 @@
+# Environment variables & API keys
+.env
+.env.*
+!.env.example
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Scratch & test sandbox
+sandbox_repo/
