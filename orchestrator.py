@@ -86,7 +86,8 @@ def extract_mentioned_files(task: str, repo_dir: Path) -> Dict[str, str]:
 
 
 def _run(cmd: List[str], cwd: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    use_shell = sys.platform == "win32"
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, shell=use_shell)
 
 
 def _repo_tree(repo_dir: Path, max_files: int = 200) -> str:
@@ -184,12 +185,36 @@ CHANGE_TYPE_QUESTION = ChoiceQuestion(
 RISK_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
+def is_question_task(task: str, change_type: str = "") -> bool:
+    """Return True if the task is an inquiry/explanation/question rather than a code change request."""
+    if change_type == "question_only":
+        return True
+    clean = task.strip().lower()
+    if clean.endswith("?"):
+        return True
+    question_keywords = (
+        "ada apa", "apa ", "apa saja", "apakah", "jelaskan", "bagaimana", "kenapa", "mengapa",
+        "siapa", "tolong jelaskan", "tampilkan", "bantu jelaskan", "sebutkan", "daftar", "struktur",
+        "ceritakan", "apa isi", "ada file apa", "review",
+        "what", "why", "how", "explain", "describe", "overview", "list", "show me", "tell me",
+        "is there", "are there", "who", "which",
+    )
+    return any(clean.startswith(kw) or f" {kw} " in f" {clean} " for kw in question_keywords)
+
+
 class Orchestrator:
-    def __init__(self, system1: SystemOneClient, system2: System2Client, config: RunConfig):
+    def __init__(
+        self,
+        system1: SystemOneClient,
+        system2: System2Client,
+        config: RunConfig,
+        log_fn: Optional[Any] = None,
+    ):
         self.s1 = system1
         self.s2 = system2
         self.s2_tag = getattr(self.s2, "provider_name", "claude")
         self.cfg = config
+        self.log_fn = log_fn
         self.guidelines = load_project_guidelines(self.cfg.repo_dir)
 
         # Index available modular skills (metadata only: name & description)
@@ -211,38 +236,60 @@ class Orchestrator:
             self.s2.guidelines = base_rules
         self.pinned_files = extract_mentioned_files(self.cfg.task, self.cfg.repo_dir)
 
+    def _log(self, msg: str) -> None:
+        if self.log_fn:
+            self.log_fn(msg)
+        else:
+            print(msg)
+
     def run(self) -> List[StepResult]:
         if self.guidelines:
-            print("[brainfrog] 🧠 Applied project memory/rules from BRAINFROG.md")
+            self._log("[brainfrog] 🧠 Applied project memory/rules from BRAINFROG.md")
         if self.active_skill:
-            print(f"[brainfrog] 🎯 Skill: {self.active_skill.name}")
+            self._log(f"[brainfrog] 🎯 Skill: {self.active_skill.name}")
         if self.pinned_files:
-            print(f"[brainfrog] 📌 Pinned {len(self.pinned_files)} context file(s): {', '.join(self.pinned_files.keys())}")
+            self._log(f"[brainfrog] 📌 Pinned {len(self.pinned_files)} context file(s): {', '.join(self.pinned_files.keys())}")
 
         scope = self._scope_gate()
 
         if scope.clarify_message:
-            print(f"[system1/jev:{self.s1.name}] scope gate: not confident enough, asking the user")
-            print(f"\n{scope.clarify_message}\n")
+            self._log(f"[system1/jev:{self.s1.name}] scope gate: not confident enough, asking the user")
             return [StepResult(PlanStep("0", "scope clarification", []), "needs_clarification", 0, scope.clarify_message)]
 
         domain_label = scope.domain.key if scope.domain else "unscoped"
-        print(f"[system1/jev:{self.s1.name}] scope gate: domain='{domain_label}' change_type='{scope.change_type}'")
+        self._log(f"[system1/jev:{self.s1.name}] scope gate: domain='{domain_label}' change_type='{scope.change_type}'")
 
         if scope.change_type == "question_only":
-            focus_files = _read_files_from_tree(self.cfg.repo_dir, scope.focus_tree)
+            tree = scope.focus_tree or _repo_tree(self.cfg.repo_dir)
+            max_f = 10 if not scope.domain else 30
+            focus_files = _read_files_from_tree(self.cfg.repo_dir, tree, max_files=max_f)
+            for k in list(focus_files.keys()):
+                if len(focus_files[k]) > 4000:
+                    focus_files[k] = focus_files[k][:4000] + "\n... (truncated)"
             if self.pinned_files:
                 focus_files.update(self.pinned_files)
-            print(f"[system2/{self.s2_tag}] this reads as a question, not a change — diagnosing only ...")
-            answer = self.s2.diagnose(self.cfg.task, focus_files, domain_label)
-            print(f"\n{answer}\n")
+            # Include overview files if available
+            for key_file in (
+                "README.md", "readme.md", "modules.json", "package.json",
+                "pyproject.toml", "index.html", "main.py"
+            ):
+                kf = self.cfg.repo_dir / key_file
+                if kf.exists() and kf.is_file() and key_file not in focus_files:
+                    try:
+                        focus_files[key_file] = kf.read_text(encoding="utf-8", errors="replace")[:3000]
+                    except Exception:
+                        pass
+
+            repo_files = _repo_tree(self.cfg.repo_dir)
+            self._log(f"[system2/{self.s2_tag}] answering question / diagnosing ...")
+            answer = self.s2.diagnose(self.cfg.task, focus_files, domain_label, repo_tree=repo_files)
             return [StepResult(PlanStep("0", "diagnosis", []), "diagnosed", 0, answer)]
 
-        print(f"[system2/{self.s2_tag}] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
+        self._log(f"[system2/{self.s2_tag}] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
         steps = self.s2.plan_task(self.cfg.task, scope.focus_tree, pinned_files=self.pinned_files)
         for s in steps:
             s.files = [_normalize_rel_path(self.cfg.repo_dir, f) for f in s.files]
-        print(f"[system2/{self.s2_tag}] plan has {len(steps)} step(s)")
+        self._log(f"[system2/{self.s2_tag}] plan has {len(steps)} step(s)")
 
         results: List[StepResult] = []
         for step in steps:
@@ -254,7 +301,8 @@ class Orchestrator:
 
     def _scope_gate(self) -> ScopeDecision:
         if not self.cfg.domains:
-            return ScopeDecision(domain=None, change_type="unclear", focus_tree=_repo_tree(self.cfg.repo_dir))
+            change_type = "question_only" if is_question_task(self.cfg.task) else "unclear"
+            return ScopeDecision(domain=None, change_type=change_type, focus_tree=_repo_tree(self.cfg.repo_dir))
 
         criteria = {key: d.description for key, d in self.cfg.domains.items()}
         criteria["unrelated"] = "Doesn't clearly match any of the other listed areas."
@@ -268,15 +316,28 @@ class Orchestrator:
         )
         domain_answer = answers["likely_domain"]
         change_type = answers["change_type"].choice or "unclear"
-        print(
+        if is_question_task(self.cfg.task, change_type):
+            change_type = "question_only"
+
+        self._log(
             f"[system1/jev:{self.s1.name}] likely_domain = {domain_answer}, "
-            f"change_type = {answers['change_type']}"
+            f"change_type = {change_type}"
         )
 
         threshold = 0.35 if len(self.cfg.domains) == 1 else self.cfg.min_domain_confidence
         low_confidence = domain_answer.confidence < threshold
         unresolved = domain_answer.choice in (None, "unrelated")
         if low_confidence or unresolved:
+            if change_type == "question_only":
+                # For questions about the repo, do not block the user with scope clarification!
+                # Fall back to whole-repo tree so System 2 can answer directly.
+                return ScopeDecision(
+                    domain=None,
+                    change_type=change_type,
+                    focus_tree=_repo_tree(self.cfg.repo_dir),
+                    clarify_message=None,
+                )
+
             options = ", ".join(self.cfg.domains.keys())
             msg = (
                 f"I'm not confident enough about which part of the codebase this is about "
@@ -293,10 +354,10 @@ class Orchestrator:
         return ScopeDecision(domain=domain, change_type=change_type, focus_tree=focus_tree)
 
     def _run_step(self, step: PlanStep, sensitive: bool = False) -> StepResult:
-        print(f"\n=== Step {step.id}: {step.description} ===")
+        self._log(f"\n=== Step {step.id}: {step.description} ===")
         file_contents = _read_files(self.cfg.repo_dir, step.files)
 
-        print(f"[system2/{self.s2_tag}] writing code ...")
+        self._log(f"[system2/{self.s2_tag}] writing code ...")
         new_files = self.s2.write_code(step, self.cfg.task, file_contents, pinned_files=self.pinned_files)
         _write_files(self.cfg.repo_dir, new_files)
 
@@ -305,7 +366,7 @@ class Orchestrator:
             test_proc = _run(self.cfg.test_command, self.cfg.repo_dir)
             passed = test_proc.returncode == 0
             output = (test_proc.stdout or "") + (test_proc.stderr or "")
-            print(f"[tests] {'PASS' if passed else 'FAIL'} (exit {test_proc.returncode})")
+            self._log(f"[tests] {'PASS' if passed else 'FAIL'} (exit {test_proc.returncode})")
 
             state: Dict[str, Any] = {
                 "task": self.cfg.task,
@@ -318,14 +379,14 @@ class Orchestrator:
             }
             answers = self.s1.decide(state, {"next_action": NEXT_ACTION_QUESTION})
             decision = answers["next_action"]
-            print(f"[system1/jev:{self.s1.name}] next_action = {decision}")
+            self._log(f"[system1/jev:{self.s1.name}] next_action = {decision}")
 
             if decision.choice == "open_pr":
                 return self._finalize_pr(step, retries, output, sensitive=sensitive)
 
             if decision.choice == "retry_fix" and retries < self.cfg.max_retries:
                 retries += 1
-                print(f"[system2/{self.s2_tag}] reviewing failure, attempt {retries}/{self.cfg.max_retries} ...")
+                self._log(f"[system2/{self.s2_tag}] reviewing failure, attempt {retries}/{self.cfg.max_retries} ...")
                 current = _read_files(self.cfg.repo_dir, list(new_files.keys()) or step.files)
                 fixed = self.s2.review_and_fix(self.cfg.task, step, current, output)
                 _write_files(self.cfg.repo_dir, fixed)
@@ -351,9 +412,9 @@ class Orchestrator:
         )
         risk: Answer = risk_answers["diff_risk"]
         safe: Answer = risk_answers["safe_to_proceed"]
-        print(f"[system1/jev:{self.s1.name}] diff_risk = {risk}, safe_to_proceed = {safe}")
+        self._log(f"[system1/jev:{self.s1.name}] diff_risk = {risk}, safe_to_proceed = {safe}")
         if sensitive:
-            print("[orchestrator] this change touches a domain flagged sensitive=true in modules.json")
+            self._log("[orchestrator] this change touches a domain flagged sensitive=true in modules.json")
 
         changed = _run(["git", "diff", "--name-only"], self.cfg.repo_dir).stdout.split()
         pr_copy = self.s2.draft_pr(self.cfg.task, changed, "PASS" if not test_output.strip() else "PASS (see logs)")
@@ -385,7 +446,7 @@ class Orchestrator:
                 f"safe_to_proceed={safe.noul:.2f} conf={safe.confidence:.2f}).\n"
                 f"Title: {pr_copy['title']}\nBody:\n{pr_copy['body']}"
             )
-            print("[orchestrator] " + detail)
+            self._log("[orchestrator] " + detail)
         return StepResult(step, "opened_pr" if auto_ok else "drafted_pr", retries, detail)
 
     def _open_pr(self, step: PlanStep, pr_copy: Dict[str, str]) -> None:
@@ -395,13 +456,13 @@ class Orchestrator:
         _run(["git", "commit", "-m", pr_copy["title"]], self.cfg.repo_dir)
         push = _run(["git", "push", "-u", "origin", branch], self.cfg.repo_dir)
         if push.returncode != 0:
-            print(f"[orchestrator] push failed (no remote configured?): {push.stderr}")
+            self._log(f"[orchestrator] push failed (no remote configured?): {push.stderr}")
             return
         gh = _run(
             ["gh", "pr", "create", "--title", pr_copy["title"], "--body", pr_copy["body"]],
             self.cfg.repo_dir,
         )
         if gh.returncode != 0:
-            print(f"[orchestrator] branch pushed, but `gh pr create` failed (is gh installed & authed?): {gh.stderr}")
+            self._log(f"[orchestrator] branch pushed, but `gh pr create` failed (is gh installed & authed?): {gh.stderr}")
         else:
-            print(f"[orchestrator] PR opened: {gh.stdout.strip()}")
+            self._log(f"[orchestrator] PR opened: {gh.stdout.strip()}")

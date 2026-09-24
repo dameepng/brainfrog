@@ -18,6 +18,5 @@ def get_system1(backend: str) -> SystemOneClient:
     if backend == "auto":
         if os.environ.get("TYPESAFE_API_KEY"):
             return TypeSafeSystemOne()
-        print("[config] no TYPESAFE_API_KEY found, falling back to --backend mock")
         return MockSystemOne()
     raise ValueError(f"Unknown backend: {backend!r} (expected mock | typesafe | auto)")

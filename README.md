@@ -1,158 +1,229 @@
 # BrainFrog (🐸) — Dual-System Coding Agent (Jev + Claude)
 
-An agentic coding loop that writes code, runs tests, and drafts PRs — powered by a dual-system architecture inspired by OpenCode and Claude Code:
+BrainFrog is an agentic coding loop that automates software engineering workflows: analyzing tasks, planning changes, writing and refactoring code, executing local test suites, self-healing upon failures, and drafting pull requests.
 
-- **System 2 (Claude, via `ANTHROPIC_API_KEY`)** — the generative brain: planning changes, writing/editing code, diagnosing failures, drafting PR copy.
-- **System 1 (Jev, via `TYPESAFE_API_KEY` or `--backend mock`)** — the fast, typed gatekeeper: scope matching, next-action evaluation, risk classification.
+The architecture is built on a **dual-system paradigm** inspired by OpenCode and Claude Code:
+- **System 2 (Claude / LLM, generative brain)**: Handles open-ended reasoning, task decomposition, code synthesis, failure diagnostics, and PR narrative drafting.
+- **System 1 (Jev / TypeSafe, fast typed gatekeeper)**: Provides rapid, structured, low-latency evaluation for domain routing, test outcome branching, and diff risk classification.
 
-BrainFrog is packaged as a global CLI tool (`brainfrog` / `bf`) featuring an **Interactive REPL**, auto-workspace git detection, and slash commands.
+BrainFrog is packaged as a terminal-native CLI (`brainfrog` / `bf`) featuring an **Interactive REPL**, auto-workspace git detection, rich TUI, autocomplete, and safety rollback mechanisms.
 
-## How the loop works
+---
+
+## Architecture & How the Loop Works
+
+BrainFrog splits decisions into fast, typed gates (System 1) and deep reasoning steps (System 2):
 
 ```
-SCOPE GATE (Jev, before Claude sees anything):
-  likely_domain  = which area of the codebase does this prompt match?
-  change_type    = bug_investigation | feature_request | question_only | unclear
-  -> confidence too low?      stop, ask the user to clarify (Claude not called)
-  -> change_type=question_only? Claude reads only that domain's files and
-     answers the question — no code is written, no PR
-  -> otherwise: Claude's planner gets a file list scoped to the matched
-     domain instead of the whole repo
-
-plan (Claude)
-  -> for each step:
-       write code (Claude)
-       run tests (real subprocess, your actual test command)
-       ask Jev: next_action = open_pr | retry_fix | escalate_human | abandon
-       branch on the answer + its confidence
-         open_pr        -> go draft a PR
-         retry_fix       -> Claude reads the failure, patches, loop again
-         escalate_human  -> stop, print a report, wait for you
-         abandon         -> stop, explain why
-  -> draft PR title/body (Claude)
-  -> ask Jev: diff_risk (low/med/high), safe_to_proceed (0-1 + confidence)
-  -> if auto-pr enabled AND risk within your ceiling AND confidence clears
-     the bar AND the domain isn't flagged sensitive -> actually branch,
-     commit, push, `gh pr create`
-     otherwise -> print the drafted PR for you to review/open by hand
+                                  [User Task Input]
+                                          │
+                                          ▼
+                            ┌───────────────────────────┐
+                            │   System 1: Scope Gate    │
+                            │  likely_domain, type      │
+                            └───────────────────────────┘
+                                          │
+                  ┌───────────────────────┴───────────────────────┐
+                  ▼                                               ▼
+         [question_only]                                  [code_modification]
+     Claude reads domain files,                       Claude generates structured
+     diagnoses & answers user.                       multi-step execution plan.
+     (No code modified, no PR)                                    │
+                                                                  ▼
+                                                    ┌───────────────────────────┐
+                                              ┌───► │  Step N: Write / Edit Code│
+                                              │     └───────────────────────────┘
+                                              │                   │
+                                              │                   ▼
+                                              │     ┌───────────────────────────┐
+                                              │     │ Execute Local Test Suite  │
+                                              │     └───────────────────────────┘
+                                              │                   │
+                                              │                   ▼
+                                              │     ┌───────────────────────────┐
+                                              │     │   System 1: Loop Gate     │
+                                              │     │  next_action evaluation   │
+                                              │     └───────────────────────────┘
+                                              │       ├── open_pr ──► (Proceed to PR)
+                                              └── retry_fix          ├── escalate_human
+                                                                     └── abandon
+                                                                  │
+                                                                  ▼
+                                                    ┌───────────────────────────┐
+                                                    │  System 2: Draft PR Copy  │
+                                                    └───────────────────────────┘
+                                                                  │
+                                                                  ▼
+                                                    ┌───────────────────────────┐
+                                                    │    System 1: PR Gate      │
+                                                    │ diff_risk, safe_to_proceed│
+                                                    └───────────────────────────┘
+                                                                  │
+                                     ┌────────────────────────────┴────────────────────────────┐
+                                     ▼                                                         ▼
+                         [Auto-PR Criteria Met]                                    [Requires Human Review]
+                   diff_risk <= ceiling, safe_to_proceed,                     Domain is sensitive, risk too high,
+                   and domain is NOT sensitive.                               or manual review requested.
+                   Runs: git branch, commit, push, gh pr create.              Prints drafted PR summary to console.
 ```
 
-A domain marked `"sensitive": true` in `modules.json` (auth, billing,
-migrations, ...) **never** auto-opens a PR, no matter how high the
-confidence or how permissive `--pr-risk-ceiling` is — it always stops for
-a human.
+### Execution Lifecycle:
+1. **Scope Gate (`_scope_gate`)**: Before System 2 runs, System 1 categorizes the task into a codebase domain defined in `modules.json` and determines `change_type` (`feature_request`, `bug_investigation`, `question_only`, or `unclear`).
+   - If confidence is below threshold, BrainFrog halts and asks for clarification.
+   - If `question_only`, System 2 diagnoses and answers without touching files.
+   - If a code change is needed, the workspace file tree scoped to that domain is passed to the planner.
+2. **Task Planning (`plan_task`)**: System 2 decomposes the goal into atomic, sequential implementation steps.
+3. **Execution & Self-Healing Loop (`_run_step`)**:
+   - For each step, System 2 generates complete file replacements.
+   - The configured test command (e.g. `pytest`, `npm test`) runs via a bounded subprocess with full process-tree termination.
+   - System 1 evaluates the test outcome and decides `next_action`:
+     - `open_pr`: Step succeeded, proceed to next step or PR.
+     - `retry_fix`: Test failed; System 2 receives error logs and patches the code (up to `max_retries`).
+     - `escalate_human` / `abandon`: Circuit breaker triggers, stopping execution safely.
+4. **PR Drafting & Risk Gate (`_finalize_pr`)**:
+   - System 2 produces PR title and markdown description.
+   - System 1 calculates `diff_risk` (low/med/high) and `safe_to_proceed` (0.0 - 1.0).
+   - If `--auto-pr` is enabled, the domain is not marked `sensitive: true`, and risk does not exceed `--pr-risk-ceiling`, BrainFrog branches, commits, pushes, and creates a GitHub PR. Otherwise, it outputs the drafted PR for human review.
 
-## Setup
+---
 
+## Directory Structure
+
+```
+.
+├── cli.py                   # Terminal entrypoint, interactive REPL, TUI rendering & slash commands
+├── orchestrator.py          # State machine coordinating System 1, System 2, tests, and git
+├── config.py                # Configuration loading, environment variables, and backend selection
+├── modules.py               # Domain registry loader, path matching, and scope gate helpers
+├── modules.json             # Active workspace domain definitions & sensitivity flags
+├── modules.example.json     # Example domain registry template
+├── BRAINFROG.md             # Persistent system guidelines, architecture rules, and TUI design tokens
+├── requirements.txt         # Python package dependencies
+├── pyproject.toml           # Packaging and tool configuration
+├── system1/                 # System 1: Fast, typed, deterministic decision layer
+│   ├── __init__.py
+│   ├── base.py              # Abstract interfaces, questions (Choice/Score/Noul), and Decision contracts
+│   ├── mock_client.py       # Deterministic, local heuristic backend (offline/testing)
+│   └── typesafe_client.py   # Cloud backend calling TypeSafe System 1 API
+└── system2/                 # System 2: Generative reasoning & code synthesis layer
+    ├── __init__.py
+    └── claude_client.py     # Claude integration (planning, code generation, fix review, diagnosis, PR)
+```
+
+---
+
+## Component Responsibilities
+
+| Component | File | Responsibilities |
+| :--- | :--- | :--- |
+| **System 1 Client** | `system1/base.py`, `typesafe_client.py`, `mock_client.py` | • Evaluates structured questions (`ChoiceQuestion`, `ScoreQuestion`, `NoulQuestion`).<br>• High-speed, typed scoring without prompt drift.<br>• Provides heuristic fallback (`mock_client.py`) when offline or lacking API keys. |
+| **System 2 Client** | `system2/claude_client.py` | • High-level reasoning and multi-step planning (`plan_task`).<br>• Full-file code generation and editing (`write_code`).<br>• Error triage and automated patch generation (`review_and_fix`).<br>• Codebase Q&A without side-effects (`diagnose`).<br>• Pull request summary and body generation (`draft_pr`). |
+| **Orchestrator** | `orchestrator.py` | • Central state machine wiring System 1 decisions and System 2 generations.<br>• Subprocess execution with strict timeouts and process tree termination.<br>• Atomic file writing to prevent corrupted/0-byte files upon interruption.<br>• Self-healing retry loop with circuit breakers.<br>• Git lifecycle management (status check, branch creation, commit, push, PR creation). |
+| **Domain Registry** | `modules.py`, `modules.json` | • Maps codebase directories and files to conceptual domains.<br>• Enforces security boundaries: domains flagged `"sensitive": true` cannot auto-PR.<br>• Scopes context passed to System 2 to reduce token consumption and latency. |
+| **CLI & TUI** | `cli.py` | • Interactive REPL with auto-completion for slash commands and `@file` mentions.<br>• Rich terminal interface compliant with `BRAINFROG.md` TUI design tokens.<br>• Non-interactive single-command runner mode.<br>• Shell passthrough execution (`!cmd`).<br>• Instant safety undo (`/undo`) and diff inspection (`/diff`). |
+| **Configuration** | `config.py` | • Resolves active System 1 backend (`auto`, `typesafe`, `mock`).<br>• Manages environment variables (`ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY`).<br>• Tracks token usage and session cost estimates. |
+| **System Memory** | `BRAINFROG.md` | • Authoritative architectural rules, security boundaries, retrieval standards, and UI guidelines governing agent behavior. |
+
+---
+
+## Setup & Installation
+
+### 1. Prerequisites
+- Python 3.10+
+- Git CLI (and `gh` GitHub CLI if using `--auto-pr`)
+- Anthropic API key (`ANTHROPIC_API_KEY`)
+- TypeSafe API key (`TYPESAFE_API_KEY`, optional — mock backend works out of the box)
+
+### 2. Installation
 ```bash
-python -m venv .venv && source .venv/bin/activate
+# Clone and prepare virtual environment
+git clone <repo-url> brainfrog
+cd brainfrog
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
-cp .env.example .env               # then fill in ANTHROPIC_API_KEY
-cp modules.example.json /path/to/your/repo/modules.json  # then edit for your actual domains
+
+# Configure environment
+cp .env.example .env
+# Edit .env and set ANTHROPIC_API_KEY
 ```
 
-`modules.json` is what makes the scope gate useful — it's the vocabulary
-Jev matches user prompts against. Without it, the tool still runs (falls
-back to one undescribed "domain" per top-level directory), but Jev has
-much less to go on and will ask for clarification more often. A few
-short, accurate descriptions go a long way:
-
+### 3. Domain Configuration (`modules.json`)
+Configure your codebase domains by copying `modules.example.json` into your target repository as `modules.json`:
 ```json
 {
   "auth": {
-    "description": "Login, sessions, password reset, OAuth, tokens, permissions.",
+    "description": "Authentication, session management, OAuth, JWT, permissions.",
     "paths": ["app/auth/", "app/middleware/session.py"],
     "sensitive": true
+  },
+  "billing": {
+    "description": "Stripe integrations, subscription tiers, invoicing, webhooks.",
+    "paths": ["app/billing/", "app/models/invoice.py"],
+    "sensitive": true
+  },
+  "api": {
+    "description": "Public REST endpoints, request validators, response serializers.",
+    "paths": ["app/api/", "app/schemas/"],
+    "sensitive": false
   }
 }
 ```
+*Note: Domains marked `"sensitive": true` will never auto-open a PR.*
+
+---
 
 ## Usage
 
-Dry run today, no Jev key needed:
+### Interactive REPL Mode (Recommended)
+Launch the interactive shell in any git repository:
+```bash
+python cli.py --repo /path/to/target/repo
+```
+Inside the REPL:
+- Type your prompt directly: `Add healthcheck endpoint at /api/health`
+- Mention files with autocompletion: `@app/api/routes.py`
+- Execute terminal commands directly: `!pytest`
+- Use slash commands:
+  - `/status` — View current repository, test command, and active models
+  - `/diff` — Preview uncommitted git changes
+  - `/undo` — Cleanly revert uncommitted changes made by the agent
+  - `/rules` — Display active system guidelines (`BRAINFROG.md`)
+  - `/stats` / `/cost` — Show token consumption and estimated session cost
+  - `/test-cmd <cmd>` — Switch the active test command dynamically
+  - `/clear` — Clear terminal screen
+  - `/help` — Display command cheat sheet
+  - `/exit` — Exit BrainFrog
+
+### Non-Interactive Single Task Mode
+Execute a single instruction directly from the command line:
 
 ```bash
+# Offline dry-run using mock System 1 backend
 python cli.py \
-  --repo /path/to/your/repo \
-  --task "Add a GET /health endpoint that returns 200 OK" \
+  --repo /path/to/target/repo \
+  --task "Fix ZeroDivisionError in calc.py" \
   --test-cmd "pytest -q" \
   --backend mock
-```
 
-A vague, question-shaped prompt takes the diagnose-only path instead of
-touching code:
-
-```bash
+# Full automated run with TypeSafe and Auto-PR
 python cli.py \
-  --repo /path/to/your/repo \
-  --task "ini kenapa saya gabisa login yah?" \
-  --test-cmd "pytest -q" \
-  --backend mock
-```
-
-Once your TypeSafe access arrives:
-
-```bash
-export TYPESAFE_API_KEY=sk-...
-python cli.py \
-  --repo /path/to/your/repo \
-  --task "Add a GET /health endpoint that returns 200 OK" \
-  --test-cmd "pytest -q" \
+  --repo /path/to/target/repo \
+  --task "Implement user logout endpoint" \
+  --test-cmd "pytest app/tests/test_auth.py" \
   --backend typesafe \
-  --auto-pr --pr-risk-ceiling medium
+  --auto-pr \
+  --pr-risk-ceiling medium
 ```
 
-`--backend auto` (the default) picks `typesafe` automatically if
-`TYPESAFE_API_KEY` is set in the environment, else falls back to `mock`.
+---
 
-## Project layout
+## Reliability, Safety & Idempotency
 
-```
-system1/            # Jev-shaped decision layer (fast, typed, cheap)
-  base.py            interface: SystemOneClient, Choice/Score/Noul questions
-  mock_client.py      free local heuristic backend (use until you have a key)
-  typesafe_client.py  real backend, calls api.typesafe.ai/v1/systemone
-system2/            # Claude-backed generation layer (slow, open-ended)
-  claude_client.py    plan / write_code / review_and_fix / diagnose / draft_pr
-modules.py           # domain registry loader + scope-gate helpers
-modules.example.json # copy to <repo>/modules.json and edit
-orchestrator.py     # the loop that wires system1 + system2 together
-config.py           # picks which system1 backend to use
-cli.py              # entrypoint
-```
-
-## Extending the gates
-
-There are now three checkpoints, all defined as `ChoiceQuestion` /
-`ScoreQuestion` / `NoulQuestion` objects near the top of
-`orchestrator.py`:
-
-1. **Scope gate** (`_scope_gate`, before Claude is called at all) —
-   `likely_domain` + `change_type`, matched against `modules.json`.
-2. **Loop gate** (`_run_step`, after every test run) — `next_action`:
-   retry, open a PR, escalate, or abandon.
-3. **PR gate** (`_finalize_pr`, once tests pass) — `diff_risk` +
-   `safe_to_proceed`, plus the hard `sensitive` block from the matched
-   domain.
-
-Add more checkpoints the same way — e.g. a `flaky_test` Choice question
-so a known-flaky test doesn't burn a retry, or a `touches_migration`
-Noul check inside `_run_step` before a file write is even applied. Each
-new question is one extra field in the `state` dict plus one entry in
-the `questions` dict passed to `self.s1.decide(...)` — no orchestrator
-rewrite needed.
-
-## Notes / caveats
-
-- `MockSystemOne` is a **placeholder for wiring, not for intelligence**.
-  Its confidence numbers are illustrative, not calibrated. Don't tune
-  production thresholds against it — swap to the real Jev backend
-  first, then calibrate against real runs (TypeSafe's own docs
-  recommend running Jev in shadow for a week before trusting cutoffs).
-- `write_code` / `review_and_fix` return **full file contents**, not
-  diffs — simplest thing that works reliably with an LLM. Fine for
-  small/medium files; for very large files you may want to move to a
-  proper patch format later.
-- `--auto-pr` actually runs `git checkout -b`, `git commit`,
-  `git push`, and `gh pr create`. Test with `--backend mock` (auto-pr
-  off) on a throwaway repo first before pointing this at anything real.
+- **Atomic File Writing**: File updates are staged and replaced atomically (`os.replace`) to eliminate 0-byte or corrupted files during interruptions (`Ctrl+C`).
+- **Bounded Process Tree Termination**: Test executions enforce strict timeouts (default 60s); timeouts recursively terminate the entire child process hierarchy (`taskkill` on Windows, process groups on POSIX) to avoid lingering orphan test runners.
+- **Fail-Safe Rollback**: The `/undo` command leverages git status verification to revert working directory modifications without altering committed history.
+- **Circuit Breakers**: Multi-step and retry loops enforce fixed maximum thresholds (`max_retries = 3`) to prevent infinite repair loops.
+- **Sensitive Domain Safeguard**: Hard business constraints cannot be bypassed by model confidence scores alone.

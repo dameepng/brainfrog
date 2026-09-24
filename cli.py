@@ -268,7 +268,13 @@ def execute_task(
         skill=skill,
     )
 
-    orchestrator = Orchestrator(system1, system2, cfg)
+    cols, rows, box_w, margin, pad = get_layout_dims()
+    orchestrator = Orchestrator(
+        system1,
+        system2,
+        cfg,
+        log_fn=lambda msg: console.print(f"{pad}[{COLOR_FG_MUTED}]{msg}[/{COLOR_FG_MUTED}]"),
+    )
     try:
         results = orchestrator.run()
     except KeyboardInterrupt:
@@ -278,29 +284,48 @@ def execute_task(
         print_banner_box(f"Orchestration Error: {e}", level="error")
         return 1
 
-    # Render Task Summary Table
-    cols, rows, box_w, margin, pad = get_layout_dims()
-    summary_table = Table(
-        title=" Task Summary ",
-        box=box.ROUNDED,
-        border_style=COLOR_FG_MUTED,
-        header_style=f"bold {COLOR_ACCENT}",
-        show_header=True,
-        padding=(0, 1),
-        width=box_w,
-    )
-    summary_table.add_column("Step", style=f"bold {COLOR_FG_PRIMARY}", no_wrap=True)
-    summary_table.add_column("Description", style=COLOR_FG_SECONDARY)
-    summary_table.add_column("Status", justify="right")
-    summary_table.add_column("Retries", justify="right", style=COLOR_FG_MUTED)
-
+    # Render Diagnosis / Question Answer or Scope Clarification
     for r in results:
-        is_success = r.outcome in ("diagnosed", "opened_pr", "drafted_pr")
-        badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} SUCCESS[/bold {COLOR_SUCCESS}]" if is_success else f"[bold {COLOR_WARNING}]{SYM_WARNING} {r.outcome.upper()}[/bold {COLOR_WARNING}]"
-        summary_table.add_row(f"Step {r.step.id}", r.step.description, badge, str(r.retries))
+        if r.outcome == "diagnosed" and r.detail:
+            ans_panel = Panel(
+                Markdown(r.detail),
+                title=f"[{COLOR_ACCENT} bold]{SYM_ASSISTANT} BrainFrog ({chosen_model})[/{COLOR_ACCENT} bold]",
+                title_align="left",
+                box=box.ROUNDED,
+                border_style=COLOR_ACCENT,
+                padding=(1, 2),
+                width=box_w,
+            )
+            console.print()
+            console.print(Align.center(ans_panel) if cols > 100 else ans_panel)
+            console.print()
+        elif r.outcome == "needs_clarification" and r.detail:
+            print_banner_box(r.detail, level="warning", title="Scope Clarification")
 
-    console.print()
-    console.print(Align.center(summary_table) if cols > 100 else summary_table)
+    # Render Task Summary Table only for multi-step / code planning tasks
+    is_question_turn = len(results) == 1 and results[0].outcome in ("diagnosed", "needs_clarification")
+    if not is_question_turn:
+        summary_table = Table(
+            title=" Task Summary ",
+            box=box.ROUNDED,
+            border_style=COLOR_FG_MUTED,
+            header_style=f"bold {COLOR_ACCENT}",
+            show_header=True,
+            padding=(0, 1),
+            width=box_w,
+        )
+        summary_table.add_column("Step", style=f"bold {COLOR_FG_PRIMARY}", no_wrap=True)
+        summary_table.add_column("Description", style=COLOR_FG_SECONDARY)
+        summary_table.add_column("Status", justify="right")
+        summary_table.add_column("Retries", justify="right", style=COLOR_FG_MUTED)
+
+        for r in results:
+            is_success = r.outcome in ("diagnosed", "opened_pr", "drafted_pr")
+            badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} SUCCESS[/bold {COLOR_SUCCESS}]" if is_success else f"[bold {COLOR_WARNING}]{SYM_WARNING} {r.outcome.upper()}[/bold {COLOR_WARNING}]"
+            summary_table.add_row(f"Step {r.step.id}", r.step.description, badge, str(r.retries))
+
+        console.print()
+        console.print(Align.center(summary_table) if cols > 100 else summary_table)
 
     # Turn token & cost footer
     task_usage = usage_tracker.reset_task()
@@ -671,9 +696,12 @@ def run_interactive(
         try:
             from prompt_toolkit.layout.containers import Window
             from prompt_toolkit.layout.controls import FormattedTextControl
+            from prompt_toolkit.filters import Always
 
             float_cont = session.app.layout.container.children[0].alternative_content
             hsplit = float_cont.content
+            if len(hsplit.children) > 1 and hasattr(hsplit.children[1], "content"):
+                hsplit.children[1].content.dont_extend_height = Always()
             hsplit.children.append(
                 Window(FormattedTextControl(get_prompt_bottom_border), height=1, dont_extend_height=True)
             )

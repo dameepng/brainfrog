@@ -213,19 +213,22 @@ class System2Client:
         return data["files"]
 
     # -- 3b. diagnose only, no code changes ------------------------------
-    def diagnose(self, user_prompt: str, focus_files: Dict[str, str], domain: str) -> str:
+    def diagnose(self, user_prompt: str, focus_files: Dict[str, str], domain: str, repo_tree: str = "") -> str:
         """For change_type == 'question_only': explain, don't edit."""
         system = (
-            "You are a senior engineer helping a teammate understand their own "
-            f"codebase. They asked a question likely related to the '{domain}' area. "
-            "Read the provided files and give a direct, concrete answer: what's "
-            "likely causing the behavior they're describing, pointing at specific "
-            "functions/lines where you can. If the files don't contain enough "
-            "information to be sure, say what you'd need to check next instead of "
-            "guessing. Do not propose a code change unless asked."
+            "You are a senior engineer helping a teammate understand their codebase. "
+            "Read the provided files and repo structure, and give a direct, friendly, and concrete answer. "
+            "Point at specific files, functions, or lines where applicable. "
+            "Respond in the same language as the user's question (e.g. Indonesian if the question is in Indonesian, "
+            "English if in English). Use clean markdown formatting."
         )
-        user = f"Question:\n{user_prompt}\n\nRelevant files:\n{json.dumps(focus_files, indent=2)}"
-        return self._call(system, user, max_tokens=2000)
+        parts = [f"Question:\n{user_prompt}"]
+        if repo_tree:
+            parts.append(f"Repository file tree:\n{repo_tree}")
+        if focus_files:
+            parts.append(f"Relevant files:\n{json.dumps(focus_files, indent=2)}")
+        user = "\n\n".join(parts)
+        return self._call(system, user, max_tokens=3000)
 
     # -- 4. PR copy -------------------------------------------------
     def draft_pr(self, task: str, changed_files: List[str], test_summary: str) -> Dict[str, str]:
