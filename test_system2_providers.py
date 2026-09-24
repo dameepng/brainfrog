@@ -65,6 +65,34 @@ class TestSystem2Providers(unittest.TestCase):
         self.assertEqual(resp, "hello from gemini")
         self.assertTrue(mock_popen.called)
 
+    def test_model_selection_helpers(self):
+        from cli import PROVIDER_MODELS, select_model_interactive, select_provider_interactive
+
+        # Test catalog contains expected models
+        self.assertIn("gemini-3.8-flash-high", [m[0] for m in PROVIDER_MODELS["antigravity"]])
+        self.assertIn("gemini-3.1-pro-high", [m[0] for m in PROVIDER_MODELS["antigravity"]])
+        self.assertIn("claude-sonnet-4-6", [m[0] for m in PROVIDER_MODELS["antigravity"]])
+
+        # Test selecting by number (e.g. '1' -> gemini-3.8-flash-high)
+        with patch("rich.console.Console.input", return_value="1"):
+            chosen = select_model_interactive("antigravity", "gemini-3.8-flash-high")
+            self.assertEqual(chosen, "gemini-3.8-flash-high")
+
+        # Test selecting by number (e.g. '4' -> gemini-3.1-pro-high)
+        with patch("rich.console.Console.input", return_value="4"):
+            chosen = select_model_interactive("antigravity", "gemini-3.8-flash-high")
+            self.assertEqual(chosen, "gemini-3.1-pro-high")
+
+        # Test selecting provider by number ('1' -> antigravity, '2' -> claude)
+        with patch("rich.console.Console.input", return_value="1"):
+            prov = select_provider_interactive("claude")
+            self.assertEqual(prov, "antigravity")
+
+        with patch("rich.console.Console.input", return_value="2"):
+            prov = select_provider_interactive("antigravity")
+            self.assertEqual(prov, "claude")
+
 
 if __name__ == "__main__":
     unittest.main()
+

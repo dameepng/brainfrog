@@ -339,6 +339,125 @@ class BrainFrogCompleter(BaseCompleter):
 
 
 # -------------------------------------------------------------------------
+# Provider & Model Selection Catalog
+# -------------------------------------------------------------------------
+PROVIDER_MODELS = {
+    "antigravity": [
+        ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", "Ultra fast, high reasoning (Default)"),
+        ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)", "Balanced speed & performance"),
+        ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)", "High reasoning"),
+        ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)", "Complex system architecture & deep coding"),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)", "Anthropic Sonnet via Google Auth"),
+        ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)", "Anthropic Opus via Google Auth"),
+        ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)", "Open weight model"),
+    ],
+    "claude": [
+        ("claude-sonnet-5", "Claude Sonnet 5", "Default recommended model"),
+        ("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet", "Standard Sonnet release"),
+        ("claude-3-5-haiku-20241022", "Claude 3.5 Haiku", "Fast & lightweight"),
+    ],
+}
+
+
+def select_model_interactive(provider: str, current_model: str) -> Optional[str]:
+    """Display an interactive numerical picker for available AI models."""
+    models = PROVIDER_MODELS.get(provider, [])
+    if not models:
+        console.print(f"[yellow]No predefined model list for provider '{provider}'.[/yellow]")
+        return None
+
+    table = Table(
+        title=f"Pick Model — {provider.title()} Provider",
+        box=box.ROUNDED,
+        header_style="bold #00FF66",
+        show_lines=False,
+    )
+    table.add_column("#", style="bold #00FF66", justify="right", width=5)
+    table.add_column("Model Identifier", style="cyan bold")
+    table.add_column("Display Name", style="white")
+    table.add_column("Description", style="dim")
+    table.add_column("Status", justify="center")
+
+    for i, (m_id, m_name, m_desc) in enumerate(models, 1):
+        status = "[bold #00FF66]● ACTIVE[/bold #00FF66]" if m_id == current_model else ""
+        table.add_row(f"[bold #00FF66][{i}][/bold #00FF66]", m_id, m_name, m_desc, status)
+
+    console.print()
+    console.print(table)
+    try:
+        choice = console.input(
+            f"\n[bold #00FF66]Select model [1-{len(models)}] (or press Enter to cancel): [/bold #00FF66]"
+        ).strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+    if not choice:
+        return None
+
+    if choice.isdigit():
+        idx = int(choice)
+        if 1 <= idx <= len(models):
+            return models[idx - 1][0]
+        console.print(f"[red]Invalid selection: {choice}. Expected 1-{len(models)}.[/red]")
+        return None
+
+    # Allow direct matching by string name
+    match = next((m[0] for m in models if m[0].lower() == choice.lower()), None)
+    if match:
+        return match
+
+    console.print(f"[red]Model '{choice}' not found.[/red]")
+    return None
+
+
+def select_provider_interactive(current_provider: str) -> Optional[str]:
+    """Display an interactive numerical picker for AI providers."""
+    providers = [
+        ("antigravity", "Google Antigravity", "Google Auth Login (No API key, free quota)"),
+        ("claude", "Anthropic Claude", "Anthropic API Key (Pay per token)"),
+    ]
+    table = Table(
+        title="Pick AI Provider",
+        box=box.ROUNDED,
+        header_style="bold #00FF66",
+        show_lines=False,
+    )
+    table.add_column("#", style="bold #00FF66", justify="right", width=5)
+    table.add_column("Provider", style="cyan bold")
+    table.add_column("Display Name", style="white")
+    table.add_column("Description", style="dim")
+    table.add_column("Status", justify="center")
+
+    for i, (p_id, p_name, p_desc) in enumerate(providers, 1):
+        status = "[bold #00FF66]● ACTIVE[/bold #00FF66]" if p_id == current_provider else ""
+        table.add_row(f"[bold #00FF66][{i}][/bold #00FF66]", p_id, p_name, p_desc, status)
+
+    console.print()
+    console.print(table)
+    try:
+        choice = console.input(
+            f"\n[bold #00FF66]Select provider [1-{len(providers)}] (or press Enter to cancel): [/bold #00FF66]"
+        ).strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+    if not choice:
+        return None
+
+    if choice == "1":
+        return "antigravity"
+    elif choice == "2":
+        return "claude"
+    elif choice.lower() in ("antigravity", "gemini", "google"):
+        return "antigravity"
+    elif choice.lower() in ("claude", "anthropic"):
+        return "claude"
+
+    console.print(f"[red]Invalid selection: {choice}. Expected 1 or 2.[/red]")
+    return None
+
+
+# -------------------------------------------------------------------------
 # Interactive REPL
 # -------------------------------------------------------------------------
 def run_interactive(
@@ -482,7 +601,8 @@ def run_interactive(
         table.add_row("/repo <path>", "Switch target workspace repository")
         table.add_row("/test-cmd <cmd>", "Change test command (e.g. /test-cmd gradlew test)")
         table.add_row("/backend <name>", "Switch System 1 backend (mock|typesafe|auto)")
-        table.add_row("/model <name>", "Switch Claude model (e.g. claude-sonnet-5)")
+        table.add_row("/provider [1|2]", "Switch provider (1: Google Antigravity, 2: Claude)")
+        table.add_row("/models, /model [num]", "Interactive picker to choose active AI model by number")
         table.add_row("/domains", "List detected domain modules and paths")
         table.add_row("!command", "Run terminal shell command directly (e.g. !start index.html)")
         table.add_row("@filename", "Pin file context with live autocomplete popup (e.g. @app.js)")
@@ -675,56 +795,68 @@ def run_interactive(
             continue
         elif lower.startswith("/provider"):
             parts = prompt.split(maxsplit=1)
+            target_prov = None
             if len(parts) > 1:
-                target_prov = parts[1].strip().lower()
-                if target_prov in ("gemini", "antigravity", "google"):
-                    active_provider = "antigravity"
-                    if not active_model or "claude" in active_model:
+                arg = parts[1].strip().lower()
+                if arg == "1" or arg in ("gemini", "antigravity", "google"):
+                    target_prov = "antigravity"
+                elif arg == "2" or arg in ("claude", "anthropic"):
+                    target_prov = "claude"
+                else:
+                    console.print(f"[red]Unknown provider: {parts[1]}. Options: 1 (antigravity), 2 (claude)[/red]")
+                    continue
+            else:
+                target_prov = select_provider_interactive(active_provider)
+
+            if target_prov:
+                if target_prov != active_provider:
+                    active_provider = target_prov
+                    if active_provider == "antigravity":
                         active_model = "gemini-3.8-flash-high"
-                    console.print("[bold green]✓ Switched provider to Google Antigravity (Google Auth Login)![/bold green]")
-                    print_banner()
-                elif target_prov in ("claude", "anthropic"):
-                    active_provider = "claude"
-                    if not active_model or "gemini" in active_model:
+                        console.print("[bold green]✓ Switched provider to Google Antigravity (Google Auth Login)![/bold green]")
+                    else:
                         active_model = "claude-sonnet-5"
-                    console.print("[bold green]✓ Switched provider to Claude (Anthropic API)![/bold green]")
+                        console.print("[bold green]✓ Switched provider to Claude (Anthropic API)![/bold green]")
                     print_banner()
                 else:
-                    console.print(f"[red]Unknown provider: {parts[1]}. Options: antigravity (Google Auth), claude[/red]")
-            else:
-                console.print(f"Current provider: [bold #00FF66]{active_provider}[/bold #00FF66] (model: {active_model})")
-                console.print("Switch with: `/provider antigravity` or `/provider claude`")
+                    console.print(f"[dim]Active provider remains:[/dim] [bold #00FF66]{active_provider}[/bold #00FF66]")
             continue
         elif lower == "/models":
-            if active_provider == "antigravity":
-                console.print(Panel(
-                    "• [bold #00FF66]gemini-3.8-flash-high[/bold #00FF66] (Ultra fast, high reasoning - default)\n"
-                    "• [bold]gemini-3.8-flash-medium[/bold]\n"
-                    "• [bold]gemini-3.7-flash-high[/bold]\n"
-                    "• [bold]gemini-3.1-pro-high[/bold] (Complex architecture reasoning)\n"
-                    "• [bold]claude-sonnet-4-6[/bold] (Anthropic via Google Auth)\n"
-                    "• [bold]claude-opus-4-6-thinking[/bold]",
-                    title="Available Models in Antigravity (Google Auth)",
-                    box=box.ROUNDED,
-                ))
-            else:
-                console.print(Panel(
-                    "• [bold #00FF66]claude-sonnet-5[/bold #00FF66] (Default)\n"
-                    "• [bold]claude-3-5-sonnet-20241022[/bold]\n"
-                    "• [bold]claude-3-5-haiku-20241022[/bold]",
-                    title="Available Models in Claude (Anthropic API)",
-                    box=box.ROUNDED,
-                ))
+            chosen = select_model_interactive(active_provider, active_model)
+            if chosen:
+                if chosen != active_model:
+                    active_model = chosen
+                    console.print(f"[bold green]✓ Switched model to:[/bold green] [cyan bold]{active_model}[/cyan bold]")
+                    print_banner()
+                else:
+                    console.print(f"[dim]Active model remains:[/dim] [cyan bold]{active_model}[/cyan bold]")
             continue
         elif lower.startswith("/model"):
             parts = prompt.split(maxsplit=1)
             if len(parts) > 1:
-                active_model = parts[1].strip()
-                console.print(f"[green]Switched model to:[/green] {active_model}")
-                print_banner()
+                arg = parts[1].strip()
+                models = PROVIDER_MODELS.get(active_provider, [])
+                if arg.isdigit():
+                    idx = int(arg)
+                    if 1 <= idx <= len(models):
+                        active_model = models[idx - 1][0]
+                        console.print(f"[bold green]✓ Switched model to:[/bold green] [cyan bold]{active_model}[/cyan bold]")
+                        print_banner()
+                    else:
+                        console.print(f"[red]Invalid number: {arg}. Available options: 1-{len(models)}[/red]")
+                else:
+                    active_model = arg
+                    console.print(f"[bold green]✓ Switched model to:[/bold green] [cyan bold]{active_model}[/cyan bold]")
+                    print_banner()
             else:
-                console.print(f"Current model: [bold #00FF66]{active_model}[/bold #00FF66] (provider: {active_provider})")
-                console.print("Use `/models` to view available options or `/model <name>` to change.")
+                chosen = select_model_interactive(active_provider, active_model)
+                if chosen:
+                    if chosen != active_model:
+                        active_model = chosen
+                        console.print(f"[bold green]✓ Switched model to:[/bold green] [cyan bold]{active_model}[/cyan bold]")
+                        print_banner()
+                    else:
+                        console.print(f"[dim]Active model remains:[/dim] [cyan bold]{active_model}[/cyan bold]")
             continue
         elif lower == "/domains":
             domains = load_module_map(repo_dir, Path(module_map) if module_map else None, auto_create=False)
