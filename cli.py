@@ -199,6 +199,92 @@ def execute_task(
 
 
 # -------------------------------------------------------------------------
+# Autocomplete & Completer Engine
+# -------------------------------------------------------------------------
+try:
+    from prompt_toolkit.completion import Completer, Completion
+    BaseCompleter = Completer
+except Exception:
+    BaseCompleter = object
+
+
+SLASH_COMMAND_COMPLETIONS = [
+    ("/help", "Show help and command list"),
+    ("/undo", "Revert last change cleanly via Git"),
+    ("/diff", "View colored git diff of recent changes"),
+    ("/cost", "View session token usage & API cost"),
+    ("/rules", "View or create BRAINFROG.md guidelines"),
+    ("/init", "Auto-generate modules.json for stack"),
+    ("/status", "Show current workspace & agent status"),
+    ("/repo", "Switch target workspace repository"),
+    ("/test-cmd", "Change test command"),
+    ("/backend", "Switch System 1 backend (mock|typesafe|auto)"),
+    ("/model", "Switch Claude model"),
+    ("/domains", "List detected domain modules and paths"),
+    ("/clear", "Clear terminal screen"),
+    ("/exit", "Exit BrainFrog session"),
+]
+
+
+class BrainFrogCompleter(BaseCompleter):
+    def __init__(self, repo_dir_getter) -> None:
+        self.repo_dir_getter = repo_dir_getter
+
+    def get_repo_files(self) -> List[Path]:
+        repo_dir = self.repo_dir_getter()
+        files = []
+        ignore = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+        try:
+            for p in repo_dir.rglob("*"):
+                if any(part in ignore or part.startswith(".") for part in p.parts):
+                    continue
+                if p.is_file():
+                    files.append(p.relative_to(repo_dir))
+                if len(files) >= 500:
+                    break
+        except Exception:
+            pass
+        return sorted(files, key=lambda x: str(x).lower())
+
+    def get_completions(self, document, complete_event):
+        try:
+            from prompt_toolkit.completion import Completion
+        except Exception:
+            return
+
+        text = document.text_before_cursor
+
+        # 1. Slash commands autocomplete
+        if text.startswith("/"):
+            for cmd, desc in SLASH_COMMAND_COMPLETIONS:
+                if cmd.lower().startswith(text.lower()):
+                    yield Completion(
+                        cmd,
+                        start_position=-len(text),
+                        display=cmd,
+                        display_meta=desc,
+                    )
+            return
+
+        # 2. @file autocomplete
+        at_pos = text.rfind("@")
+        if at_pos != -1:
+            query = text[at_pos + 1:]
+            # Only trigger autocomplete if no whitespace after @
+            if " " not in query and "\t" not in query and "\n" not in query:
+                for rel_path in self.get_repo_files():
+                    path_str = str(rel_path).replace("\\", "/")
+                    if query.lower() in path_str.lower():
+                        display_token = f"@{path_str}"
+                        yield Completion(
+                            display_token,
+                            start_position=-(len(query) + 1),
+                            display=display_token,
+                            display_meta=rel_path.name,
+                        )
+
+
+# -------------------------------------------------------------------------
 # Interactive REPL
 # -------------------------------------------------------------------------
 def run_interactive(
@@ -222,6 +308,34 @@ def run_interactive(
     active_backend = backend
     active_model = claude_model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
+    # Initialize prompt_toolkit session with autocomplete & history
+    session = None
+    try:
+        from prompt_toolkit.shortcuts import PromptSession
+        from prompt_toolkit.styles import Style
+        from prompt_toolkit.history import FileHistory
+
+        pt_style = Style.from_dict({
+            "prompt": "#2ecc71 bold",
+            "repo": "#9a9ea7",
+            "completion-menu.completion": "bg:#1a1d24 #e6e6e6",
+            "completion-menu.completion.current": "bg:#6c5ce7 #ffffff bold",
+            "completion-menu.meta.completion": "bg:#1a1d24 #888888",
+            "completion-menu.meta.completion.current": "bg:#6c5ce7 #f1c40f bold",
+            "scrollbar.background": "bg:#0f1115",
+            "scrollbar.button": "bg:#6c5ce7",
+        })
+        history_file = GLOBAL_CONFIG_DIR / "history.txt"
+        GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        session = PromptSession(
+            completer=BrainFrogCompleter(lambda: repo_dir),
+            history=FileHistory(str(history_file)),
+            style=pt_style,
+            complete_while_typing=True,
+        )
+    except Exception:
+        session = None
+
     def print_banner() -> None:
         branch = get_git_branch(repo_dir)
         domains = load_module_map(repo_dir, Path(module_map) if module_map else None, auto_create=False)
@@ -238,7 +352,7 @@ def run_interactive(
         )
         banner_content += (
             f"\n[bold]Test Cmd[/bold]   : [dim]`{active_test_cmd}`[/dim]\n\n"
-            f"[dim]Ketik prompt Anda (bisa gunakan @file), !perintah shell, /help untuk menu, atau /exit.[/dim]"
+            f"[dim]Ketik prompt Anda (bisa gunakan @file dengan auto-complete), !perintah shell, /help, atau /exit.[/dim]"
         )
         console.print(Panel(banner_content, border_style="green", box=box.ROUNDED))
 
@@ -259,7 +373,7 @@ def run_interactive(
         table.add_row("/model <name>", "Switch Claude model (e.g. claude-sonnet-5)")
         table.add_row("/domains", "List detected domain modules and paths")
         table.add_row("!command", "Run terminal shell command directly (e.g. !start index.html)")
-        table.add_row("@filename", "Pin file context in prompt (e.g. @app.js)")
+        table.add_row("@filename", "Pin file context with live autocomplete popup (e.g. @app.js)")
         table.add_row("/clear", "Clear terminal screen")
         table.add_row("/exit, /quit", "Exit BrainFrog session")
         console.print(table)
@@ -270,7 +384,14 @@ def run_interactive(
     while True:
         try:
             repo_name = repo_dir.name
-            prompt = console.input(f"[bold green]brainfrog[/bold green] [dim]({repo_name})>[/dim] ").strip()
+            if session:
+                prompt_parts = [
+                    ("class:prompt", "brainfrog "),
+                    ("class:repo", f"({repo_name})> "),
+                ]
+                prompt = session.prompt(prompt_parts).strip()
+            else:
+                prompt = console.input(f"[bold green]brainfrog[/bold green] [dim]({repo_name})>[/dim] ").strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Bye! 🐸[/dim]")
             break
