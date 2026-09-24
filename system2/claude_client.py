@@ -122,18 +122,21 @@ class System2Client:
 
     def _call(self, system: str, user: str, max_tokens: int = 4000) -> str:
         full_system = self._apply_guidelines(system)
-        resp = self.client.messages.create(
+        with self.client.messages.stream(
             model=self.model,
             max_tokens=max_tokens,
             system=full_system,
             messages=[{"role": "user", "content": user}],
-        )
-        if hasattr(resp, "usage") and resp.usage:
-            usage_tracker.record(
-                getattr(resp.usage, "input_tokens", 0),
-                getattr(resp.usage, "output_tokens", 0),
-            )
-        return "".join(b.text for b in resp.content if b.type == "text")
+        ) as stream:
+            text = stream.get_final_text()
+            final_msg = stream.get_final_message()
+            if hasattr(final_msg, "usage") and final_msg.usage:
+                usage_tracker.record(
+                    getattr(final_msg.usage, "input_tokens", 0),
+                    getattr(final_msg.usage, "output_tokens", 0),
+                )
+        return text
+
 
     # -- 1. planning --------------------------------------------------
     def plan_task(
