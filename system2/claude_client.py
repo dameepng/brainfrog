@@ -17,6 +17,11 @@ import anthropic
 
 DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
+# Maximum output tokens for code-generation calls (write_code, review_and_fix).
+# Set BRAINFROG_MAX_OUTPUT_TOKENS in .env to override.
+# Default: 64000 (current Anthropic model ceiling) — effectively no artificial cap.
+MAX_OUTPUT_TOKENS = int(os.environ.get("BRAINFROG_MAX_OUTPUT_TOKENS", "64000"))
+
 
 @dataclass
 class UsageStats:
@@ -178,7 +183,7 @@ class System2Client:
             f"Current step:\n{step.description}\n\n"
             f"Current file contents:\n{json.dumps(all_context, indent=2)}"
         )
-        raw = self._call(system, user, max_tokens=16000)
+        raw = self._call(system, user, max_tokens=MAX_OUTPUT_TOKENS)
         data = _extract_json(raw)
         return data["files"]
 
@@ -198,7 +203,7 @@ class System2Client:
             f"Current file contents:\n{json.dumps(file_contents, indent=2)}\n\n"
             f"Test output (most recent run):\n{test_output[-4000:]}"
         )
-        raw = self._call(system, user, max_tokens=8192)
+        raw = self._call(system, user, max_tokens=MAX_OUTPUT_TOKENS)
         data = _extract_json(raw)
         return data["files"]
 
