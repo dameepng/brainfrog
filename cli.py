@@ -33,6 +33,7 @@ if _PACKAGE_DIR not in sys.path:
 
 from dotenv import load_dotenv
 from rich import box
+from rich.align import Align
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -68,12 +69,21 @@ SYM_USER = "›"
 SYM_ASSISTANT = "🐸"
 
 
+def get_layout_dims() -> tuple[int, int, int, int, str]:
+    """Calculate unified responsive terminal dimensions, panel width, and left padding."""
+    cols, rows = shutil.get_terminal_size(fallback=(95, 35))
+    box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+    margin = max(0, (cols - box_w) // 2) if cols > 100 else (2 if cols >= 60 else 1)
+    pad = " " * margin
+    return cols, rows, box_w, margin, pad
+
+
 def print_banner_box(
     message: str,
     level: str = "info",
     title: Optional[str] = None,
 ) -> None:
-    """Print semantic notification in a thin rounded box (Section 5.6)."""
+    """Print semantic notification in a thin rounded box aligned with composer."""
     styles = {
         "error":   {"color": COLOR_ERROR,   "sym": SYM_ERROR,   "default_title": "Error"},
         "warning": {"color": COLOR_WARNING, "sym": SYM_WARNING, "default_title": "Warning"},
@@ -83,8 +93,7 @@ def print_banner_box(
     cfg = styles.get(level, styles["info"])
     box_title = f"{cfg['sym']} {title or cfg['default_title']}"
 
-    cols = shutil.get_terminal_size(fallback=(95, 35)).columns
-    box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+    cols, rows, box_w, margin, pad = get_layout_dims()
 
     panel = Panel(
         Text.from_markup(f"[{COLOR_FG_PRIMARY}]{message}[/{COLOR_FG_PRIMARY}]"),
@@ -96,7 +105,7 @@ def print_banner_box(
         width=box_w,
     )
     console.print()
-    console.print(panel)
+    console.print(Align.center(panel) if cols > 100 else panel)
     console.print()
 
 
@@ -270,8 +279,7 @@ def execute_task(
         return 1
 
     # Render Task Summary Table
-    cols = shutil.get_terminal_size(fallback=(95, 35)).columns
-    box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+    cols, rows, box_w, margin, pad = get_layout_dims()
     summary_table = Table(
         title=" Task Summary ",
         box=box.ROUNDED,
@@ -292,7 +300,7 @@ def execute_task(
         summary_table.add_row(f"Step {r.step.id}", r.step.description, badge, str(r.retries))
 
     console.print()
-    console.print(summary_table)
+    console.print(Align.center(summary_table) if cols > 100 else summary_table)
 
     # Turn token & cost footer
     task_usage = usage_tracker.reset_task()
@@ -300,7 +308,7 @@ def execute_task(
     cost_str = "Google Auth (Active Session)" if provider_tag == "antigravity" else f"Est. Cost: ${task_usage.cost_usd:.4f}"
     if task_usage.total_tokens > 0:
         console.print(
-            f"\n  [{COLOR_FG_MUTED}]⚡ Turn tokens: {task_usage.input_tokens:,} in / {task_usage.output_tokens:,} out "
+            f"\n{pad}[{COLOR_FG_MUTED}]⚡ Turn tokens: {task_usage.input_tokens:,} in / {task_usage.output_tokens:,} out "
             f"({task_usage.total_tokens:,} total)  ·  {cost_str}[/{COLOR_FG_MUTED}]\n"
         )
     else:
@@ -444,8 +452,7 @@ def _picker(title: str, items: List[tuple], current_id: str, id_col: str = "ID")
     Prints a numbered Rich table with square border, reads a selection, then
     clears the picker block from the terminal so it doesn't clutter chat history.
     """
-    cols = shutil.get_terminal_size(fallback=(95, 35)).columns
-    box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+    cols, rows, box_w, margin, pad = get_layout_dims()
 
     table = Table(
         title=f" {title} ",
@@ -470,10 +477,10 @@ def _picker(title: str, items: List[tuple], current_id: str, id_col: str = "ID")
         table.add_row(f"  {i}", f"{item_name}", item_desc, status, style=row_style)
 
     console.print()
-    console.print(table)
+    console.print(Align.center(table) if cols > 100 else table)
     console.print()
 
-    prompt_text = f"  [bold {COLOR_ACCENT}]▸[/bold {COLOR_ACCENT}] [{COLOR_FG_MUTED}]Pilih (1–{len(items)}) atau q batal:[/{COLOR_FG_MUTED}] "
+    prompt_text = f"{pad}[bold {COLOR_ACCENT}]▸[/bold {COLOR_ACCENT}] [{COLOR_FG_MUTED}]Pilih (1–{len(items)}) atau q batal:[/{COLOR_FG_MUTED}] "
     try:
         raw = console.input(prompt_text).strip().lower()
     except (KeyboardInterrupt, EOFError):
@@ -575,6 +582,25 @@ def run_interactive(
 
     app_state = {"status": "Ready", "icon": "●"}
 
+    def get_prompt_tokens():
+        """Top border and input prefix for composer box (Section 5.2)."""
+        cols, rows, box_w, margin, pad = get_layout_dims()
+        bar = "─" * (box_w - 2)
+
+        top_border = f"{pad}╭{bar}╮\n"
+        prefix = f"{pad}│  "
+        return [
+            ("class:input-border", top_border),
+            ("class:input-border", prefix),
+            ("class:accent", f"{SYM_PROMPT} "),
+        ]
+
+    def get_prompt_bottom_border():
+        """Bottom border attached directly under input buffer for a contiguous composer box."""
+        cols, rows, box_w, margin, pad = get_layout_dims()
+        bar = "─" * (box_w - 2)
+        return [("class:input-border", f"{pad}╰{bar}╯")]
+
     # Initialize prompt_toolkit session with autocomplete & history
     session = None
     try:
@@ -656,29 +682,6 @@ def run_interactive(
 
     except Exception:
         session = None
-
-    def get_prompt_tokens():
-        """Top border and input prefix for composer box (Section 5.2)."""
-        cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-        box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
-        pad = " " * ((cols - box_w) // 2) if cols > 100 else ("  " if cols >= 60 else " ")
-        bar = "─" * (box_w - 2)
-
-        top_border = f"{pad}╭{bar}╮\n"
-        prefix = f"{pad}│  "
-        return [
-            ("class:input-border", top_border),
-            ("class:input-border", prefix),
-            ("class:accent", f"{SYM_PROMPT} "),
-        ]
-
-    def get_prompt_bottom_border():
-        """Bottom border attached directly under input buffer for a contiguous composer box."""
-        cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-        box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
-        pad = " " * ((cols - box_w) // 2) if cols > 100 else ("  " if cols >= 60 else " ")
-        bar = "─" * (box_w - 2)
-        return [("class:input-border", f"{pad}╰{bar}╯")]
 
     def get_chat_toolbar():
         """Full-width divider + 2-line status bar at bottom of the terminal window (Section 4 & 5.4)."""
@@ -763,9 +766,9 @@ def run_interactive(
     def print_compact_header(cols: int) -> None:
         """Render 1-line top header when history exists (Section 4 & 5.3)."""
         console.print()
+        cols, rows, box_w, margin, pad = get_layout_dims()
         model_parts = active_model.split("-")
         model_disp = "-".join(model_parts[:2]) if cols < 60 and len(model_parts) >= 2 else active_model
-        pad = "  " if cols >= 60 else " "
         if cols >= 60:
             console.print(
                 f"{pad}[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]"
@@ -780,8 +783,7 @@ def run_interactive(
         console.print()
 
     def show_help() -> None:
-        cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-        box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+        cols, rows, box_w, margin, pad = get_layout_dims()
         table = Table(
             title=" BrainFrog Commands & Shortcuts ",
             box=box.SQUARE,
@@ -820,7 +822,7 @@ def run_interactive(
             table.add_row(cmd, desc, cat)
 
         console.print()
-        console.print(table)
+        console.print(Align.center(table) if cols > 100 else table)
         console.print()
 
     cols, rows = shutil.get_terminal_size(fallback=(95, 35))
@@ -857,7 +859,8 @@ def run_interactive(
         if prompt.startswith("!") or prompt.startswith("$"):
             cmd = prompt[1:].strip()
             if cmd:
-                console.print(f"\n  [{COLOR_FG_MUTED}]Menjalankan shell:[/{COLOR_FG_MUTED}] [bold {COLOR_INFO}]{cmd}[/bold {COLOR_INFO}]\n")
+                cols, rows, box_w, margin, pad = get_layout_dims()
+                console.print(f"\n{pad}[{COLOR_FG_MUTED}]Menjalankan shell:[/{COLOR_FG_MUTED}] [bold {COLOR_INFO}]{cmd}[/bold {COLOR_INFO}]\n")
                 try:
                     subprocess.run(cmd, shell=True, cwd=repo_dir)
                 except Exception as e:
@@ -913,14 +916,17 @@ def run_interactive(
             if not diff:
                 diff = subprocess.run(["git", "diff", "HEAD~1"], cwd=repo_dir, capture_output=True, text=True).stdout.strip()
             if diff:
-                box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
-                console.print(Panel(Syntax(diff, "diff", theme="monokai", line_numbers=True), title=" Git Diff ", box=box.ROUNDED, border_style=COLOR_ACCENT, width=box_w))
+                cols, rows, box_w, margin, pad = get_layout_dims()
+                diff_panel = Panel(Syntax(diff, "diff", theme="monokai", line_numbers=True), title=" Git Diff ", box=box.ROUNDED, border_style=COLOR_ACCENT, width=box_w)
+                console.print()
+                console.print(Align.center(diff_panel) if cols > 100 else diff_panel)
+                console.print()
             else:
                 print_banner_box("Tidak ada perubahan kode yang terdeteksi (working tree clean).", level="info", title="Git Diff")
             continue
         elif lower in ("/cost", "/stats", "/tokens"):
             s = usage_tracker.session
-            box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+            cols, rows, box_w, margin, pad = get_layout_dims()
             table = Table(title=" BrainFrog Session Metrics ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, width=box_w)
             table.add_column("Metrik", style=COLOR_INFO)
             table.add_column("Nilai", style=f"bold {COLOR_ACCENT}", justify="right")
@@ -935,14 +941,17 @@ def run_interactive(
             else:
                 table.add_row("Est. Cost (USD)", f"${s.cost_usd:.4f}")
             console.print()
-            console.print(table)
+            console.print(Align.center(table) if cols > 100 else table)
             console.print()
             continue
         elif lower in ("/rules", "/memory"):
             rules = load_project_guidelines(repo_dir)
             if rules:
-                box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
-                console.print(Panel(Markdown(rules), title=" Project Rules (BRAINFROG.md) ", box=box.ROUNDED, border_style=COLOR_INFO, width=box_w))
+                cols, rows, box_w, margin, pad = get_layout_dims()
+                rules_panel = Panel(Markdown(rules), title=" Project Rules (BRAINFROG.md) ", box=box.ROUNDED, border_style=COLOR_INFO, width=box_w)
+                console.print()
+                console.print(Align.center(rules_panel) if cols > 100 else rules_panel)
+                console.print()
             else:
                 print_banner_box("Tidak ditemukan file BRAINFROG.md di proyek ini.", level="warning", title="Project Memory")
                 try:
@@ -965,7 +974,7 @@ def run_interactive(
             if not indexed:
                 print_banner_box("Tidak ada modular skill di .brainfrog/skills", level="warning", title="Skills")
             else:
-                box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+                cols, rows, box_w, margin, pad = get_layout_dims()
                 table = Table(title=" Available Modular Skills ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, header_style=f"bold {COLOR_ACCENT}", width=box_w)
                 table.add_column("Skill Name", style=f"bold {COLOR_FG_PRIMARY}")
                 table.add_column("Description", style=COLOR_FG_SECONDARY)
@@ -976,7 +985,7 @@ def run_interactive(
                     row_style = f"on {COLOR_BG_SURFACE}" if is_active else None
                     table.add_row(s_name, s_meta.description[:80] + "...", status, style=row_style)
                 console.print()
-                console.print(table)
+                console.print(Align.center(table) if cols > 100 else table)
                 console.print()
             continue
         elif lower.startswith("/skill"):
@@ -1091,7 +1100,7 @@ def run_interactive(
             continue
         elif lower == "/domains":
             domains = load_module_map(repo_dir, Path(module_map) if module_map else None, auto_create=False)
-            box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+            cols, rows, box_w, margin, pad = get_layout_dims()
             table = Table(title=" Configured Scope Domains ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, header_style=f"bold {COLOR_ACCENT}", width=box_w)
             table.add_column("Domain", style=COLOR_INFO)
             table.add_column("Description", style=COLOR_FG_PRIMARY)
@@ -1100,7 +1109,7 @@ def run_interactive(
             for k, d in domains.items():
                 table.add_row(k, d.description, ", ".join(d.paths) or "(all)", "YES" if d.sensitive else "no")
             console.print()
-            console.print(table)
+            console.print(Align.center(table) if cols > 100 else table)
             console.print()
             continue
         elif lower.startswith("/init"):
@@ -1114,7 +1123,8 @@ def run_interactive(
             continue
 
         # Execute task with user prompt prefix and live braille spinner (Section 5.3 & 5.5)
-        console.print(f"\n  [{COLOR_FG_SECONDARY}]{SYM_USER}[/{COLOR_FG_SECONDARY}] [bold {COLOR_FG_PRIMARY}]{prompt}[/bold {COLOR_FG_PRIMARY}]\n")
+        cols, rows, box_w, margin, pad = get_layout_dims()
+        console.print(f"\n{pad}[{COLOR_FG_SECONDARY}]{SYM_USER}[/{COLOR_FG_SECONDARY}] [bold {COLOR_FG_PRIMARY}]{prompt}[/bold {COLOR_FG_PRIMARY}]\n")
         app_state["status"] = "Processing..."
         app_state["icon"] = "◌"
 
