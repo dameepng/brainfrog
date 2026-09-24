@@ -582,6 +582,7 @@ def run_interactive(
         from prompt_toolkit.styles import Style
         from prompt_toolkit.history import FileHistory
         from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.formatted_text import FormattedText
 
         pt_style = Style.from_dict({
             # Bottom toolbar: blends into base dark background
@@ -647,23 +648,21 @@ def run_interactive(
         """Top border and input prefix for composer box (Section 5.2)."""
         cols, rows = shutil.get_terminal_size(fallback=(95, 35))
         box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
-        margin = max(0, (cols - box_w) // 2)
-        pad = " " * margin
+        pad = "  " if cols >= 60 else " "
 
         top_border = f"{pad}╭{'─' * (box_w - 2)}╮\n"
         prefix = f"{pad}│  "
-        return FormattedText([
+        return [
             ("class:input-border", top_border),
             ("class:input-border", prefix),
             ("class:accent", f"{SYM_PROMPT} "),
-        ])
+        ]
 
     def get_chat_toolbar():
         """Bottom border + full-width divider + 2-line status bar (Section 4 & 5.4)."""
         cols, rows = shutil.get_terminal_size(fallback=(95, 35))
         box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
-        margin = max(0, (cols - box_w) // 2)
-        pad = " " * margin
+        pad = "  " if cols >= 60 else " "
 
         # Bottom border of input box
         bot_border = f"{pad}╰{'─' * (box_w - 2)}╯\n"
@@ -687,14 +686,14 @@ def run_interactive(
             left = f" ● {model_disp} · {repo_disp}"
             right = f"v{CLI_VERSION} "
             gap = max(1, cols - len(left) - len(right))
-            return FormattedText([
+            return [
                 ("class:input-border", bot_border),
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
                 ("class:toolbar-id", f"{model_disp} · {repo_disp}"),
                 ("class:toolbar-sep", " " * gap),
                 ("class:toolbar-dim", right),
-            ])
+            ]
         else:
             # Standard & Wide (>=60 cols): 2-line status bar
             # Line 1: Identity (bold)
@@ -704,45 +703,40 @@ def run_interactive(
             gap = max(2, cols - len(left_hints) - len(right_v))
             line2 = f"{left_hints}{' ' * gap}{right_v}"
 
-            return FormattedText([
+            return [
                 ("class:input-border", bot_border),
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
                 ("class:toolbar-id", f"{model_disp}  ·  {repo_disp}\n"),
                 ("class:toolbar-dim", line2),
-            ])
+            ]
 
     def print_splash(cols: int, rows: int) -> None:
-        """Render splash/welcome screen for empty state (Section 5.1)."""
+        """Render splash/welcome screen for empty state (Section 4 & 5.1)."""
         console.clear()
+        # Margin atas: 1 baris konsisten (Section 4)
+        console.print()
+
         if cols < 60:
             # Narrow: skip large logo, show compact header directly
-            console.print()
             console.print(f"  [{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{active_model}[/{COLOR_FG_SECONDARY}]")
             console.print(f"  [{COLOR_FG_MUTED}]Tanya BrainFrog apapun soal project ini.[/{COLOR_FG_MUTED}]")
             console.print()
             return
 
-        # Breathing room from top (~25% of terminal rows, max 5 lines)
-        top_pad = max(1, min(rows // 4, 5))
-        for _ in range(top_pad):
-            console.print()
-
-        # Wordmark with frog eye green accents (#33D17A)
+        # Wordmark with frog eye green accents (#33D17A) - margin 2 kolom (Section 4)
+        pad = "  "
         logo_lines = [
-            f"[{COLOR_FG_PRIMARY}]█▀▀▄ █▀▀▄ ▄▀▀▄ ▀█▀ █▄  █   █▀▀ █▀▀▄ [/{COLOR_FG_PRIMARY}][{COLOR_ACCENT}]▄▀ ▀▄[/{COLOR_ACCENT}][{COLOR_FG_PRIMARY}] █▀▀▀[/{COLOR_FG_PRIMARY}]",
-            f"[{COLOR_FG_PRIMARY}]█▀▀▄ █▀▀▄ █▀▀█  █  █ ▀▄█   █▀  █▀▀▄ [/{COLOR_FG_PRIMARY}][{COLOR_ACCENT}]█● █●[/{COLOR_ACCENT}][{COLOR_FG_PRIMARY}] █ ▀█[/{COLOR_FG_PRIMARY}]",
-            f"[{COLOR_FG_PRIMARY}]▀▀▀  ▀  ▀ ▀  ▀ ▀▀▀ ▀   ▀   ▀   ▀  ▀ [/{COLOR_FG_PRIMARY}][{COLOR_ACCENT}]▀   ▀[/{COLOR_ACCENT}][{COLOR_FG_PRIMARY}] ▀▀▀▀[/{COLOR_FG_PRIMARY}]",
+            f"{pad}[{COLOR_FG_PRIMARY}]█▀▀▄ █▀▀▄ ▄▀▀▄ ▀█▀ █▄  █   █▀▀ █▀▀▄ [/{COLOR_FG_PRIMARY}][{COLOR_ACCENT}]▄▀ ▀▄[/{COLOR_ACCENT}][{COLOR_FG_PRIMARY}] █▀▀▀[/{COLOR_FG_PRIMARY}]",
+            f"{pad}[{COLOR_FG_PRIMARY}]█▀▀▄ █▀▀▄ █▀▀█  █  █ ▀▄█   █▀  █▀▀▄ [/{COLOR_FG_PRIMARY}][{COLOR_ACCENT}]█● █●[/{COLOR_ACCENT}][{COLOR_FG_PRIMARY}] █ ▀█[/{COLOR_FG_PRIMARY}]",
+            f"{pad}[{COLOR_FG_PRIMARY}]▀▀▀  ▀  ▀ ▀  ▀ ▀▀▀ ▀   ▀   ▀   ▀  ▀ [/{COLOR_FG_PRIMARY}][{COLOR_ACCENT}]▀   ▀[/{COLOR_ACCENT}][{COLOR_FG_PRIMARY}] ▀▀▀▀[/{COLOR_FG_PRIMARY}]",
         ]
-        logo_w = 49
-        logo_pad = " " * max(0, (cols - logo_w) // 2)
         for line in logo_lines:
-            console.print(f"{logo_pad}{line}")
+            console.print(line)
 
         console.print()
         tagline = "Tanya BrainFrog apapun soal project ini."
-        tl_pad = " " * max(0, (cols - len(tagline)) // 2)
-        console.print(f"{tl_pad}[{COLOR_FG_MUTED}]{tagline}[/{COLOR_FG_MUTED}]")
+        console.print(f"{pad}[{COLOR_FG_MUTED}]{tagline}[/{COLOR_FG_MUTED}]")
         console.print()
 
     def print_compact_header(cols: int) -> None:
