@@ -202,10 +202,237 @@ Ketika agent diminta merancang sebuah subsistem atau fitur dengan dampak arsitek
 
 ---
 
+## Tool & Contract Design
+
+Bagian ini mengatur bagaimana agent merancang, mendefinisikan, dan memelihara antarmuka fungsional di repositori BrainFrog—meliputi tools yang diekspos ke LLM, perintah CLI, API internal, serta kontrak data antar-layer (`system1`, `system2`, `orchestrator`). Prinsip utamanya adalah **kejelasan semantik bagi model dan manusia, validasi ketat di perbatasan (strict boundary validation), toleransi pada pemrosesan (Postel's Law), serta pelaporan error yang dapat ditindaklanjuti secara mandiri (actionable feedback)**.
+
+---
+
+### 1. Tanggung Jawab Tunggal & Penamaan Intensional
+
+Setiap tool atau fungsi kontrak antarmodul harus memiliki satu alasan logis untuk eksis dan batas kerja yang terdefinisi secara presisi:
+
+1. **Prinsip Satu Tanggung Jawab (Single Responsibility per Tool):**
+   - Satu tool hanya boleh melakukan satu operasi diskrit yang koheren.
+   - Hindari membuat "Swiss Army knife tool" (misalnya `manage_workspace` yang merangkap membaca file, mengedit file, menjalankan tes, dan commit git). Pecah menjadi tool-tool atomik: `read_file`, `apply_patch`, `run_test_suite`.
+   - Tool modular memudahkan LLM memilih aksi yang tepat dan mengurangi risiko kegagalan tak terduga (*blast radius*).
+
+2. **Penamaan Intensional (Intentional & Unambiguous Naming):**
+   - Format nama tool wajib menggunakan pola `verb_noun` atau `domain_action` yang lugas (contoh: `read_workspace_file`, `execute_shell_command`, `git_create_checkpoint`).
+   - Hindari nama yang ambigu atau generik seperti `process`, `handle`, `run`, atau `data`.
+
+3. **Deskripsi Penentu Keputusan (Trigger Boundaries in Description):**
+   - Deskripsi tool bukan sekadar komentar kode; deskripsi adalah panduan pengambilan keputusan bagi LLM.
+   - Wajib mencakup:
+     - **Tujuan utama:** Apa yang dihasilkan atau dimutasi oleh tool.
+     - **Kapan digunakan (Positive triggers):** Kondisi spesifik saat tool ini adalah pilihan terbaik.
+     - **Kapan TIDAK digunakan (Negative boundaries):** Batasan larangan dan alternatif tool lain yang seharusnya digunakan.
+     - **Efek samping:** Apakah tool ini memodifikasi sistem atau hanya membaca.
+
+---
+
+### 2. Desain Skema Input & Output
+
+Kontrak data yang ambigu adalah penyebab utama kegagalan loop agen. Setiap tool wajib memiliki definisi skema yang eksplisit:
+
+1. **Pengetikan Statis & Struktur Schema:**
+   - Gunakan mekanisme pengetikan native proyek (Python `dataclasses`, `TypedDict`, atau skema JSON Schema / Pydantic jika tersedia di batas protokol).
+   - Tentukan tipe data primitif dan komposit secara ketat (`str`, `int`, `bool`, `List[str]`, `Dict[str, Any]`). Dilarang membiarkan parameter bertipe `Any` tanpa dokumentasi struktur internalnya.
+
+2. **Pemisahan Parameter Wajib vs Opsional:**
+   - **Wajib (Required):** Hanya field yang esensial agar operasi dapat berjalan secara valid.
+   - **Opsional (Optional):** Field yang memiliki nilai default yang aman dan terdokumentasi (contoh: `timeout_seconds: int = 30`, `max_lines: int = 500`).
+   - Jangan mewajibkan parameter yang sebenarnya dapat diderivasi secara otomatis oleh sistem (misalnya jangan minta `file_extension` jika `file_path` sudah diberikan).
+
+3. **Batasan Nilai (Constraints & Invariants):**
+   - Tetapkan batasan numerik eksplisit (misal: `min_value`, `max_value`, batas panjang string).
+   - Gunakan nilai enumerasi tertutup (`Literal` atau `Enum`) jika parameter hanya menerima pilihan terbatas (contoh: `format: Literal["json", "text", "diff"]`).
+
+4. **Contoh Representatif (Representative Examples):**
+   - Setiap parameter non-sepele wajib memiliki minimal satu contoh nilai yang valid dalam deskripsi (contoh: `file_path: "src/utils/calc.py"` bukan hanya `file_path: string`).
+
+---
+
+### 3. Klasifikasi Operasi: Baca (Safe) vs Mutasi (Side-Effect)
+
+Mengadopsi prinsip semantik RFC 9110 dan standar tool agen modern, setiap operasi harus diklasifikasikan secara tegas:
+
+1. **Operasi Baca (Safe / Read-Only):**
+   - Bebas efek samping pada state sistem. Pemanggilan operasi baca tidak mengubah file, database, proses, atau repository git.
+   - Karakteristik: Boleh dipanggil secara spekulatif, boleh di-cache jika relevan, dan aman dieksekusi berulang tanpa risiko.
+   - Contoh: `read_file_content`, `list_directory`, `get_git_status`.
+
+2. **Operasi Mutasi (Mutating / Side-Effect):**
+   - Mengubah state eksternal: menulis file, menghapus direktori, mengeksekusi shell subprocess, atau membuat commit git.
+   - **Pre-flight Blast Radius:** Sebelum eksekusi mutasi yang berisiko merusak, kontrak harus mampu mengembalikan ringkasan cakupan perubahan (dry-run atau parameter `preview_only: bool = False`).
+   - Aturan keamanan: Operasi destruktif (seperti reset git hard atau pembersihan direktori) harus meminta konfirmasi atau memiliki mekanisme isolasi checkpoint `/undo`.
+
+---
+
+### 4. Kontrak Hasil, Actionable Error, Timeout, dan Idempotensi
+
+Kontrak yang andal memberikan kepastian status dan memampukan pemanggil untuk memperbaiki kegagalan secara otonom:
+
+1. **Struktur Hasil Sukses yang Deterministik:**
+   - Output sukses harus konsisten strukturnya, baik saat data penuh maupun saat data kosong.
+   - Sertakan metadata kontekstual yang relevan (misalnya ukuran data, flag pemotongan, atau exit code proses).
+
+2. **Format Actionable Error (Bukan Traceback Mentah):**
+   - Error yang dikembalikan ke LLM atau pemanggil modul **wajib berstruktur dan dapat ditindaklanjuti** (mengadopsi prinsip Google AIP-193):
+     - `error_code`: Kategori masalah standar (`NOT_FOUND`, `INVALID_ARGUMENT`, `PERMISSION_DENIED`, `TIMEOUT`, `EXECUTION_FAILED`).
+     - `message`: Penjelasan singkat dan manusiawi tentang apa yang gagal.
+     - `remediation` (Solusi Korektif): Petunjuk spesifik apa yang harus diubah oleh pemanggil agar panggilan berikutnya berhasil (contoh: `"File 'app.js' does not exist. Did you mean 'src/app.js'? Use list_dir to inspect available files."`).
+   - Jangan mengembalikan traceback Python mentah sepanjang 50 baris ke prompt agent; rangkum akar penyebabnya dan tawarkan opsi pemulihan.
+
+3. **Timeout & Pembatalan:**
+   - Semua operasi yang melibatkan I/O, jaringan, atau eksekusi proses shell (`subprocess.run`) **wajib memiliki timeout eksplisit** (default konservatif, misal 10 s.d. 60 detik).
+   - Tangani `TimeoutExpired` secara anggun: matikan proses child (kill process tree), bersihkan resource yang menggantung, dan kembalikan error terstruktur bertipe `TIMEOUT` beserta durasi batasnya.
+
+4. **Idempotensi & Kebijakan Retry:**
+   - **Operasi Idempoten:** Memanggil operasi N kali menghasilkan status akhir yang sama seperti memanggil 1 kali (contoh: `ensure_directory_exists`, `write_file_overwrite`, `get_file`). Operasi ini aman di-retry secara otomatis jika terjadi transient network/IO glitch.
+   - **Operasi Non-Idempoten:** Memanggil berulang kali menghasilkan mutasi akumulatif (contoh: `append_to_file`, `git_commit`, `send_network_message`). Operasi ini **dilarang di-retry buta** tanpa validasi state awal.
+
+---
+
+### 5. Penanganan Hasil Kosong, Parsial, Paginasi & Output Besar
+
+Output yang membanjiri konteks dapat merusak memori kerja agen atau menyebabkan proses crash:
+
+1. **Hasil Kosong (Empty Results):**
+   - Jika query atau pencarian tidak menemukan hasil, kembalikan kontainer kosong (`[]` atau `{}`) dengan status sukses, **bukan exception atau error 404** (sesuai Google AIP-132). Hasil kosong adalah kondisi bisnis normal, bukan kegagalan sistem.
+
+2. **Hasil Parsial (Partial Success):**
+   - Jika sebuah operasi batch berhasil sebagian (misalnya membaca 8 file sukses dan 2 file gagal karena permission), kontrak harus melaporkan:
+     - Daftar item yang berhasil diproses.
+     - Daftar spesifik item yang gagal beserta alasan error masing-masing.
+     - Hindari menggagalkan seluruh batch hanya karena 1 item non-kritis gagal, kecuali transaksi mensyaratkan atomisitas penuh.
+
+3. **Paginasi & Truncation Safety:**
+   - Dilarang mengembalikan output dengan ukuran tak terbatas (misalnya membaca log 100 MB atau 50.000 file sekaligus ke context LLM).
+   - Terapkan batasan batas atas (*hard cap*), parameter `offset`/`page_size`, serta flag status:
+     ```json
+     {
+       "content": "... [baris 1 s.d. 200] ...",
+       "is_truncated": true,
+       "total_lines": 1420,
+       "next_offset": 201
+     }
+     ```
+
+---
+
+### 6. Validasi di Batas Sistem & Kompatibilitas Kontrak
+
+Integritas arsitektur dijaga di pintu gerbang masuk komponen:
+
+1. **Validasi Batas Cepat Gagal (Fail-Fast Boundary Validation):**
+   - Validasi seluruh parameter input sebelum mengalokasikan resource atau memanggil operasi hilir (*downstream*).
+   - Pastikan sanitasi path dilakukan di layer kontrak untuk mencegah path traversal (misalnya mencegah `../../etc/passwd`).
+
+2. **Aturan Kompatibilitas Maju & Mundur (AIP-180 & SemVer):**
+   - **Perubahan Non-Breaking (Aman):**
+     - Menambahkan field baru ke output.
+     - Menambahkan parameter opsional baru ke input (dengan nilai default).
+     - Menambahkan toleransi tipe baru yang lebih fleksibel.
+   - **Perubahan Breaking (Wajib Dihindari / Versi Baru):**
+     - Menghapus atau mengubah nama parameter input/output.
+     - Mengubah tipe data field yang sudah ada.
+     - Mengubah parameter opsional menjadi wajib.
+     - Jika perubahan breaking tak terelakkan, buat fungsi/kontrak baru berdampingan (misal `run_v2`) dan berikan masa transisi sebelum mendeprekasi versi lama.
+
+---
+
+### 7. Strategi Pengujian Kontrak (Consumer-Driven Contract Testing)
+
+Setiap tool atau fungsi kontrak wajib diuji dari perspektif pemanggil sebelum dianggap selesai:
+
+1. **Kasus Normal (Happy Path):**
+   - Verifikasi bahwa input yang valid menghasilkan output terstruktur dengan tipe dan skema yang tepat.
+2. **Input Tidak Valid (Negative Testing):**
+   - Verifikasi bahwa field wajib yang hilang, tipe data salah, atau batasan nilai yang dilanggar ditolak di perbatasan dengan actionable error yang rapi tanpa unhandled exception.
+3. **Kondisi Batas (Boundary / Edge Cases):**
+   - Pengujian dengan string kosong, array kosong, karakter khusus (spasi, newline, Windows backslash vs Unix slash), serta file berukuran 0 byte.
+4. **Kegagalan & Timeout:**
+   - Simulasi dependensi macet (timeout), disk penuh, atau file terkunci untuk memastikan recovery berjalan sesuai kontrak.
+
+---
+
+### 8. Checklist Review Kontrak Tool
+
+Sebelum menyelesaikan pembuatan atau modifikasi tool/kontrak di repositori BrainFrog, agent wajib memeriksa checklist ini:
+
+| No | Poin Pemeriksaan Kontrak | Status Validasi |
+| :---: | :--- | :---: |
+| 1 | Apakah nama tool lugas (`verb_noun`) dan deskripsinya mendefinisikan kapan *harus* dan *tidak boleh* digunakan? | [ ] |
+| 2 | Apakah seluruh tipe parameter dinyatakan eksplisit dan field opsional memiliki nilai default yang aman? | [ ] |
+| 3 | Apakah operasi sudah diklasifikasikan dengan benar antara Baca (Safe) vs Mutasi (Side-Effect)? | [ ] |
+| 4 | Apakah respons error terstruktur dengan kode kanonik dan memuat saran perbaikan (*remediation hint*)? | [ ] |
+| 5 | Apakah operasi I/O / Subprocess memiliki timeout eksplisit dan pembersihan resource saat gagal? | [ ] |
+| 6 | Apakah output besar dilindungi batas (*truncation/limit*) dan hasil kosong dikembalikan secara anggun? | [ ] |
+| 7 | Apakah perubahan kontrak bersifat aditif dan tidak mematahkan pemanggil (*backwards-compatible*)? | [ ] |
+
+---
+
+### 9. Contoh Spesifikasi Kontrak Tool Relevan (BrainFrog Context)
+
+Berikut adalah contoh acuan kontrak standar untuk tool pembacaan file di repositori BrainFrog, menunjukkan penerapan seluruh prinsip di atas:
+
+#### Definisi Kontrak: `read_workspace_file`
+- **Operasi:** Safe / Read-Only (Idempoten).
+- **Deskripsi:** Membaca konten teks dari file yang berada di dalam repositori workspace. Gunakan tool ini saat Anda perlu memeriksa isi source code atau konfigurasi. JANGAN gunakan tool ini untuk file biner besar (gambar/audio) atau untuk memeriksa struktur direktori (gunakan `list_dir`).
+
+#### Skema Parameter Input:
+```python
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class ReadWorkspaceFileInput:
+    file_path: str               # Wajib: Path relatif terhadap root repo (contoh: "src/calc.py")
+    start_line: int = 1          # Opsional: Baris awal (1-indexed, default: 1, min: 1)
+    max_lines: int = 400         # Opsional: Maksimal baris yang dibaca (default: 400, max: 1000)
+```
+
+#### Contoh Respons Sukses:
+```json
+{
+  "status": "success",
+  "file_path": "system1/base.py",
+  "content": "from dataclasses import dataclass\n...",
+  "start_line": 1,
+  "lines_returned": 69,
+  "total_lines": 69,
+  "is_truncated": false
+}
+```
+
+#### Contoh Respons Actionable Error (File Tidak Ditemukan):
+```json
+{
+  "status": "error",
+  "error_code": "NOT_FOUND",
+  "message": "File 'system1/basic.py' does not exist in the repository.",
+  "remediation": "Check the file name. Did you mean 'system1/base.py'? Run list_dir on 'system1' to see all files."
+}
+```
+
+#### Contoh Respons Actionable Error (Input di Luar Batas):
+```json
+{
+  "status": "error",
+  "error_code": "INVALID_ARGUMENT",
+  "message": "Parameter 'start_line' must be greater than or equal to 1, received: 0.",
+  "remediation": "Line numbers in BrainFrog are 1-indexed. Specify start_line=1 to read from the beginning."
+}
+```
+
+---
+
 ## Referensi Riset & Literatur
 
-Sumber primer yang mendasari penyusunan pedoman System Design ini:
+Sumber primer yang mendasari penyusunan pedoman arsitektur dan kontrak di repositori ini:
 
+### Pilar System Design
 1. **Google Cloud Architecture Framework: System Design**
    - Fokus: Prinsip modularitas, perubahan atomik, dokumentasi arsitektur, dan evaluasi gap analysis berbasis pilar.
    - URL: `https://cloud.google.com/architecture/framework/system-design`
@@ -245,3 +472,34 @@ Sumber primer yang mendasari penyusunan pedoman System Design ini:
    - Fokus: Pembedaan keputusan reversibel yang mengutamakan kecepatan versus keputusan struktural yang membutuhkan kehati-hatian tinggi.
    - URL: `https://www.aboutamazon.com/news/company-news/2015-letter-to-shareholders`
    - Tanggal Akses: 24 September 2026.
+
+### Pilar Tool & Contract Design
+9. **Model Context Protocol (MCP) Tools Specification — Anthropic / MCP Working Group**
+   - Fokus: Spesifikasi standar definisi tool (`name`, `description`, `inputSchema` berbasis JSON Schema 2020-12), penanganan error terstruktur (`isError`), serta panduan penyusunan deskripsi untuk pemahaman model LLM.
+   - URL: `https://spec.modelcontextprotocol.io/specification/server/tools/`
+   - Tanggal Akses: 24 September 2026.
+
+10. **OpenAPI Specification v3.1.0 — OpenAPI Initiative (Linux Foundation)**
+    - Fokus: Penyelarasan penuh dengan JSON Schema 2020-12, pemisahan metode baca vs mutasi, validasi parameter batas, dan pemetaan respons status.
+    - URL: `https://spec.openapis.org/oas/v3.1.0`
+    - Tanggal Akses: 24 September 2026.
+
+11. **JSON Schema Specification (Draft 2020-12)**
+    - Fokus: Validasi struktural berbasis tipe data (`type`, `properties`, `required`, `additionalProperties`), batasan numerik, format, dan enumerasi.
+    - URL: `https://json-schema.org/draft/2020-12/release-notes`
+    - Tanggal Akses: 24 September 2026.
+
+12. **Google Cloud API Design Guide: API Improvement Proposals (AIP)**
+    - Fokus:
+      - *AIP-132 / AIP-158:* Standarisasi metode List dan penanganan paginasi data besar.
+      - *AIP-134:* Operasi Update berbasis field mask dan definisi semantik idempotensi.
+      - *AIP-180:* Aturan kompatibilitas mundur (*backward compatibility*) untuk mencegah breaking changes.
+      - *AIP-193:* Standar error informatif dan *actionable* (`error_code`, `message`, dan `details`).
+    - URL: `https://google.aip.dev/`
+    - Tanggal Akses: 24 September 2026.
+
+13. **RFC 9110: HTTP Semantics — Internet Engineering Task Force (IETF)**
+    - Fokus: Definisi formal *Safe Methods* (bebas efek samping) dan *Idempotent Methods* untuk konsistensi kontrak transmisi data dan keandalan pemanggilan ulang.
+    - URL: `https://www.rfc-editor.org/rfc/rfc9110.html`
+    - Tanggal Akses: 24 September 2026.
+
