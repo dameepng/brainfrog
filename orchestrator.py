@@ -106,17 +106,32 @@ def _read_files_from_tree(repo_dir: Path, tree: str, max_files: int = 40) -> Dic
     return _read_files(repo_dir, paths)
 
 
+def _normalize_rel_path(repo_dir: Path, rel: str) -> str:
+    """Normalize relative path. If the model accidentally prepends the current
+    working directory name (e.g. 'testing_agentic/index.html' when repo_dir is
+    already '.../testing_agentic'), strip the leading folder to prevent accidental
+    nested directories.
+    """
+    clean = rel.replace("\\", "/").strip().lstrip("/")
+    parts = clean.split("/")
+    if parts and parts[0] == repo_dir.name and len(parts) > 1:
+        return "/".join(parts[1:])
+    return clean
+
+
 def _read_files(repo_dir: Path, paths: List[str]) -> Dict[str, str]:
     out = {}
     for rel in paths:
-        f = repo_dir / rel
-        out[rel] = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        norm = _normalize_rel_path(repo_dir, rel)
+        f = repo_dir / norm
+        out[norm] = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
     return out
 
 
 def _write_files(repo_dir: Path, files: Dict[str, str]) -> None:
     for rel, content in files.items():
-        f = repo_dir / rel
+        norm = _normalize_rel_path(repo_dir, rel)
+        f = repo_dir / norm
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(content, encoding="utf-8")
 
@@ -224,6 +239,8 @@ class Orchestrator:
 
         print(f"[system2/claude] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
         steps = self.s2.plan_task(self.cfg.task, scope.focus_tree, pinned_files=self.pinned_files)
+        for s in steps:
+            s.files = [_normalize_rel_path(self.cfg.repo_dir, f) for f in s.files]
         print(f"[system2/claude] plan has {len(steps)} step(s)")
 
         results: List[StepResult] = []
