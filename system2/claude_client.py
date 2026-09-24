@@ -58,17 +58,38 @@ usage_tracker = UsageTracker()
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
-    """Pull the first {...} block out of a model response and parse it."""
+    """Pull the first valid {...} JSON object out of a model response.
+
+    Uses json.JSONDecoder.raw_decode so it correctly handles nested braces
+    inside string values (e.g. CSS rules, JS objects inside HTML content).
+    Falls back to stripping markdown fences first if the response is wrapped.
+    """
     text = text.strip()
+
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
     if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
+        lines = text.splitlines()
+        # Drop first line (```json or ```) and last line (```)
+        inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
+        if inner and inner[-1].strip() == "```":
+            inner = inner[:-1]
+        text = "\n".join(inner).strip()
+
     start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
+    if start == -1:
         raise ValueError(f"No JSON object found in model output:\n{text[:500]}")
-    return json.loads(text[start : end + 1])
+
+    decoder = json.JSONDecoder()
+    try:
+        obj, _ = decoder.raw_decode(text, start)
+        return obj
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"JSON parse error at position {exc.pos} in model output.\n"
+            f"Context: ...{text[max(0, exc.pos-80):exc.pos+80]}...\n"
+            f"Full output (first 800 chars):\n{text[:800]}"
+        ) from exc
+
 
 
 @dataclass
@@ -157,7 +178,7 @@ class System2Client:
             f"Current step:\n{step.description}\n\n"
             f"Current file contents:\n{json.dumps(all_context, indent=2)}"
         )
-        raw = self._call(system, user, max_tokens=8192)
+        raw = self._call(system, user, max_tokens=16000)
         data = _extract_json(raw)
         return data["files"]
 
