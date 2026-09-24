@@ -500,11 +500,22 @@ def run_interactive(
         from prompt_toolkit.history import FileHistory
         from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout.containers import Window, ConditionalContainer
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.filters import Condition
 
         pt_style = Style.from_dict({
+            "bottom-toolbar": "noinherit nobold bg:#0a0a0a #555555",
             "pad": "bg:#0a0a0a",
-            "accent": "#00FF66 bold",
+            "accent": "#00FF66 bold bg:#0a0a0a",
             "panel-bg": "bg:#1e1e1e",
+            "meta-mode": "#00FF66 bold bg:#1e1e1e",
+            "meta-dot": "#555555 bg:#1e1e1e",
+            "meta-model": "#eeeeee bold bg:#1e1e1e",
+            "meta-repo": "#808080 bg:#1e1e1e",
+            "sc-key": "bold #eeeeee",
+            "sc-desc": "#808080",
+            "footer": "#555555 bg:#0a0a0a",
             "prompt-name": "#00FF66 bold",
             "prompt-repo": "#94a3b8",
             "prompt-arrow": "#64748b bold",
@@ -541,6 +552,62 @@ def run_interactive(
             key_bindings=kb,
             complete_while_typing=True,
         )
+
+        is_first_turn = True
+
+        # Attach contiguous landing containers (metadata line + shortcuts) directly below prompt buffer
+        try:
+            c0 = session.app.layout.container.children[0].content
+
+            def get_landing_meta():
+                c_cols, c_rows = shutil.get_terminal_size(fallback=(95, 35))
+                c_panel_w = max(40, min(80, int(c_cols * 0.70)))
+                c_margin = max(0, (c_cols - c_panel_w) // 2)
+                c_pad = " " * c_margin
+
+                meta_visible = f"  agentic · {active_model}  {repo_dir.name}"
+                fill_len = max(0, c_panel_w - 1 - len(meta_visible))
+                return [
+                    ("class:pad", c_pad),
+                    ("class:accent", "▌"),
+                    ("class:panel-bg", "  "),
+                    ("class:meta-mode", "agentic"),
+                    ("class:meta-dot", " · "),
+                    ("class:meta-model", active_model),
+                    ("class:meta-repo", f"  {repo_dir.name}{' ' * fill_len}"),
+                ]
+
+            def get_landing_shortcuts():
+                c_cols, c_rows = shutil.get_terminal_size(fallback=(95, 35))
+                c_panel_w = max(40, min(80, int(c_cols * 0.70)))
+                c_margin = max(0, (c_cols - c_panel_w) // 2)
+                c_pad = " " * c_margin
+                return [
+                    ("class:pad", c_pad),
+                    ("class:sc-key", "tab"),
+                    ("class:sc-desc", " mode   "),
+                    ("class:sc-key", "ctrl+p"),
+                    ("class:sc-desc", " commands   "),
+                    ("class:sc-key", "/models"),
+                    ("class:sc-desc", " pick   "),
+                    ("class:sc-key", "@"),
+                    ("class:sc-desc", " file"),
+                ]
+
+            c0.children.append(ConditionalContainer(
+                Window(content=FormattedTextControl(get_landing_meta), height=1),
+                filter=Condition(lambda: is_first_turn)
+            ))
+            c0.children.append(ConditionalContainer(
+                Window(content=FormattedTextControl(lambda: [("", " ")]), height=1),
+                filter=Condition(lambda: is_first_turn)
+            ))
+            c0.children.append(ConditionalContainer(
+                Window(content=FormattedTextControl(get_landing_shortcuts), height=1),
+                filter=Condition(lambda: is_first_turn)
+            ))
+        except Exception:
+            pass
     except Exception:
         session = None
 
@@ -630,51 +697,14 @@ def run_interactive(
             pad = " " * margin
 
             if is_first_turn:
-                # OpenCode-inspired minimal landing screen input
-                def get_landing_toolbar():
+                # Clean 1-line footer pinned at the bottom of the window
+                def get_landing_footer():
+                    if not is_first_turn:
+                        return None
                     c_cols, c_rows = shutil.get_terminal_size(fallback=(95, 35))
-                    c_panel_w = max(40, min(80, int(c_cols * 0.70)))
-                    c_margin = max(0, (c_cols - c_panel_w) // 2)
-                    c_pad = " " * c_margin
-
-                    meta_visible = f"  agentic · {active_model}  {repo_name}"
-                    fill_len = max(0, c_panel_w - 1 - len(meta_visible))
-                    fill_space = " " * fill_len
-
-                    tb_lines = []
-                    # Row 1: Metadata row inside charcoal panel
-                    tb_lines.append(
-                        f'<style bg="#0a0a0a">{c_pad}</style>'
-                        f'<style color="#00FF66" bold="true">▌</style>'
-                        f'<style bg="#1e1e1e">  </style>'
-                        f'<style color="#00FF66" bold="true" bg="#1e1e1e">agentic</style>'
-                        f'<style color="#555555" bg="#1e1e1e"> · </style>'
-                        f'<style color="#eeeeee" bold="true" bg="#1e1e1e">{active_model}</style>'
-                        f'<style color="#808080" bg="#1e1e1e">  {repo_name}{fill_space}</style>'
-                    )
-                    # Row 2: Gap
-                    tb_lines.append(f'<style bg="#0a0a0a"> </style>')
-                    # Row 3: Shortcuts line aligned with left edge of input panel
-                    tb_lines.append(
-                        f'<style bg="#0a0a0a">{c_pad}</style>'
-                        f'<style color="#eeeeee" bold="true">tab</style><style color="#808080"> mode   </style>'
-                        f'<style color="#eeeeee" bold="true">ctrl+p</style><style color="#808080"> commands   </style>'
-                        f'<style color="#eeeeee" bold="true">/models</style><style color="#808080"> pick   </style>'
-                        f'<style color="#eeeeee" bold="true">@</style><style color="#808080"> file</style>'
-                    )
-                    # Gap down to bottom
-                    c_top_pad = max(1, int(c_rows * 0.36) - 4)
-                    used_lines = c_top_pad + 3 + 2 + 1 + 3
-                    bottom_gap = max(0, c_rows - used_lines - 2)
-                    for _ in range(bottom_gap):
-                        tb_lines.append(f'<style bg="#0a0a0a"> </style>')
-
-                    # Bottom footer line: ~ at left, version at right
                     v_str = f"v{CLI_VERSION}"
                     foot_space = " " * max(2, c_cols - 1 - len("~") - len(v_str))
-                    tb_lines.append(f'<style color="#555555" bg="#0a0a0a">~{foot_space}{v_str}</style>')
-
-                    return HTML("\n".join(tb_lines))
+                    return [("class:footer", f"~{foot_space}{v_str}")]
 
                 prompt_parts = [
                     ("class:pad", pad),
@@ -686,7 +716,7 @@ def run_interactive(
                     prompt = session.prompt(
                         prompt_parts,
                         placeholder='Tanya BrainFrog… "Jelaskan arsitektur proyek ini"',
-                        bottom_toolbar=get_landing_toolbar,
+                        bottom_toolbar=get_landing_footer,
                     ).strip()
                 else:
                     console.print(f"{pad}[bold #00FF66]▌[/bold #00FF66] [dim #808080]Tanya BrainFrog… \"Jelaskan arsitektur proyek ini\"[/dim #808080]")
