@@ -56,7 +56,9 @@ class System2Client:
     def plan_task(self, task: str, repo_tree: str) -> List[PlanStep]:
         system = (
             "You are a senior software engineer planning a small, safe change. "
-            "Break the task into 1-4 concrete steps. Respond with ONLY JSON: "
+            "Break the task into 1-4 concrete code modification steps. Each step must touch or create specific files. "
+            "Do NOT include manual testing, browser verification, or review steps. "
+            "Respond with ONLY JSON: "
             '{"steps": [{"id": "1", "description": "...", "files": ["path/a.py"]}]}. '
             "Keep steps small and independently testable. No prose outside the JSON."
         )
@@ -82,7 +84,7 @@ class System2Client:
             f"Current step:\n{step.description}\n\n"
             f"Current file contents:\n{json.dumps(file_contents, indent=2)}"
         )
-        raw = self._call(system, user, max_tokens=6000)
+        raw = self._call(system, user, max_tokens=8192)
         data = _extract_json(raw)
         return data["files"]
 

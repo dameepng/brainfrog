@@ -155,7 +155,7 @@ def execute_task(
         console.print(f"[bold red]System 2 (Claude) Error:[/bold red] {e}")
         return 1
 
-    domains = load_module_map(repo_dir, Path(module_map) if module_map else None)
+    domains = load_module_map(repo_dir, Path(module_map) if module_map else None, task=task)
 
     cfg = RunConfig(
         repo_dir=repo_dir,
@@ -235,6 +235,7 @@ def run_interactive(
         table.add_row("/backend <mock|typesafe|auto>", "Switch System 1 backend")
         table.add_row("/model <name>", "Switch Claude model (e.g. claude-sonnet-5)")
         table.add_row("/domains", "List detected domain modules and paths")
+        table.add_row("/init [stack]", "Auto-generate modules.json (web|android|node|python)")
         table.add_row("/clear", "Clear terminal screen")
         table.add_row("/exit, /quit", "Exit BrainFrog session")
         console.print(table)
@@ -315,6 +316,16 @@ def run_interactive(
             for k, d in domains.items():
                 table.add_row(k, d.description, ", ".join(d.paths) or "(all)", "YES" if d.sensitive else "no")
             console.print(table)
+            continue
+        elif lower.startswith("/init"):
+            from modules import auto_generate_modules_json
+            parts = prompt.split(maxsplit=1)
+            stack_arg = parts[1].strip().lower() if len(parts) > 1 else None
+            stack_map = {"web": "vanilla_web", "vanilla": "vanilla_web", "js": "vanilla_web", "node": "node_web", "react": "node_web"}
+            chosen_stack = stack_map.get(stack_arg, stack_arg)
+            new_domains = auto_generate_modules_json(repo_dir, stack=chosen_stack)
+            console.print(f"[green]Initialized modules.json for {repo_dir.name} with {len(new_domains)} domain(s)![/green]")
+            print_banner()
             continue
 
         # Execute task
