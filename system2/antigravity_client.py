@@ -1,121 +1,64 @@
-"""System2Client — the deliberate, generative layer, backed by Claude.
+"""Antigravity System 2 Client — executes System 2 via Google Antigravity (agy CLI).
 
-Features:
-- Full planning, code generation, review/debugging, diagnosis, and PR drafting
-- Integration with BRAINFROG.md project memory/guidelines
-- Token usage and cost tracking (Anthropic API metrics)
-- Support for @file context pinning
+Uses the user's active Google Account login session in Antigravity (no API key required).
+Supports Gemini models (gemini-3.8-flash-high, gemini-3.7-flash-high, gemini-3.1-pro-high, etc.)
+as well as other models available via your Google Antigravity account.
 """
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import anthropic
+from system2.claude_client import PlanStep, _extract_json, usage_tracker
 
-DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
-
-# Maximum output tokens for code-generation calls (write_code, review_and_fix).
-# Set BRAINFROG_MAX_OUTPUT_TOKENS in .env to override.
-# Default: 64000 (current Anthropic model ceiling) — effectively no artificial cap.
-MAX_OUTPUT_TOKENS = int(os.environ.get("BRAINFROG_MAX_OUTPUT_TOKENS", "64000"))
+DEFAULT_ANTIGRAVITY_MODEL = os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
 
 
-@dataclass
-class UsageStats:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    requests_count: int = 0
+def find_antigravity_bin() -> Optional[str]:
+    """Locate the agy CLI binary on the user's system."""
+    # 1. Environment variable override
+    env_bin = os.environ.get("ANTIGRAVITY_BIN")
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
 
-    @property
-    def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
+    # 2. Check PATH
+    which_bin = shutil.which("agy") or shutil.which("agy.exe")
+    if which_bin:
+        return which_bin
 
-    @property
-    def cost_usd(self) -> float:
-        # Anthropic Claude 3.5/Sonnet 5 pricing: $3.00/M in, $15.00/M out
-        return (self.input_tokens * 3.0 / 1_000_000) + (self.output_tokens * 15.0 / 1_000_000)
+    # 3. Standard Gemini Antigravity paths (~/.gemini/bin/agy.exe or %USERPROFILE%\.gemini\bin\agy.exe)
+    for base in [os.path.expanduser("~"), os.environ.get("USERPROFILE", "")]:
+        if base:
+            candidate = os.path.join(base, ".gemini", "bin", "agy.exe")
+            if os.path.exists(candidate):
+                return candidate
 
-
-class UsageTracker:
-    def __init__(self) -> None:
-        self.session = UsageStats()
-        self.last_task = UsageStats()
-
-    def record(self, inp: int, out: int) -> None:
-        self.session.input_tokens += inp
-        self.session.output_tokens += out
-        self.session.requests_count += 1
-        self.last_task.input_tokens += inp
-        self.last_task.output_tokens += out
-        self.last_task.requests_count += 1
-
-    def reset_task(self) -> UsageStats:
-        prev = self.last_task
-        self.last_task = UsageStats()
-        return prev
+    return None
 
 
-# Global usage tracking singleton
-usage_tracker = UsageTracker()
+class AntigravitySystem2Client:
+    """System 2 client powered by Google Antigravity (Google Auth login session)."""
 
-
-def _extract_json(text: str) -> Dict[str, Any]:
-    """Pull the first valid {...} JSON object out of a model response.
-
-    Uses json.JSONDecoder.raw_decode so it correctly handles nested braces
-    inside string values (e.g. CSS rules, JS objects inside HTML content).
-    Falls back to stripping markdown fences first if the response is wrapped.
-    """
-    text = text.strip()
-
-    # Strip markdown code fences (```json ... ``` or ``` ... ```)
-    if text.startswith("```"):
-        lines = text.splitlines()
-        # Drop first line (```json or ```) and last line (```)
-        inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
-        if inner and inner[-1].strip() == "```":
-            inner = inner[:-1]
-        text = "\n".join(inner).strip()
-
-    start = text.find("{")
-    if start == -1:
-        raise ValueError(f"No JSON object found in model output:\n{text[:500]}")
-
-    decoder = json.JSONDecoder()
-    try:
-        obj, _ = decoder.raw_decode(text, start)
-        return obj
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"JSON parse error at position {exc.pos} in model output.\n"
-            f"Context: ...{text[max(0, exc.pos-80):exc.pos+80]}...\n"
-            f"Full output (first 800 chars):\n{text[:800]}"
-        ) from exc
-
-
-
-@dataclass
-class PlanStep:
-    id: str
-    description: str
-    files: List[str]
-
-
-class System2Client:
-    provider_name: str = "claude"
+    provider_name: str = "antigravity"
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
-        api_key: Optional[str] = None,
+        model: str = DEFAULT_ANTIGRAVITY_MODEL,
         guidelines: str = "",
+        bin_path: Optional[str] = None,
     ) -> None:
-        self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
         self.guidelines = guidelines
+        self.bin_path = bin_path or find_antigravity_bin()
+        if not self.bin_path or not os.path.exists(self.bin_path):
+            raise FileNotFoundError(
+                "Google Antigravity CLI binary ('agy.exe') not found. "
+                "Ensure Antigravity is installed in ~/.gemini/bin or set ANTIGRAVITY_BIN."
+            )
 
     def _apply_guidelines(self, system: str) -> str:
         if self.guidelines.strip():
@@ -124,21 +67,41 @@ class System2Client:
 
     def _call(self, system: str, user: str, max_tokens: int = 4000) -> str:
         full_system = self._apply_guidelines(system)
-        with self.client.messages.stream(
-            model=self.model,
-            max_tokens=max_tokens,
-            system=full_system,
-            messages=[{"role": "user", "content": user}],
-        ) as stream:
-            text = stream.get_final_text()
-            final_msg = stream.get_final_message()
-            if hasattr(final_msg, "usage") and final_msg.usage:
-                usage_tracker.record(
-                    getattr(final_msg.usage, "input_tokens", 0),
-                    getattr(final_msg.usage, "output_tokens", 0),
-                )
-        return text
+        prompt = (
+            f"[SYSTEM INSTRUCTIONS]\n{full_system}\n\n"
+            f"[TASK]\n{user}"
+        )
 
+        cmd = [
+            self.bin_path,
+            "--model", self.model,
+            "--output-format", "json",
+        ]
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        stdout, stderr = proc.communicate(input=prompt)
+
+        if proc.returncode != 0:
+            err_msg = stderr.strip() or stdout.strip() or f"Process exited with code {proc.returncode}"
+            raise RuntimeError(f"Antigravity (Google Auth) error: {err_msg}")
+
+        try:
+            data = json.loads(stdout)
+            usage = data.get("usage") or {}
+            usage_tracker.record(
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+            )
+            return data.get("response", "")
+        except json.JSONDecodeError:
+            return stdout.strip()
 
     # -- 1. planning --------------------------------------------------
     def plan_task(
@@ -148,6 +111,7 @@ class System2Client:
             "You are a senior software engineer planning a small, safe change. "
             "Break the task into 1-4 concrete code modification steps. Each step must touch or create specific files. "
             "Do NOT include manual testing, browser verification, or review steps. "
+            "Paths must be relative to workspace root (do not prefix with workspace folder name). "
             "Respond with ONLY JSON: "
             '{"steps": [{"id": "1", "description": "...", "files": ["path/a.py"]}]}. '
             "Keep steps small and independently testable. No prose outside the JSON."
@@ -174,6 +138,7 @@ class System2Client:
             "You are a senior software engineer implementing one planned step. "
             "You will be given the current content of relevant files (empty string "
             "means the file does not exist yet and should be created). "
+            "Paths must be relative to workspace root. "
             "Respond with ONLY JSON: "
             '{"files": {"path/to/file.py": "<full new file content>"}, "summary": "one line"}. '
             "Return the COMPLETE new content for each file you change, not a diff. "
@@ -188,7 +153,7 @@ class System2Client:
             f"Current step:\n{step.description}\n\n"
             f"Current file contents:\n{json.dumps(all_context, indent=2)}"
         )
-        raw = self._call(system, user, max_tokens=MAX_OUTPUT_TOKENS)
+        raw = self._call(system, user, max_tokens=64000)
         data = _extract_json(raw)
         return data["files"]
 
@@ -208,7 +173,7 @@ class System2Client:
             f"Current file contents:\n{json.dumps(file_contents, indent=2)}\n\n"
             f"Test output (most recent run):\n{test_output[-4000:]}"
         )
-        raw = self._call(system, user, max_tokens=MAX_OUTPUT_TOKENS)
+        raw = self._call(system, user, max_tokens=64000)
         data = _extract_json(raw)
         return data["files"]
 

@@ -188,6 +188,7 @@ class Orchestrator:
     def __init__(self, system1: SystemOneClient, system2: System2Client, config: RunConfig):
         self.s1 = system1
         self.s2 = system2
+        self.s2_tag = getattr(self.s2, "provider_name", "claude")
         self.cfg = config
         self.guidelines = load_project_guidelines(self.cfg.repo_dir)
 
@@ -232,16 +233,16 @@ class Orchestrator:
             focus_files = _read_files_from_tree(self.cfg.repo_dir, scope.focus_tree)
             if self.pinned_files:
                 focus_files.update(self.pinned_files)
-            print(f"[system2/claude] this reads as a question, not a change — diagnosing only ...")
+            print(f"[system2/{self.s2_tag}] this reads as a question, not a change — diagnosing only ...")
             answer = self.s2.diagnose(self.cfg.task, focus_files, domain_label)
             print(f"\n{answer}\n")
             return [StepResult(PlanStep("0", "diagnosis", []), "diagnosed", 0, answer)]
 
-        print(f"[system2/claude] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
+        print(f"[system2/{self.s2_tag}] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
         steps = self.s2.plan_task(self.cfg.task, scope.focus_tree, pinned_files=self.pinned_files)
         for s in steps:
             s.files = [_normalize_rel_path(self.cfg.repo_dir, f) for f in s.files]
-        print(f"[system2/claude] plan has {len(steps)} step(s)")
+        print(f"[system2/{self.s2_tag}] plan has {len(steps)} step(s)")
 
         results: List[StepResult] = []
         for step in steps:
@@ -295,7 +296,7 @@ class Orchestrator:
         print(f"\n=== Step {step.id}: {step.description} ===")
         file_contents = _read_files(self.cfg.repo_dir, step.files)
 
-        print("[system2/claude] writing code ...")
+        print(f"[system2/{self.s2_tag}] writing code ...")
         new_files = self.s2.write_code(step, self.cfg.task, file_contents, pinned_files=self.pinned_files)
         _write_files(self.cfg.repo_dir, new_files)
 
@@ -324,7 +325,7 @@ class Orchestrator:
 
             if decision.choice == "retry_fix" and retries < self.cfg.max_retries:
                 retries += 1
-                print(f"[system2/claude] reviewing failure, attempt {retries}/{self.cfg.max_retries} ...")
+                print(f"[system2/{self.s2_tag}] reviewing failure, attempt {retries}/{self.cfg.max_retries} ...")
                 current = _read_files(self.cfg.repo_dir, list(new_files.keys()) or step.files)
                 fixed = self.s2.review_and_fix(self.cfg.task, step, current, output)
                 _write_files(self.cfg.repo_dir, fixed)

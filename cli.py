@@ -150,7 +150,9 @@ def execute_task(
     task: str,
     repo_dir: Path,
     backend: str = "auto",
+    model: Optional[str] = None,
     claude_model: Optional[str] = None,
+    provider: Optional[str] = None,
     test_cmd: Optional[str] = None,
     module_map: Optional[str] = None,
     min_domain_confidence: float = 0.45,
@@ -163,7 +165,7 @@ def execute_task(
     from config import get_system1
     from modules import load_module_map
     from orchestrator import Orchestrator, RunConfig
-    from system2.claude_client import System2Client, usage_tracker
+    from system2 import System2Client, usage_tracker
 
     if not (repo_dir / ".git").exists():
         console.print(f"[bold red]Error:[/bold red] {repo_dir} is not a git repository.", style="red")
@@ -177,10 +179,11 @@ def execute_task(
         console.print(f"[bold red]System 1 Error:[/bold red] {e}")
         return 1
 
+    chosen_model = model or claude_model
     try:
-        system2 = System2Client(model=claude_model) if claude_model else System2Client()
+        system2 = System2Client(model=chosen_model, provider=provider)
     except Exception as e:
-        console.print(f"[bold red]System 2 (Claude) Error:[/bold red] {e}")
+        console.print(f"[bold red]System 2 Error:[/bold red] {e}")
         return 1
 
     domains = load_module_map(repo_dir, Path(module_map) if module_map else None, task=task)
@@ -214,10 +217,12 @@ def execute_task(
 
     # Turn token & cost footer
     task_usage = usage_tracker.reset_task()
+    provider_tag = getattr(system2, "provider_name", "claude")
+    cost_str = "Google Auth (Active Session)" if provider_tag == "antigravity" else f"Est. Cost: ${task_usage.cost_usd:.4f}"
     if task_usage.total_tokens > 0:
         console.print(
             f"[dim]⚡ Turn tokens: {task_usage.input_tokens:,} in / {task_usage.output_tokens:,} out "
-            f"({task_usage.total_tokens:,} total) | Est. Cost: ${task_usage.cost_usd:.4f}[/dim]\n"
+            f"({task_usage.total_tokens:,} total) | {cost_str}[/dim]\n"
         )
     else:
         console.print()
@@ -239,14 +244,16 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/help", "Show help and command list"),
     ("/undo", "Revert last change cleanly via Git"),
     ("/diff", "View colored git diff of recent changes"),
-    ("/cost", "View session token usage & API cost"),
+    ("/cost", "View session token usage & metrics"),
     ("/rules", "View or create BRAINFROG.md guidelines"),
     ("/init", "Auto-generate modules.json for stack"),
     ("/status", "Show current workspace & agent status"),
+    ("/provider", "Switch AI provider (antigravity: Google Login, claude: Anthropic API)"),
+    ("/models", "List available models for active provider"),
+    ("/model", "Switch model (e.g. gemini-3.8-flash-high, claude-sonnet-5)"),
     ("/repo", "Switch target workspace repository"),
     ("/test-cmd", "Change test command"),
     ("/backend", "Switch System 1 backend (mock|typesafe|auto)"),
-    ("/model", "Switch Claude model"),
     ("/skills", "List all available modular skills"),
     ("/skill", "Activate modular skill (e.g. /skill audit-anti-slop)"),
     ("/domains", "List detected domain modules and paths"),
@@ -337,7 +344,9 @@ class BrainFrogCompleter(BaseCompleter):
 def run_interactive(
     initial_repo: Path,
     backend: str = "auto",
+    model: Optional[str] = None,
     claude_model: Optional[str] = None,
+    provider: Optional[str] = None,
     test_cmd: Optional[str] = None,
     module_map: Optional[str] = None,
     min_domain_confidence: float = 0.45,
@@ -349,12 +358,17 @@ def run_interactive(
     """Full-featured interactive TUI session."""
     from modules import load_module_map
     from orchestrator import load_project_guidelines
-    from system2.claude_client import usage_tracker
+    from system2 import usage_tracker, get_system2_provider
 
     repo_dir = find_git_root(initial_repo)
     active_test_cmd = test_cmd or detect_default_test_cmd(repo_dir)
     active_backend = backend
-    active_model = claude_model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+    active_provider = get_system2_provider(provider)
+    if active_provider == "antigravity":
+        default_model = os.environ.get("ANTIGRAVITY_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash-high"
+    else:
+        default_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+    active_model = model or claude_model or default_model
     active_skill: Optional[str] = initial_skill
 
     app_state = {"status": "Ready", "icon": "●"}
@@ -430,21 +444,23 @@ def run_interactive(
 
         console.print()
 
-        # Compact summary line: mode, memory, skill, test command
+        # Compact summary line: mode, provider/model, memory, skill, test command
+        prov_disp = "antigravity (Google Auth)" if active_provider == "antigravity" else "claude"
         if cols >= 80:
             console.print(
                 f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  "
-                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]memory:[/dim #718096] [{mem_style}]{memory_text}[/{mem_style}]  "
-                f"[dim #4a5568]·[/dim #4a5568]  [{skill_style}]{skill_text}[/{skill_style}]  "
-                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]test:[/dim #718096] [#cbd5e0]{active_test_cmd}[/#cbd5e0]"
-            )
-        else:
-            console.print(
-                f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  "
+                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]provider:[/dim #718096] [bold #00FF66]{prov_disp}[/bold #00FF66] ([dim]{active_model}[/dim])  "
                 f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]memory:[/dim #718096] [{mem_style}]{memory_text}[/{mem_style}]  "
                 f"[dim #4a5568]·[/dim #4a5568]  [{skill_style}]{skill_text}[/{skill_style}]"
             )
             console.print(f"  [dim #718096]test:[/dim #718096] [#cbd5e0]{active_test_cmd}[/#cbd5e0]")
+        else:
+            console.print(
+                f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  "
+                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]provider:[/dim #718096] [bold #00FF66]{active_provider}[/bold #00FF66]  "
+                f"[dim #4a5568]·[/dim #4a5568]  [{skill_style}]{skill_text}[/{skill_style}]"
+            )
+            console.print(f"  [dim #718096]model:[/dim #718096] [dim]{active_model}[/dim]  ·  [dim #718096]test:[/dim #718096] [#cbd5e0]{active_test_cmd}[/#cbd5e0]")
 
         console.print()
         console.print("  [dim #718096]@ file · / perintah · ! shell[/dim #718096]")
@@ -553,14 +569,19 @@ def run_interactive(
             continue
         elif lower in ("/cost", "/stats", "/tokens"):
             s = usage_tracker.session
-            table = Table(title="BrainFrog Session Metrics & API Cost", box=box.ROUNDED)
+            table = Table(title="BrainFrog Session Metrics", box=box.ROUNDED)
             table.add_column("Metric", style="cyan")
             table.add_column("Value", style="green", justify="right")
+            table.add_row("Provider", f"{active_provider}")
+            table.add_row("Model", f"{active_model}")
             table.add_row("Input Tokens", f"{s.input_tokens:,}")
             table.add_row("Output Tokens", f"{s.output_tokens:,}")
             table.add_row("Total Tokens", f"{s.total_tokens:,}")
             table.add_row("API Requests", f"{s.requests_count:,}")
-            table.add_row("Est. Cost (USD)", f"${s.cost_usd:.4f}")
+            if active_provider == "antigravity":
+                table.add_row("Billing", "Covered by Google Antigravity Login")
+            else:
+                table.add_row("Est. Cost (USD)", f"${s.cost_usd:.4f}")
             console.print(table)
             continue
         elif lower in ("/rules", "/memory"):
@@ -652,13 +673,58 @@ def run_interactive(
             else:
                 console.print("Usage: /backend <mock | typesafe | auto>")
             continue
+        elif lower.startswith("/provider"):
+            parts = prompt.split(maxsplit=1)
+            if len(parts) > 1:
+                target_prov = parts[1].strip().lower()
+                if target_prov in ("gemini", "antigravity", "google"):
+                    active_provider = "antigravity"
+                    if not active_model or "claude" in active_model:
+                        active_model = "gemini-3.8-flash-high"
+                    console.print("[bold green]✓ Switched provider to Google Antigravity (Google Auth Login)![/bold green]")
+                    print_banner()
+                elif target_prov in ("claude", "anthropic"):
+                    active_provider = "claude"
+                    if not active_model or "gemini" in active_model:
+                        active_model = "claude-sonnet-5"
+                    console.print("[bold green]✓ Switched provider to Claude (Anthropic API)![/bold green]")
+                    print_banner()
+                else:
+                    console.print(f"[red]Unknown provider: {parts[1]}. Options: antigravity (Google Auth), claude[/red]")
+            else:
+                console.print(f"Current provider: [bold #00FF66]{active_provider}[/bold #00FF66] (model: {active_model})")
+                console.print("Switch with: `/provider antigravity` or `/provider claude`")
+            continue
+        elif lower == "/models":
+            if active_provider == "antigravity":
+                console.print(Panel(
+                    "• [bold #00FF66]gemini-3.8-flash-high[/bold #00FF66] (Ultra fast, high reasoning - default)\n"
+                    "• [bold]gemini-3.8-flash-medium[/bold]\n"
+                    "• [bold]gemini-3.7-flash-high[/bold]\n"
+                    "• [bold]gemini-3.1-pro-high[/bold] (Complex architecture reasoning)\n"
+                    "• [bold]claude-sonnet-4-6[/bold] (Anthropic via Google Auth)\n"
+                    "• [bold]claude-opus-4-6-thinking[/bold]",
+                    title="Available Models in Antigravity (Google Auth)",
+                    box=box.ROUNDED,
+                ))
+            else:
+                console.print(Panel(
+                    "• [bold #00FF66]claude-sonnet-5[/bold #00FF66] (Default)\n"
+                    "• [bold]claude-3-5-sonnet-20241022[/bold]\n"
+                    "• [bold]claude-3-5-haiku-20241022[/bold]",
+                    title="Available Models in Claude (Anthropic API)",
+                    box=box.ROUNDED,
+                ))
+            continue
         elif lower.startswith("/model"):
             parts = prompt.split(maxsplit=1)
             if len(parts) > 1:
                 active_model = parts[1].strip()
-                console.print(f"[green]Switched Claude model to:[/green] {active_model}")
+                console.print(f"[green]Switched model to:[/green] {active_model}")
+                print_banner()
             else:
-                console.print(f"Current model: {active_model}")
+                console.print(f"Current model: [bold #00FF66]{active_model}[/bold #00FF66] (provider: {active_provider})")
+                console.print("Use `/models` to view available options or `/model <name>` to change.")
             continue
         elif lower == "/domains":
             domains = load_module_map(repo_dir, Path(module_map) if module_map else None, auto_create=False)
@@ -690,7 +756,8 @@ def run_interactive(
             task=prompt,
             repo_dir=repo_dir,
             backend=active_backend,
-            claude_model=active_model,
+            model=active_model,
+            provider=active_provider,
             test_cmd=active_test_cmd,
             module_map=module_map,
             min_domain_confidence=min_domain_confidence,
@@ -713,14 +780,15 @@ def run_interactive(
 def main() -> int:
     p = argparse.ArgumentParser(
         prog="brainfrog",
-        description="🐸 BrainFrog: Dual-System Coding Agent (Jev System 1 + Claude System 2)",
+        description="🐸 BrainFrog: Dual-System Coding Agent (Jev System 1 + Claude/Gemini System 2)",
     )
     p.add_argument("task", nargs="?", default=None, help="Task to execute (leave empty for interactive REPL)")
     p.add_argument("--task", dest="flag_task", default=None, help="Alternative flag for task description")
     p.add_argument("-r", "--repo", default=".", help="Path to target git repository (default: current directory)")
     p.add_argument("-t", "--test-cmd", default=None, help="Shell command for running test suite")
     p.add_argument("-b", "--backend", choices=["mock", "typesafe", "auto"], default="auto")
-    p.add_argument("-m", "--claude-model", default=None, help="Override ANTHROPIC_MODEL env var")
+    p.add_argument("-m", "--model", "--claude-model", dest="model", default=None, help="Model name (e.g. gemini-3.8-flash-high, claude-sonnet-5)")
+    p.add_argument("--provider", choices=["claude", "antigravity", "gemini", "auto"], default=None, help="System 2 AI provider (antigravity: Google Login, claude: Anthropic API)")
     p.add_argument("--skill", default=None, help="Explicitly activate a modular skill (e.g. --skill audit-anti-slop)")
     p.add_argument("--auto-pr", action="store_true", help="Push branch and open GitHub PR when approved")
     p.add_argument("--pr-risk-ceiling", choices=["low", "medium", "high"], default="medium")
@@ -733,7 +801,17 @@ def main() -> int:
 
     repo_dir = find_git_root(Path(args.repo))
     load_all_envs(repo_dir)
-    ensure_anthropic_key()
+
+    from system2 import get_system2_provider, find_antigravity_bin
+
+    active_provider = get_system2_provider(args.provider)
+    if active_provider == "claude":
+        ensure_anthropic_key()
+    elif active_provider == "antigravity":
+        if not find_antigravity_bin():
+            console.print("[bold red]Error:[/bold red] Google Antigravity CLI ('agy.exe') not found.")
+            console.print("[dim]Ensure Antigravity is installed in ~/.gemini/bin or set ANTIGRAVITY_BIN.[/dim]")
+            return 1
 
     chosen_task = args.task or args.flag_task
 
@@ -743,7 +821,8 @@ def main() -> int:
             task=chosen_task,
             repo_dir=repo_dir,
             backend=args.backend,
-            claude_model=args.claude_model,
+            model=args.model,
+            provider=active_provider,
             test_cmd=active_test_cmd,
             module_map=args.module_map,
             min_domain_confidence=args.min_domain_confidence,
@@ -756,7 +835,8 @@ def main() -> int:
         run_interactive(
             initial_repo=repo_dir,
             backend=args.backend,
-            claude_model=args.claude_model,
+            model=args.model,
+            provider=active_provider,
             test_cmd=args.test_cmd,
             module_map=args.module_map,
             min_domain_confidence=args.min_domain_confidence,
