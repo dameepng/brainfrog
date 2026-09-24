@@ -84,7 +84,7 @@ def print_banner_box(
     box_title = f"{cfg['sym']} {title or cfg['default_title']}"
 
     cols = shutil.get_terminal_size(fallback=(95, 35)).columns
-    box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
+    box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
 
     panel = Panel(
         Text.from_markup(f"[{COLOR_FG_PRIMARY}]{message}[/{COLOR_FG_PRIMARY}]"),
@@ -271,7 +271,7 @@ def execute_task(
 
     # Render Task Summary Table
     cols = shutil.get_terminal_size(fallback=(95, 35)).columns
-    box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
+    box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
     summary_table = Table(
         title=" Task Summary ",
         box=box.ROUNDED,
@@ -445,7 +445,7 @@ def _picker(title: str, items: List[tuple], current_id: str, id_col: str = "ID")
     clears the picker block from the terminal so it doesn't clutter chat history.
     """
     cols = shutil.get_terminal_size(fallback=(95, 35)).columns
-    box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
+    box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
 
     table = Table(
         title=f" {title} ",
@@ -641,16 +641,30 @@ def run_interactive(
             complete_while_typing=True,
         )
 
+        # Attach contiguous bottom border directly under the prompt input buffer
+        try:
+            from prompt_toolkit.layout.containers import Window
+            from prompt_toolkit.layout.controls import FormattedTextControl
+
+            float_cont = session.app.layout.container.children[0].alternative_content
+            hsplit = float_cont.content
+            hsplit.children.append(
+                Window(FormattedTextControl(get_prompt_bottom_border), height=1, dont_extend_height=True)
+            )
+        except Exception:
+            pass
+
     except Exception:
         session = None
 
     def get_prompt_tokens():
         """Top border and input prefix for composer box (Section 5.2)."""
         cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-        box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
-        pad = "  " if cols >= 60 else " "
+        box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+        pad = " " * ((cols - box_w) // 2) if cols > 100 else ("  " if cols >= 60 else " ")
+        bar = "─" * (box_w - 2)
 
-        top_border = f"{pad}╭{'─' * (box_w - 2)}╮\n"
+        top_border = f"{pad}╭{bar}╮\n"
         prefix = f"{pad}│  "
         return [
             ("class:input-border", top_border),
@@ -658,15 +672,17 @@ def run_interactive(
             ("class:accent", f"{SYM_PROMPT} "),
         ]
 
-    def get_chat_toolbar():
-        """Bottom border + full-width divider + 2-line status bar (Section 4 & 5.4)."""
+    def get_prompt_bottom_border():
+        """Bottom border attached directly under input buffer for a contiguous composer box."""
         cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-        box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
-        pad = "  " if cols >= 60 else " "
+        box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
+        pad = " " * ((cols - box_w) // 2) if cols > 100 else ("  " if cols >= 60 else " ")
+        bar = "─" * (box_w - 2)
+        return [("class:input-border", f"{pad}╰{bar}╯")]
 
-        # Bottom border of input box
-        bot_border = f"{pad}╰{'─' * (box_w - 2)}╯\n"
-        # Full-width divider
+    def get_chat_toolbar():
+        """Full-width divider + 2-line status bar at bottom of the terminal window (Section 4 & 5.4)."""
+        cols, rows = shutil.get_terminal_size(fallback=(95, 35))
         divider = f"{'─' * cols}\n"
 
         # Model display name
@@ -687,7 +703,6 @@ def run_interactive(
             right = f"v{CLI_VERSION} "
             gap = max(1, cols - len(left) - len(right))
             return [
-                ("class:input-border", bot_border),
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
                 ("class:toolbar-id", f"{model_disp} · {repo_disp}"),
@@ -704,7 +719,6 @@ def run_interactive(
             line2 = f"{left_hints}{' ' * gap}{right_v}"
 
             return [
-                ("class:input-border", bot_border),
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
                 ("class:toolbar-id", f"{model_disp}  ·  {repo_disp}\n"),
@@ -714,29 +728,36 @@ def run_interactive(
     def print_splash(cols: int, rows: int) -> None:
         """Render splash/welcome screen for empty state (Section 4 & 5.1)."""
         console.clear()
-        # Margin atas: 1 baris konsisten (Section 4)
-        console.print()
+
+        # Responsive margins: centered when > 100 cols, standard pad when <= 100 cols
+        logo_w = 47
+        logo_pad = " " * max(0, (cols - logo_w) // 2) if cols > 100 else ("  " if cols >= 60 else " ")
+        tagline = "Tanya BrainFrog apapun soal project ini."
+        tagline_pad = " " * max(0, (cols - len(tagline)) // 2) if cols > 100 else ("  " if cols >= 60 else " ")
+
+        # Vertical breathing room: ~1/3 of remaining height so hero sits comfortably in upper-middle
+        top_pad = max(1, (rows - 14) // 3) if rows >= 20 else 1
+        for _ in range(top_pad):
+            console.print()
 
         if cols < 60:
             # Narrow: skip large logo, show compact header directly
             console.print(f"  [{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{active_model}[/{COLOR_FG_SECONDARY}]")
-            console.print(f"  [{COLOR_FG_MUTED}]Tanya BrainFrog apapun soal project ini.[/{COLOR_FG_MUTED}]")
+            console.print(f"  [{COLOR_FG_MUTED}]{tagline}[/{COLOR_FG_MUTED}]")
             console.print()
             return
 
-        # Wordmark with frog eye green accents (#33D17A) - margin 2 kolom (Section 4)
-        pad = "  "
+        # Wordmark with clear O and frog touch (2-tone: gray BRAIN, white FROG, green accent)
         logo_lines = [
-            f"{pad}[{COLOR_FG_PRIMARY}]█▀▀▄ █▀▀▄ ▄▀▀▄ ▀█▀ █▄  █   █▀▀ █▀▀▄ [/{COLOR_FG_PRIMARY}][{COLOR_ACCENT}]▄▀ ▀▄[/{COLOR_ACCENT}][{COLOR_FG_PRIMARY}] █▀▀▀[/{COLOR_FG_PRIMARY}]",
-            f"{pad}[{COLOR_FG_PRIMARY}]█▀▀▄ █▀▀▄ █▀▀█  █  █ ▀▄█   █▀  █▀▀▄ [/{COLOR_FG_PRIMARY}][{COLOR_ACCENT}]█● █●[/{COLOR_ACCENT}][{COLOR_FG_PRIMARY}] █ ▀█[/{COLOR_FG_PRIMARY}]",
-            f"{pad}[{COLOR_FG_PRIMARY}]▀▀▀  ▀  ▀ ▀  ▀ ▀▀▀ ▀   ▀   ▀   ▀  ▀ [/{COLOR_FG_PRIMARY}][{COLOR_ACCENT}]▀   ▀[/{COLOR_ACCENT}][{COLOR_FG_PRIMARY}] ▀▀▀▀[/{COLOR_FG_PRIMARY}]",
+            f"{logo_pad}[#888888]█▀▀▄ █▀▀▄ ▄▀▀▄ ▀█▀ █▄  █[/#888888]   [#E8E8E8]█▀▀ █▀▀▄ [/#E8E8E8][{COLOR_ACCENT}]▄▀ ▀▄[/{COLOR_ACCENT}][#E8E8E8] █▀▀▀[/#E8E8E8]",
+            f"{logo_pad}[#888888]█▀▀▄ █▀▀▄ █▀▀█  █  █ ▀▄█[/#888888]   [#E8E8E8]█▀  █▀▀▄ [/#E8E8E8][{COLOR_ACCENT}]█   █[/{COLOR_ACCENT}][#E8E8E8] █ ▀█[/#E8E8E8]",
+            f"{logo_pad}[#888888]▀▀▀  ▀  ▀ ▀  ▀ ▀▀▀ ▀   ▀[/#888888]   [#E8E8E8]▀   ▀  ▀ [/#E8E8E8][{COLOR_ACCENT}]▀▄▄▄▀[/{COLOR_ACCENT}][#E8E8E8] ▀▀▀▀[/#E8E8E8]",
         ]
         for line in logo_lines:
             console.print(line)
 
         console.print()
-        tagline = "Tanya BrainFrog apapun soal project ini."
-        console.print(f"{pad}[{COLOR_FG_MUTED}]{tagline}[/{COLOR_FG_MUTED}]")
+        console.print(f"{tagline_pad}[{COLOR_FG_MUTED}]{tagline}[/{COLOR_FG_MUTED}]")
         console.print()
 
     def print_compact_header(cols: int) -> None:
@@ -744,22 +765,23 @@ def run_interactive(
         console.print()
         model_parts = active_model.split("-")
         model_disp = "-".join(model_parts[:2]) if cols < 60 and len(model_parts) >= 2 else active_model
+        pad = "  " if cols >= 60 else " "
         if cols >= 60:
             console.print(
-                f"  [{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]"
+                f"{pad}[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]"
                 f"  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{model_disp}[/{COLOR_FG_SECONDARY}]"
                 f"  [#333333]·[/#333333]  [{COLOR_FG_MUTED}]{repo_dir.name}[/{COLOR_FG_MUTED}]"
             )
         else:
             console.print(
-                f"  [{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]"
+                f"{pad}[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]"
                 f"  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{model_disp}[/{COLOR_FG_SECONDARY}]"
             )
         console.print()
 
     def show_help() -> None:
         cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-        box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
+        box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
         table = Table(
             title=" BrainFrog Commands & Shortcuts ",
             box=box.SQUARE,
@@ -824,12 +846,7 @@ def run_interactive(
             console.print(f"\n  [{COLOR_FG_MUTED}]Sampai jumpa! {SYM_ASSISTANT}[/{COLOR_FG_MUTED}]\n")
             break
 
-        # Close the input box on screen
-        box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
-        margin = max(0, (cols - box_w) // 2)
-        pad = " " * margin
-        console.print(f"{pad}[{COLOR_ACCENT}]╰{'─' * (box_w - 2)}╯[/{COLOR_ACCENT}]")
-        console.print(f"[{COLOR_FG_MUTED}]{'─' * cols}[/{COLOR_FG_MUTED}]")
+        console.print()
 
         if not prompt:
             continue
@@ -896,14 +913,14 @@ def run_interactive(
             if not diff:
                 diff = subprocess.run(["git", "diff", "HEAD~1"], cwd=repo_dir, capture_output=True, text=True).stdout.strip()
             if diff:
-                box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
+                box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
                 console.print(Panel(Syntax(diff, "diff", theme="monokai", line_numbers=True), title=" Git Diff ", box=box.ROUNDED, border_style=COLOR_ACCENT, width=box_w))
             else:
                 print_banner_box("Tidak ada perubahan kode yang terdeteksi (working tree clean).", level="info", title="Git Diff")
             continue
         elif lower in ("/cost", "/stats", "/tokens"):
             s = usage_tracker.session
-            box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
+            box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
             table = Table(title=" BrainFrog Session Metrics ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, width=box_w)
             table.add_column("Metrik", style=COLOR_INFO)
             table.add_column("Nilai", style=f"bold {COLOR_ACCENT}", justify="right")
@@ -924,7 +941,7 @@ def run_interactive(
         elif lower in ("/rules", "/memory"):
             rules = load_project_guidelines(repo_dir)
             if rules:
-                box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
+                box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
                 console.print(Panel(Markdown(rules), title=" Project Rules (BRAINFROG.md) ", box=box.ROUNDED, border_style=COLOR_INFO, width=box_w))
             else:
                 print_banner_box("Tidak ditemukan file BRAINFROG.md di proyek ini.", level="warning", title="Project Memory")
@@ -948,7 +965,7 @@ def run_interactive(
             if not indexed:
                 print_banner_box("Tidak ada modular skill di .brainfrog/skills", level="warning", title="Skills")
             else:
-                box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
+                box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
                 table = Table(title=" Available Modular Skills ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, header_style=f"bold {COLOR_ACCENT}", width=box_w)
                 table.add_column("Skill Name", style=f"bold {COLOR_FG_PRIMARY}")
                 table.add_column("Description", style=COLOR_FG_SECONDARY)
@@ -1074,7 +1091,7 @@ def run_interactive(
             continue
         elif lower == "/domains":
             domains = load_module_map(repo_dir, Path(module_map) if module_map else None, auto_create=False)
-            box_w = min(cols - 4, 96) if cols > 100 else max(24, cols - (2 if cols < 60 else 4))
+            box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
             table = Table(title=" Configured Scope Domains ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, header_style=f"bold {COLOR_ACCENT}", width=box_w)
             table.add_column("Domain", style=COLOR_INFO)
             table.add_column("Description", style=COLOR_FG_PRIMARY)
