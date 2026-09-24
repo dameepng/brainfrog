@@ -329,37 +329,6 @@ def run_interactive(
 
     app_state = {"status": "Ready", "icon": "●"}
 
-    def get_bottom_toolbar():
-        from prompt_toolkit.formatted_text import FormattedText
-        cols = shutil.get_terminal_size(fallback=(100, 24)).columns
-        sep_line = "─" * cols
-        left = [
-            ("class:tb-kb", " ⌨   "),
-            ("class:tb-accent", "@"),
-            ("class:tb-text", " file   "),
-            ("class:tb-accent", "/"),
-            ("class:tb-text", " command   "),
-            ("class:tb-accent", "!"),
-            ("class:tb-text", " shell"),
-        ]
-        left_len = 34
-        cur_icon, cur_text = app_state["icon"], app_state["status"]
-        right_text = f"│   {cur_icon} {cur_text} "
-        right_len = len(right_text)
-        if cols >= 65:
-            spaces = max(1, cols - left_len - right_len)
-            return FormattedText([
-                ("class:tb-rule", sep_line + "\n"),
-                *left,
-                ("class:tb-bg", " " * spaces),
-                ("class:tb-dim", "│   "),
-                ("class:tb-status", f"{cur_icon} {cur_text} "),
-            ])
-        return FormattedText([
-            ("class:tb-rule", sep_line + "\n"),
-            *left,
-        ])
-
     # Initialize prompt_toolkit session with autocomplete & history
     session = None
     try:
@@ -369,16 +338,8 @@ def run_interactive(
 
         pt_style = Style.from_dict({
             "prompt-name": "#00FF66 bold",
-            "prompt-repo": "#cbd5e0",
-            "prompt-arrow": "#a0aec0 bold",
-            "bottom-toolbar": "bg:#0a0b0c #a0aec0",
-            "tb-rule": "bg:#0a0b0c #1f2937",
-            "tb-kb": "bg:#0a0b0c #cbd5e0",
-            "tb-accent": "bg:#0a0b0c #00FF66 bold",
-            "tb-text": "bg:#0a0b0c #e2e8f0",
-            "tb-bg": "bg:#0a0b0c",
-            "tb-dim": "bg:#0a0b0c #4a5568",
-            "tb-status": "bg:#0a0b0c #00FF66 bold",
+            "prompt-repo": "#94a3b8",
+            "prompt-arrow": "#64748b bold",
             "completion-menu.completion": "bg:#111518 #e2e8f0",
             "completion-menu.completion.current": "bg:#00FF66 #000000 bold",
             "completion-menu.meta.completion": "bg:#111518 #718096",
@@ -392,105 +353,67 @@ def run_interactive(
             completer=BrainFrogCompleter(lambda: repo_dir),
             history=FileHistory(str(history_file)),
             style=pt_style,
-            bottom_toolbar=get_bottom_toolbar,
             complete_while_typing=True,
         )
     except Exception:
         session = None
 
     def print_banner() -> None:
-        cols = shutil.get_terminal_size(fallback=(100, 24)).columns
-        shell_name = detect_shell_display()
+        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
         has_rules = bool(load_project_guidelines(repo_dir))
-        memory_text = "Active (BRAINFROG.md)" if has_rules else "Not set"
-
-        # Frog Pixel Art (5 rows, 22 cols wide)
-        frog_lines = [
-            r"[bold #00FF66]   ▄▄▄▄        ▄▄▄▄   [/bold #00FF66]",
-            r"[bold #00FF66]  ▐█ [/bold #00FF66][bold white]0[/bold white][bold #00FF66]  █▌  ▄▄  ▐█ [/bold #00FF66][bold white]0[/bold white][bold #00FF66]  █▌ [/bold #00FF66]",
-            r"[bold #00FF66]  ▄█▀                ▀█▄[/bold #00FF66]",
-            r"[bold #00FF66] ▐█   ▄  ────────  ▄  █▌[/bold #00FF66]",
-            r"[bold #00FF66]    ▀▀██████████████▀▀  [/bold #00FF66]",
-        ]
-
-        # Full Wordmark (5 rows, 69 cols wide)
-        wordmark_wide = [
-            r"[bold #00FF66]██████  ██████   ▄██▄   ████  ██  ██  ██████  ██████   ▄██▄    ▄████ [/bold #00FF66]",
-            r"[bold #00FF66]██  ██  ██  ██  ██  ██   ██   ███ ██  ██      ██  ██  ██  ██  ██     [/bold #00FF66]",
-            r"[bold #00FF66]█████   █████   ██████   ██   ██████  █████   █████   ██  ██  ██ ███ [/bold #00FF66]",
-            r"[bold #00FF66]██  ██  ██  ██  ██  ██   ██   ██ ███  ██      ██  ██  ██  ██  ██  ██ [/bold #00FF66]",
-            r"[bold #00FF66]██████  ██   ██ ██  ██  ████  ██  ██  ██      ██   ██  ▀██▀    ▀████ [/bold #00FF66]",
-        ]
-
-        # Compact Wordmark (5 rows, 46 cols wide)
-        wordmark_compact = [
-            r"[bold #00FF66]████▄ ████▄ ▄██▄ ███ █  █ ████ ████▄ ▄██▄ ▄███[/bold #00FF66]",
-            r"[bold #00FF66]██  █ ██  █ █  █  █  ██ █ █    ██  █ █  █ █   [/bold #00FF66]",
-            r"[bold #00FF66]████▀ ████▀ ████  █  █ ██ ███  ████▀ █  █ █ ██[/bold #00FF66]",
-            r"[bold #00FF66]██  █ ██  █ █  █  █  █  █ █    ██  █ █  █ █  █[/bold #00FF66]",
-            r"[bold #00FF66]████▀ ██  █ █  █ ███ █  █ █    ██  █ ▀██▀ ▀███[/bold #00FF66]",
-        ]
+        memory_text = "active (BRAINFROG.md)" if has_rules else "not set"
+        mem_style = "bold #00FF66" if has_rules else "#cbd5e0"
 
         cur_icon, cur_text = app_state["icon"], app_state["status"]
         status_style = "bold #00FF66" if cur_text == "Ready" else ("bold yellow" if "Processing" in cur_text else ("bold green" if "Done" in cur_text else "bold red"))
 
-        right_lines = [
-            f"[#718096]v{CLI_VERSION}[/#718096]",
-            f"[{status_style}]{cur_icon} {cur_text}[/{status_style}]",
+        frog_3row = [
+            r"  [bold #00FF66]▄▀▄  ▄▀▄[/bold #00FF66]   ",
+            r" [bold #00FF66]▐█[/bold #00FF66][bold white]0[/bold white][bold #00FF66]█──█[/bold #00FF66][bold white]0[/bold white][bold #00FF66]█▌[/bold #00FF66]  ",
+            r"  [bold #00FF66]▀█▄▄▄▄█▀[/bold #00FF66]   ",
+        ]
+
+        wm_3row = [
+            r"[bold #00FF66]█▀▀▄ █▀▀█ ▄▀▀▄ ▀█▀ █▄  █ █▀▀ █▀▀▄ ▄▀▀▄ ▄▀▀▀[/bold #00FF66]",
+            r"[bold #00FF66]█▀▀▄ █▀▀▄ █▀▀█  █  █ ▀▄█ █▀  █▀▀▄ █  █ █ ▀█[/bold #00FF66]",
+            r"[bold #00FF66]▀▀▀  ▀  ▀ ▀  ▀ ▀▀▀ ▀   ▀ ▀   ▀  ▀  ▀▀  ▀▀▀▀[/bold #00FF66]",
+        ]
+
+        right_3row = [
+            f" [dim #718096]v{CLI_VERSION}[/dim #718096]",
+            f" [{status_style}]{cur_icon} {cur_text}[/{status_style}]",
             "",
-            f"[#718096]Mode:[/#718096] [#cbd5e0]agentic[/#cbd5e0]",
-            f"[#718096]Shell:[/#718096] [#cbd5e0]{shell_name}[/#cbd5e0]",
         ]
 
         console.print()
-        if cols >= 115:
-            for i in range(5):
-                console.print(f" {frog_lines[i]}  {wordmark_wide[i]}  [dim #4a5568]│[/dim #4a5568]  {right_lines[i]}")
-        elif cols >= 92:
-            for i in range(5):
-                console.print(f" {frog_lines[i]} {wordmark_compact[i]} [dim #4a5568]│[/dim #4a5568] {right_lines[i]}")
+        if cols >= 68:
+            for f, w, r in zip(frog_3row, wm_3row, right_3row):
+                console.print(f"{f} {w}  {r}")
+        elif cols >= 45:
+            console.print(f" [bold #00FF66]▄▀▄ ▄▀▄ BRAINFROG[/bold #00FF66] [dim #718096]v{CLI_VERSION}[/dim #718096]  [{status_style}]{cur_icon} {cur_text}[/{status_style}]")
         else:
-            for i in range(5):
-                console.print(f"{wordmark_compact[i]}")
-            console.print(f"[{status_style}]{cur_icon} {cur_text}[/{status_style}]  [#718096]v{CLI_VERSION} | Mode: agentic | Shell: {shell_name}[/#718096]")
+            console.print(f" [bold #00FF66]BRAINFROG[/bold #00FF66] [dim #718096]v{CLI_VERSION}[/dim #718096]")
+            console.print(f" [{status_style}]{cur_icon} {cur_text}[/{status_style}]")
 
         console.print()
 
-        # Session Card Panel
-        top_text = Text()
-        top_text.append(" 🧠  ", style="bold #00FF66")
-        top_text.append("Memory    :   ", style="bold white")
-        top_text.append(f"{memory_text}\n", style="#cbd5e0" if not has_rules else "bold #00FF66")
+        # Compact summary line: mode, memory, test command
+        if cols >= 65:
+            console.print(
+                f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  "
+                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]memory:[/dim #718096] [{mem_style}]{memory_text}[/{mem_style}]  "
+                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]test:[/dim #718096] [#cbd5e0]{active_test_cmd}[/#cbd5e0]"
+            )
+        else:
+            console.print(f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  [dim #4a5568]·[/dim #4a5568]  [dim #718096]memory:[/dim #718096] [{mem_style}]{memory_text}[/{mem_style}]")
+            console.print(f"  [dim #718096]test:[/dim #718096] [#cbd5e0]{active_test_cmd}[/#cbd5e0]")
 
-        top_text.append(" >_  ", style="bold #00FF66")
-        top_text.append("Test Cmd  :   ", style="bold white")
-        top_text.append(f"{active_test_cmd}", style="#cbd5e0")
-
-        divider = Rule(style="dim #2d3748")
-
-        bottom_text = Text()
-        bottom_text.append(" ⓘ  ", style="bold #00FF66")
-        bottom_text.append("Type a task or question... (use ", style="#718096")
-        bottom_text.append("@file", style="bold white")
-        bottom_text.append("), ", style="#718096")
-        bottom_text.append("!command", style="bold white")
-        bottom_text.append(" for shell, ", style="#718096")
-        bottom_text.append("/help", style="bold white")
-        bottom_text.append(" for menu, or ", style="#718096")
-        bottom_text.append("/exit.", style="bold white")
-
-        card_group = Group(top_text, divider, bottom_text)
-        panel = Panel(
-            card_group,
-            border_style="#00FF66",
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-        console.print(panel)
+        console.print()
+        console.print("  [dim #718096]@ file · / perintah · ! shell[/dim #718096]")
         console.print()
 
     def show_help() -> None:
-        table = Table(title="BrainFrog Slash Commands & Shortcuts", box=box.SIMPLE_HEAVY)
+        table = Table(title="BrainFrog Commands & Shortcuts", box=box.SIMPLE, show_edge=False, header_style="bold #00FF66")
         table.add_column("Command", style="cyan", no_wrap=True)
         table.add_column("Description", style="white")
         table.add_row("/help, /?", "Show this help table")
@@ -510,6 +433,7 @@ def run_interactive(
         table.add_row("/clear", "Clear terminal screen")
         table.add_row("/exit, /quit", "Exit BrainFrog session")
         console.print(table)
+        console.print()
 
     console.clear()
     print_banner()
@@ -525,9 +449,6 @@ def run_interactive(
                 ]
                 prompt = session.prompt(prompt_parts).strip()
             else:
-                cols = shutil.get_terminal_size(fallback=(100, 24)).columns
-                console.print(f"[dim]{'─' * cols}[/dim]")
-                console.print(f" [dim]⌨ [/dim]  [bold #00FF66]@[/bold #00FF66] file   [bold #00FF66]/[/bold #00FF66] command   [bold #00FF66]![/bold #00FF66] shell")
                 prompt = console.input(f"[bold #00FF66]brainfrog[/bold #00FF66] [dim]({repo_name}) >[/dim] ").strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Bye! 🐸[/dim]")
