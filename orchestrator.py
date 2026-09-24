@@ -38,6 +38,7 @@ class RunConfig:
     branch_prefix: str = "agentic/"
     domains: Dict[str, Domain] = field(default_factory=dict)
     min_domain_confidence: float = 0.55
+    skill: Optional[str] = None
 
 
 @dataclass
@@ -166,13 +167,32 @@ class Orchestrator:
         self.s2 = system2
         self.cfg = config
         self.guidelines = load_project_guidelines(self.cfg.repo_dir)
-        if self.guidelines and not self.s2.guidelines:
-            self.s2.guidelines = self.guidelines
+
+        # Index available modular skills (metadata only: name & description)
+        from skills import index_skills, select_skill
+        self.available_skills = index_skills(self.cfg.repo_dir)
+        self.active_skill, clean_task = select_skill(
+            self.cfg.task,
+            self.available_skills,
+            explicit_skill_name=self.cfg.skill,
+        )
+        self.cfg.task = clean_task
+
+        # Prepare System 2 guidelines (project memory + active skill if any)
+        base_rules = self.guidelines or self.s2.guidelines or ""
+        if self.active_skill:
+            from skills import load_skill_content
+            skill_text = load_skill_content(self.active_skill, include_references=False)
+            self.s2.guidelines = f"{base_rules}\n\n[Active Modular Skill: {self.active_skill.name}]\n{skill_text}".strip()
+        elif base_rules:
+            self.s2.guidelines = base_rules
         self.pinned_files = extract_mentioned_files(self.cfg.task, self.cfg.repo_dir)
 
     def run(self) -> List[StepResult]:
         if self.guidelines:
             print("[brainfrog] 🧠 Applied project memory/rules from BRAINFROG.md")
+        if self.active_skill:
+            print(f"[brainfrog] 🎯 Skill: {self.active_skill.name}")
         if self.pinned_files:
             print(f"[brainfrog] 📌 Pinned {len(self.pinned_files)} context file(s): {', '.join(self.pinned_files.keys())}")
 

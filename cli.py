@@ -151,6 +151,7 @@ def execute_task(
     auto_pr: bool = False,
     pr_risk_ceiling: str = "medium",
     max_retries: int = 3,
+    skill: Optional[str] = None,
 ) -> int:
     """Run a single task through the dual-system orchestrator."""
     from config import get_system1
@@ -187,6 +188,7 @@ def execute_task(
         pr_risk_ceiling=pr_risk_ceiling,
         domains=domains,
         min_domain_confidence=min_domain_confidence,
+        skill=skill,
     )
 
     orchestrator = Orchestrator(system1, system2, cfg)
@@ -239,6 +241,8 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/test-cmd", "Change test command"),
     ("/backend", "Switch System 1 backend (mock|typesafe|auto)"),
     ("/model", "Switch Claude model"),
+    ("/skills", "List all available modular skills"),
+    ("/skill", "Activate modular skill (e.g. /skill audit-anti-slop)"),
     ("/domains", "List detected domain modules and paths"),
     ("/clear", "Clear terminal screen"),
     ("/exit", "Exit BrainFrog session"),
@@ -273,7 +277,25 @@ class BrainFrogCompleter(BaseCompleter):
 
         text = document.text_before_cursor
 
-        # 1. Slash commands autocomplete
+        # 1. Skill name autocomplete after "/skill "
+        if text.lower().startswith("/skill "):
+            prefix = text[len("/skill "):]
+            from skills import index_skills
+            indexed = index_skills(self.repo_dir_getter())
+            options = ["off", "none", "auto", *list(indexed.keys())]
+            for opt in options:
+                if not prefix or opt.lower().startswith(prefix.lower()):
+                    meta = indexed.get(opt)
+                    desc = meta.description[:40] + "..." if meta else "Reset to automatic intent detection"
+                    yield Completion(
+                        opt,
+                        start_position=-len(prefix),
+                        display=opt,
+                        display_meta=desc,
+                    )
+            return
+
+        # 1b. Slash commands autocomplete
         if text.startswith("/"):
             for cmd, desc in SLASH_COMMAND_COMPLETIONS:
                 if cmd.lower().startswith(text.lower()):
@@ -316,6 +338,7 @@ def run_interactive(
     auto_pr: bool = False,
     pr_risk_ceiling: str = "medium",
     max_retries: int = 3,
+    initial_skill: Optional[str] = None,
 ) -> None:
     """Full-featured interactive TUI session."""
     from modules import load_module_map
@@ -326,6 +349,7 @@ def run_interactive(
     active_test_cmd = test_cmd or detect_default_test_cmd(repo_dir)
     active_backend = backend
     active_model = claude_model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+    active_skill: Optional[str] = initial_skill
 
     app_state = {"status": "Ready", "icon": "●"}
 
@@ -364,6 +388,9 @@ def run_interactive(
         memory_text = "active (BRAINFROG.md)" if has_rules else "not set"
         mem_style = "bold #00FF66" if has_rules else "#cbd5e0"
 
+        skill_text = f"skill: {active_skill}" if active_skill else "skill: auto"
+        skill_style = "bold #00FF66" if active_skill else "#cbd5e0"
+
         cur_icon, cur_text = app_state["icon"], app_state["status"]
         status_style = "bold #00FF66" if cur_text == "Ready" else ("bold yellow" if "Processing" in cur_text else ("bold green" if "Done" in cur_text else "bold red"))
 
@@ -397,15 +424,20 @@ def run_interactive(
 
         console.print()
 
-        # Compact summary line: mode, memory, test command
-        if cols >= 65:
+        # Compact summary line: mode, memory, skill, test command
+        if cols >= 80:
             console.print(
                 f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  "
                 f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]memory:[/dim #718096] [{mem_style}]{memory_text}[/{mem_style}]  "
+                f"[dim #4a5568]·[/dim #4a5568]  [{skill_style}]{skill_text}[/{skill_style}]  "
                 f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]test:[/dim #718096] [#cbd5e0]{active_test_cmd}[/#cbd5e0]"
             )
         else:
-            console.print(f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  [dim #4a5568]·[/dim #4a5568]  [dim #718096]memory:[/dim #718096] [{mem_style}]{memory_text}[/{mem_style}]")
+            console.print(
+                f"  [dim #718096]mode:[/dim #718096] [#cbd5e0]agentic[/#cbd5e0]  "
+                f"[dim #4a5568]·[/dim #4a5568]  [dim #718096]memory:[/dim #718096] [{mem_style}]{memory_text}[/{mem_style}]  "
+                f"[dim #4a5568]·[/dim #4a5568]  [{skill_style}]{skill_text}[/{skill_style}]"
+            )
             console.print(f"  [dim #718096]test:[/dim #718096] [#cbd5e0]{active_test_cmd}[/#cbd5e0]")
 
         console.print()
@@ -420,6 +452,8 @@ def run_interactive(
         table.add_row("/undo", "Revert last change or commit cleanly via Git")
         table.add_row("/diff", "View colored git diff of recent changes")
         table.add_row("/rules, /memory", "View or create BRAINFROG.md project guidelines")
+        table.add_row("/skills", "List all available modular skills and status")
+        table.add_row("/skill [name]", "Activate modular skill (e.g. /skill audit-anti-slop)")
         table.add_row("/cost, /stats", "View session token usage and estimated API cost")
         table.add_row("/init [stack]", "Auto-generate modules.json (web|android|node|python)")
         table.add_row("/status", "Show current workspace & agent status")
@@ -543,6 +577,46 @@ def run_interactive(
                 except Exception:
                     pass
             continue
+        elif lower == "/skills":
+            from skills import index_skills
+            indexed = index_skills(repo_dir)
+            if not indexed:
+                console.print("[yellow]No modular skills found in .brainfrog/skills[/yellow]")
+            else:
+                table = Table(title="Available Modular Skills (.brainfrog/skills)", box=box.ROUNDED)
+                table.add_column("Skill Name", style="cyan bold")
+                table.add_column("Description", style="white")
+                table.add_column("Status", style="green")
+                for s_name, s_meta in indexed.items():
+                    status = "[bold #00FF66]ACTIVE[/bold #00FF66]" if active_skill == s_name else "[dim]Standby (auto-detect)[/dim]"
+                    table.add_row(s_name, s_meta.description[:90] + "...", status)
+                console.print(table)
+            continue
+        elif lower.startswith("/skill"):
+            from skills import index_skills
+            indexed = index_skills(repo_dir)
+            parts = prompt.split(maxsplit=1)
+            if len(parts) > 1:
+                arg = parts[1].strip()
+                if arg.lower() in ("off", "none", "clear", "auto"):
+                    active_skill = None
+                    console.print("[green]Skill reset to automatic intent detection.[/green]")
+                    print_banner()
+                elif arg in indexed or arg.lower() in {k.lower(): k for k in indexed}:
+                    matched_key = next(k for k in indexed if k.lower() == arg.lower())
+                    active_skill = matched_key
+                    console.print(f"[bold green]✓ Activated skill:[/bold green] [cyan]{active_skill}[/cyan]")
+                    print_banner()
+                else:
+                    console.print(f"[red]Skill '{arg}' not found.[/red] Available skills: {', '.join(indexed.keys()) or 'none'}")
+            else:
+                if active_skill:
+                    console.print(f"Current active skill: [bold #00FF66]{active_skill}[/bold #00FF66] (use `/skill off` to reset)")
+                else:
+                    console.print("Current skill mode: [dim]auto-detect on prompt[/dim]")
+                    if indexed:
+                        console.print(f"Available skills: {', '.join(indexed.keys())}")
+            continue
         elif lower.startswith("/repo"):
             parts = prompt.split(maxsplit=1)
             if len(parts) > 1:
@@ -617,6 +691,7 @@ def run_interactive(
             auto_pr=auto_pr,
             pr_risk_ceiling=pr_risk_ceiling,
             max_retries=max_retries,
+            skill=active_skill,
         )
         if exit_code == 0:
             app_state["status"] = "Done"
@@ -640,6 +715,7 @@ def main() -> int:
     p.add_argument("-t", "--test-cmd", default=None, help="Shell command for running test suite")
     p.add_argument("-b", "--backend", choices=["mock", "typesafe", "auto"], default="auto")
     p.add_argument("-m", "--claude-model", default=None, help="Override ANTHROPIC_MODEL env var")
+    p.add_argument("--skill", default=None, help="Explicitly activate a modular skill (e.g. --skill audit-anti-slop)")
     p.add_argument("--auto-pr", action="store_true", help="Push branch and open GitHub PR when approved")
     p.add_argument("--pr-risk-ceiling", choices=["low", "medium", "high"], default="medium")
     p.add_argument("--max-retries", type=int, default=3)
@@ -668,6 +744,7 @@ def main() -> int:
             auto_pr=args.auto_pr,
             pr_risk_ceiling=args.pr_risk_ceiling,
             max_retries=args.max_retries,
+            skill=args.skill,
         )
     else:
         run_interactive(
@@ -680,6 +757,7 @@ def main() -> int:
             auto_pr=args.auto_pr,
             pr_risk_ceiling=args.pr_risk_ceiling,
             max_retries=args.max_retries,
+            initial_skill=args.skill,
         )
         return 0
 
