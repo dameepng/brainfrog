@@ -1102,9 +1102,336 @@ def divide(a, b):
 
 ---
 
+## Evaluation and Observability
+
+Bagian ini mengatur bagaimana agent dan developer mengukur kualitas keluaran BrainFrog secara objektif (**Evaluation**) serta menginspeksi alur kerja internal saat terjadi anomali atau kegagalan (**Observability**).
+
+Dua pilar ini memiliki fokus yang tegas dan tidak boleh dicampuradukkan:
+1. **Evaluation (Evaluasi):** Menjawab pertanyaan *“Apakah BrainFrog menyelesaikan tugas pengguna dengan benar, andal, dan efisien?”* — berfokus pada hasil akhir (*outcome*), kepatuhan kontrak, dan kualitas kode yang dihasilkan.
+2. **Observability (Observabilitas):** Menjawab pertanyaan *“Jika hasilnya buruk atau prosesnya gagal, di mana dan mengapa kegagalan itu terjadi?”* — berfokus pada visibilitas runtutan proses internal (*transcript* & telemetri) tanpa perlu menebak-nebak atau menambah logging secara reaktif setelah insiden terjadi.
+
+Pendekatan ini berpegang pada prinsip *Evaluation-Driven Development* dari riset evaluasi agentik Anthropic, konsep sinyal telemetri terpadu dari OpenTelemetry (Traces, Metrics, Logs), serta *Four Golden Signals* Google SRE yang disederhanakan secara proporsional untuk arsitektur CLI lokal dual-system (System 1 Jev + System 2 Claude).
+
+---
+
+### 1. Definisi Kriteria Keberhasilan per Fitur Sebelum Pemilihan Metrik
+
+Agent dilarang merancang metrik abstrak atau membuat rangkaian pengujian tanpa mendefinisikan secara eksplisit apa yang menjadi tolak ukur keberhasilan (*definition of done*) untuk tiap jenis fitur di BrainFrog:
+
+```
+[Permintaan / Fitur Baru]
+           │
+           ▼
+[Spesifikasi Kriteria Sukses Objektif]
+  • Prekondisi Lingkungan (Workspace, Dependencies)
+  • Batasan Eksekusi (Max Retries, Timeout, Budget Token)
+  • Postkondisi Lingkungan yang Terverifikasi (Exit Code 0, Git Diff Valid)
+           │
+           ▼
+[Pemisahan Jalur Pengujian]
+  ├─► Deterministik: Unit/Contract Test (Pass/Fail biner, runtime < 1s, biaya $0)
+  └─► Stokastik/Agentic: Grader Uji Lingkungan + Rubrik Model Terkalibrasi
+```
+
+1. **Formula Kriteria Keberhasilan:**
+   Setiap fitur yang dievaluasi wajib memiliki empat elemen spesifikasi:
+   - **Prekondisi:** Status awal repositori dan input pengguna (misal: repositori bersih, file target ada, perintah tes terdefinisi).
+   - **Batasan Operasional:** Batas toleransi latensi per turn, pagu token (`UsageStats`), dan kuota percobaan (`max_retries`).
+   - **Postkondisi Lingkungan (Environment Outcome):** Kondisi fisik workspace yang dapat diverifikasi secara independen (misal: tes lulus dengan exit code 0, sintaksis kode valid, perubahan hanya menyentuh file target).
+   - **Kriteria Batas & Kegagalan (Edge Cases & Failure Modes):** Respons sistem saat menghadapi kondisi abnormal (misal: tes gagal berulang -> eskalasi bersih ke manusia, bukan loop tak terbatas).
+
+2. **Taksonomi Tugas Nyata BrainFrog:**
+   - **Tugas Utilitas Deterministik:** Parsing `@file`, eksekusi command shell `!cmd`, checkpoint git untuk `/undo`, rendering tabel `/stats`. Evaluasi: Pengujian deterministik biner (100% pass rate).
+   - **Tugas Investigasi & Diagnosis (`question_only`):** Menjawab pertanyaan struktur tanpa memodifikasi kode. Evaluasi: Kehadiran sitasi file/fungsi riil, ketiadaan mutasi file (`git diff` kosong).
+   - **Tugas Modifikasi & Remediasi Kode (`feature_request`, `bug_investigation`):** Merencanakan langkah, mengubah file, dan menjalankan tes. Evaluasi: Hasil tes otomatis (`cfg.test_command` exit code 0), diff stat yang proporsional, dan format PR yang valid.
+   - **Tugas Bersifat Ambigu / Adversarial:** Perintah tidak jelas atau instruksi jahat dalam file. Evaluasi: Sistem memicu `needs_clarification` atau menolak tindakan berisiko secara aman tanpa memicu crash.
+
+---
+
+### 2. Pemisahan Pengujian Deterministik vs Evaluasi Hasil Model (Agentic)
+
+Kesalahan umum dalam pengembangan agent adalah menguji logika deterministik dengan LLM atau sebaliknya, menguji keluaran generatif dengan assertion teks kaku (*exact string match*). Keduanya harus dipisahkan secara tegas:
+
+| Dimensi | Pengujian Deterministik (Software Unit/Integration) | Evaluasi Model & Agent Harness (Agentic Evals) |
+| :--- | :--- | :--- |
+| **Fokus Sasaran** | Kode infrastruktur, parser, kontrak tool, penanganan path, isolasi file. | Kemampuan penalaran, pemilihan file, perbaikan bug, penulisan kode, penilaian risiko. |
+| **Sifat Eksekusi** | Deterministik murni (input $X$ selalu menghasilkan output $Y$). | Stokastik (model dapat menggunakan gaya berbeda untuk solusi yang sama-sama benar). |
+| **Kecepatan & Biaya** | Sangat cepat (milidetik), biaya token $0. | Membutuhkan inferensi LLM (hitungan detik), terdapat biaya komputasi/token. |
+| **Mekanisme Verifikasi** | Assertion kode standar (`assertEqual`, `pytest`, schema validation). | **Grader Toolbox:** Code-based grader (test runner), model-as-a-judge, human spot-check. |
+| **Toleransi Kegagalan** | Nol (wajib 100% lulus pada build/CI lokal). | Berbasis probabilitas dan ambang batas reliability (`pass@1`, `pass@k`). |
+
+1. **Komponen yang Wajib Diuji Secara Deterministik di BrainFrog:**
+   - Ekstraksi blok JSON dari respons model (`_extract_json`).
+   - Resolusi path workspace dan pencegahan traversal (`resolve().is_relative_to()`).
+   - Akumulasi metrik token dan kalkulasi biaya di `UsageStats` & `UsageTracker`.
+   - Parsing token `@file` pada prompt pengguna (`extract_mentioned_files`).
+   - Mekanisme parsing argument CLI dan routing slash commands (`/cost`, `/undo`, `/rules`).
+
+2. **Komponen yang Wajib Dievaluasi Melalui Agentic Evals:**
+   - Kualitas dekomposisi langkah dalam `plan_task` (langkah modular, berurutan logis).
+   - Akurasi klasifikasi domain dan intent pada `_scope_gate` System 1 (`likely_domain`, `change_type`).
+   - Kebenaran logika dan sintaksis kode yang dihasilkan oleh `write_code`.
+   - Efektivitas perbaikan kegagalan tes pada `review_and_fix`.
+   - Ketepatan penilaian risiko diff sebelum pembukaan PR (`diff_risk`, `safe_to_proceed`).
+
+---
+
+### 3. Kurasi Dataset Evaluasi Ringan (Golden Eval Dataset)
+
+Agent tidak memerlukan ribuan dataset sintetis yang bising. Untuk lingkungan CLI lokal BrainFrog, bangun **Golden Dataset** kecil (15–25 skenario) yang dapat dijalankan ulang secara otomatis (*reproducible*):
+
+```
+                                 [Golden Eval Suite]
+                                          │
+            ┌───────────────────┬─────────┴─────────┬───────────────────┐
+            ▼                   ▼                   ▼                   ▼
+     [Happy Path Fix]     [Multi-Step]       [Ambiguity Gate]    [Failure Recovery]
+      Bug terlokalisasi,   Menyentuh > 1     Tugas samar, harus  Tes gagal di awal,
+      1 step, 0 retry      file, diff sinkron memicu klarifikasi  harus sembuh di retry
+```
+
+1. **Komposisi Kasus Uji Golden Dataset:**
+   - **Kasus Dasar (Happy Path - 40%):** Perbaikan bug terlokalisasi (misal pembagian nol pada fungsi kalkulator, perbaikan typo format string) yang harus selesai dalam 1 langkah tanpa retry.
+   - **Kasus Multi-Step (Feature Addition - 25%):** Penambahan fungsi baru yang memerlukan modifikasi file logika sekaligus file unit test terkait.
+   - **Kasus Batas & Ambiguitas (Edge & Scope Gate - 20%):** Prompt pengguna yang sengaja dibuat tidak jelas (misal: *"perbaiki kodenya"* tanpa rincian) untuk memverifikasi bahwa System 1 menahan eksekusi dan memicu pertanyaan klarifikasi (`needs_clarification`).
+   - **Kasus Pemulihan Kegagalan (Retry & Self-Healing - 15%):** Skenario di mana kode generasi awal menghasilkan error tes yang jelas, menguji kemampuan `review_and_fix` memperbaiki kode secara mandiri dalam batas toleransi `max_retries`.
+
+2. **Skema Struktur Kasus Uji:**
+   Setiap entri dalam dataset evaluasi wajib mendokumentasikan konteks lengkap dalam format terstruktur:
+   ```json
+   {
+     "id": "eval_003_div_by_zero",
+     "category": "bug_investigation",
+     "task_prompt": "Perbaiki ZeroDivisionError pada fungsi divide di sandbox_repo/calc.py",
+     "repo_fixture": "sandbox_repo_clean",
+     "test_command": ["python", "-m", "unittest", "sandbox_repo/test_calc.py"],
+     "expected_outcome": {
+       "final_status": "drafted_pr",
+       "max_allowed_retries": 1,
+       "modified_files": ["sandbox_repo/calc.py"],
+       "test_exit_code": 0
+     },
+     "rationale": "Memvalidasi perbaikan bug matematika dasar tanpa merusak kontrak fungsi yang sudah ada."
+   }
+   ```
+
+---
+
+### 4. Dimensi Penilaian Komprehensif (Anti-Plausible-Hallucination)
+
+Dalam sistem berbasis LLM, teks jawaban yang terdengar meyakinkan (*plausible-sounding prose*) sering kali menutupi kegagalan logika fundamental. Evaluasi BrainFrog wajib menilai hasil fisik di lingkungan (*environment outcome*), bukan kepiawaian retorika model:
+
+1. **Outcome Correctness (Kebenaran Hasil Lingkungan):**
+   - Tolak ukur utama keberhasilan adalah **exit code dari perintah tes pengguna** (`test_proc.returncode == 0`).
+   - Verifikasi bahwa kelulusan tes dicapai melalui perbaikan kode implementasi yang sah, bukan dengan cara curang (misal menghapus file tes, mengomentari assertion, atau memalsukan return value).
+
+2. **Tool & Step Efficiency (Efisiensi Perencanaan dan Eksekusi):**
+   - Ukur rasio langkah yang direncanakan terhadap langkah yang dieksekusi. Rencana yang menghasilkan langkah redundan atau memanggil pembacaan file yang tidak relevan dinilai buruk.
+   - Catat jumlah retry per langkah. Solusi yang membutuhkan 3 kali percobaan memiliki skor reliabilitas lebih rendah dibanding solusi yang lulus pada percobaan pertama.
+
+3. **Context Utilization & Boundary Compliance (Pemanfaatan Konteks):**
+   - Apakah model membaca file yang relevan dengan domain tugas?
+   - Jika pengguna menyertakan `@file`, apakah isi file tersebut benar-benar diperhitungkan dalam kode baru?
+   - Apakah model mematuhi batasan berkas tanpa membaca direktori terlarang (`node_modules`, `.git`, atau direktori di luar repositori)?
+
+4. **Safety & Policy Adherence (Kepatuhan Izin):**
+   - Jika domain diberi flag `sensitive: true` pada `modules.json`, pastikan sistem menolak pembukaan PR otomatis (`auto_pr`) dan mewajibkan peninjauan manual oleh manusia.
+
+---
+
+### 5. Pengukuran Relatif terhadap Baseline (Pelacakan Regresi & Variansi)
+
+Setiap perubahan pada prompt sistem, arsitektur modul, atau versi model wajib diukur secara komparatif terhadap versi stabil sebelumnya (*baseline*):
+
+1. **Metrik Reliabilitas Stokastik (Prinsip Anthropic Agentic Evals):**
+   - **$pass@1$:** Persentase tugas yang berhasil diselesaikan pada percobaan pertama tanpa bantuan loop `review_and_fix`.
+   - **$pass@k$ (dengan $k = max\_retries$):** Persentase tugas yang berhasil diselesaikan dalam batas toleransi retry. Menunjukkan kapasitas pemulihan mandiri sistem saat didampingi umpan balik error pengujian.
+   - **Tingkat Regresi (Regression Rate):** Persentase kasus uji pada Golden Dataset yang sebelumnya lulus pada baseline namun gagal setelah adanya perubahan kode/prompt. **Ambang toleransi regresi untuk rilis adalah 0%.**
+
+2. **Pelacakan Latensi dan Biaya:**
+   - Gunakan data aktual dari `UsageTracker` (`input_tokens`, `output_tokens`, `cost_usd`) dan durasi eksekusi proses anak (dalam detik).
+   - **Dilarang keras mengarang skor atau metrik fiktif** (misalnya mengklaim "akurasi 99.8%" tanpa adanya data uji riil). Jika data historis belum tersedia, laporkan hasil uji sebagai data observasi mentah (contoh: *"Lulus 14 dari 15 kasus uji pada commit abc1234"*).
+
+---
+
+### 6. Observabilitas Lokal: Event Diagnostik & Korelasi Permintaan
+
+Untuk CLI lokal BrainFrog, observabilitas tidak memerlukan server monitoring eksternal yang rumit (seperti Jaeger atau Prometheus). Cukup terapkan **pencatatan event terstruktur lokal (Structured JSON Lines Logging)** yang ringan dan mandiri:
+
+```
+[User Task Request] ──► Inisialisasi Correlation ID: "bf-req-7f3a9b"
+                                  │
+         ┌────────────────────────┼────────────────────────┐
+         ▼                        ▼                        ▼
+  [Event: scope_gate]     [Event: model_call]     [Event: command_exec]
+  • Domain: sandbox       • Prompt Tokens: 1240   • Cmd: python -m unittest
+  • Confidence: 0.95      • Durasi: 1820 ms       • Exit Code: 0
+  • trace_id: 7f3a9b      • trace_id: 7f3a9b      • trace_id: 7f3a9b
+```
+
+1. **Korelasi Permintaan (Correlation / Trace ID):**
+   - Setiap kali sesi tugas pengguna dimulai di `cli.py` atau `orchestrator.py`, buat sebuah identifier korelasi acak pendek (misal `trace_id = uuid.uuid4().hex[:8]`).
+   - Sertakan `trace_id` ini pada setiap event log diagnostik yang dihasilkan oleh System 1, System 2, eksekusi tool, dan pengujian. Hal ini memungkinkan penelusuran utuh dari hulu ke hilir untuk satu permintaan spesifik.
+
+2. **Struktur Event Diagnostik (JSON Lines):**
+   Simpan catatan diagnostik di lokasi lokal terisolasi (`~/.brainfrog/logs/diagnostics.jsonl`). Setiap baris memuat payload terstruktur:
+   ```json
+   {
+     "timestamp": "2026-09-24T12:45:10.123Z",
+     "trace_id": "7f3a9b1c",
+     "step_id": "1",
+     "event": "tool_execution",
+     "component": "orchestrator",
+     "action": "run_test_command",
+     "duration_ms": 345,
+     "status": "PASS",
+     "details": {
+       "cmd": ["python", "-m", "unittest", "sandbox_repo/test_calc.py"],
+       "exit_code": 0,
+       "retry_attempt": 0
+     }
+   }
+   ```
+
+3. **Integrasi Empat Sinyal Emas SRE (Four Golden Signals) untuk CLI:**
+   - **Latency:** Durasi pemanggilan API Claude dan durasi eksekusi subprocess pengujian lokal (dalam milidetik).
+   - **Traffic:** Jumlah turn interaktif dan volume token yang diproses per sesi pengguna.
+   - **Errors:** Frekuensi kegagalan parsing JSON, kegagalan eksekusi subprocess, dan error API Anthropic.
+   - **Saturation:** Konsumsi batas token context window Claude terhadap limit model dan alokasi `max_retries` yang terpakai.
+
+---
+
+### 7. Demarkasi Antarmuka: UI Terminal Pengguna vs Log Diagnostik
+
+Jaga kebersihan pengalaman pengguna terminal. Jangan pernah mengotori layar konsol interaktif dengan dump telemetri internal atau trace panjang:
+
+1. **Prinsip Tampilan Terminal Pengguna (Rich Console):**
+   - Tampilkan informasi yang bernilai operasional langsung bagi pengguna: progress bar atau status step (`=== Step 1: ... ===`), badge status ringkas (`SUCCESS`, `FAIL`), pesan klarifikasi, dan footer satu baris penggunaan token & estimasi biaya (`⚡ Turn tokens: ... | Est. Cost: $...`).
+   - Saat terjadi kegagalan, tampilkan pesan error yang informatif dan dapat ditindaklanjuti (*actionable*), bukan traceback internal sistem orkestrasi BrainFrog.
+
+2. **Prinsip Log Diagnostik Pengembang (Developer Log File):**
+   - Simpan informasi teknis mendalam secara hening ke file log (`~/.brainfrog/logs/diagnostics.jsonl`).
+   - Tampilkan detail diagnostik ke layar konsol **HANYA JIKA** pengguna secara eksplisit mengaktifkan mode verbose (misalnya via argumen `--verbose` atau perintah `/debug`).
+
+---
+
+### 8. Keamanan, Kerahasiaan, dan Redaksi Log (Zero-Leak Logging)
+
+Observabilitas tidak boleh menjadi celah kebocoran keamanan. Data sensitif dilarang masuk ke dalam berkas log:
+
+1. **Larangan Pencatatan Data Mentah Penuh secara Default:**
+   - **Dilarang mencatat raw system prompt penuh** dan seluruh isi file proyek pengguna ke dalam file log permanen. Cukup catat metadata (nama file, jumlah baris/karakter, path relatif).
+   - **Dilarang mencatat token atau kunci rahasia:** String yang cocok dengan pola token rahasia (seperti `sk-ant-*`, password, credential environment) **wajib disamarkan menjadi `[REDACTED_SECRET]`** sebelum ditulis ke log.
+
+2. **Trunkasi Output Eksekusi:**
+   - Output `stdout` dan `stderr` dari proses pengujian pihak ketiga yang sangat panjang harus dipotong (*truncated*) pada batas wajar (misal 2.000 karakter terakhir) untuk mencegah pembengkakan ukuran disk lokal dan mengurangi risiko tereksposnya data internal.
+
+3. **Opt-In Debug Payload:**
+   - Pencatatan payload lengkap (raw prompt dan raw LLM completion) hanya diizinkan untuk debugging lokal pengembang dengan mekanisme aktivasi eksplisit melalui environment variable (`BRAINFROG_DEBUG_PAYLOAD=1`) dan file log tersebut wajib masuk ke `.gitignore`.
+
+---
+
+### 9. Analisis Akar Masalah (Triage) Saat Evaluasi Gagal
+
+Ketika sebuah skenario evaluasi atau tugas pengguna gagal, agent harus melakukan analisis berbasis bukti dari log observabilitas untuk menemukan lapisan kegagalan yang sebenarnya. **Dilarang keras menyembuhkan gejala secara membabi buta dengan menambah panjang system prompt atau menambah baris telemetri tanpa justifikasi**:
+
+```
+                              [Investigasi Kegagalan]
+                                         │
+        ┌────────────────────────────────┼────────────────────────────────┐
+        ▼                                ▼                                ▼
+[Retrieval / Scope Gate]       [Generation / Contract]       [Execution Environment]
+• Apakah focus tree benar?     • Apakah JSON valid?          • Apakah test suite flaky?
+• Apakah confidence cukup?     • Apakah kode halusinasi?     • Apakah dependency ada?
+         │                                │                                │
+         ▼                                ▼                                ▼
+Perbaiki modul penelusuran     Perbaiki few-shot schema       Perbaiki isolasi subprocess
+atau data deskripsi domain.    atau kontrak tool.             atau timeout lingkungan.
+```
+
+1. **Kegagalan Lapisan Retrieval & Scope Gate:**
+   - *Gejala:* Agent memodifikasi file yang salah atau gagal menemukan fungsi target.
+   - *Solusi:* Perbaiki deskripsi domain di `modules.json` atau perbaiki logika penelusuran pohon berkas di `modules.py` / `extract_mentioned_files`.
+
+2. **Kegagalan Lapisan Penalaran & Generasi Model:**
+   - *Gejala:* Model menghasilkan kode yang melanggar sintaksis Python, merusak kontrak tipe data, atau menghasilkan JSON cacat yang memicu error di `_extract_json`.
+   - *Solusi:* Perjelas batasan skema JSON atau perbaiki prompt instruksi langkah kerja, bukan menjejalkan seluruh aturan repo ke dalam satu prompt raksasa.
+
+3. **Kegagalan Lapisan Lingkungan Eksekusi & Tool:**
+   - *Gejala:* Eksekusi tes mengalami timeout, crash subprocess, atau kegagalan akibat dependensi OS yang belum terpasang.
+   - *Solusi:* Sesuaikan batas timeout di `_run`, tangani kode keluar proses secara aman, dan berikan panduan instalasi dependensi kepada pengguna.
+
+---
+
+### 10. Checklist Review Evaluasi dan Observabilitas
+
+Sebelum merilis perubahan kode orkestrasi, sistem tool, atau modifikasi prompt di repositori BrainFrog, verifikasi checklist berikut:
+
+| No | Poin Pemeriksaan Evaluasi & Observabilitas | Status Validasi |
+| :---: | :--- | :---: |
+| 1 | Apakah setiap fitur memiliki kriteria keberhasilan objektif berbasis lingkungan (*environment outcome*), bukan sekadar teks yang terdengar meyakinkan? | [ ] |
+| 2 | Apakah logika deterministik (parser, path, math) diuji via unit test konvensional tanpa membebani inferensi model? | [ ] |
+| 3 | Apakah kasus uji Golden Dataset mencakup skenario happy path, multi-step, ambiguitas scope, dan pemulihan retry? | [ ] |
+| 4 | Apakah evaluasi perubahan dibandingkan terhadap baseline historis untuk mendeteksi regresi pada `pass@1` dan `pass@k`? | [ ] |
+| 5 | Apakah setiap permintaan pengguna diberi `trace_id` yang mengaitkan seluruh pemanggilan model, eksekusi tool, dan pengujian? | [ ] |
+| 6 | Apakah antarmuka terminal konsol tetap bersih dari dump telemetri internal dan hanya menampilkan ringkasan yang bernilai bagi pengguna? | [ ] |
+| 7 | Apakah file log diagnostik lokal menerapkan redaksi otomatis `[REDACTED_SECRET]` dan membatasi ukuran output eksekusi? | [ ] |
+
+---
+
+### 11. Contoh Nyata: Evaluasi & Observabilitas Tugas Perbaikan Kode di Repositori BrainFrog
+
+Berikut adalah contoh skenario konkret bagaimana evaluasi dan observabilitas diterapkan pada alur nyata BrainFrog:
+
+#### Skenario Tugas Pengguna:
+Pengguna memasukkan perintah di terminal CLI:
+> *"Perbaiki penanganan ZeroDivisionError pada fungsi `divide` di file `sandbox_repo/calc.py` agar melempar ValueError dengan pesan yang deskriptif, lalu pastikan pengujian lulus dengan `python -m unittest sandbox_repo/test_calc.py`."*
+
+#### 1. Rencana Evaluasi (Evaluation Protocol):
+- **Deterministic Assertion:**
+  - Verifikasi parser mendeteksi target file `sandbox_repo/calc.py`.
+  - Verifikasi file yang disentuh `write_code` HANYA `sandbox_repo/calc.py` (blast radius terkontrol).
+- **Environment Outcome Grader:**
+  - Eksekusi `python -m unittest sandbox_repo/test_calc.py`.
+  - Target: Exit code `0` (semua unit test lulus).
+- **Model Quality & Contract Check:**
+  - Pemeriksaan AST / sintaksis: kode Python valid.
+  - Pemeriksaan fungsional: fungsi `divide(10, 0)` secara eksplisit memicu `ValueError("Cannot divide by zero")` bukan `ZeroDivisionError`.
+- **Target Efisiensi:**
+  - $pass@1$ (berhasil dalam 1 langkah tanpa memicu retry loop `review_and_fix`).
+  - Alokasi token turn: total input + output token $< 2.500$ token.
+
+#### 2. Jejak Event Observabilitas yang Dicatat (Log File `~/.brainfrog/logs/diagnostics.jsonl`):
+```json
+{"timestamp": "2026-09-24T12:50:01.100Z", "trace_id": "bf-4e8a1", "event": "request_start", "task": "Perbaiki penanganan ZeroDivisionError..."}
+{"timestamp": "2026-09-24T12:50:01.350Z", "trace_id": "bf-4e8a1", "event": "scope_gate", "domain": "sandbox", "change_type": "bug_investigation", "confidence": 0.95, "duration_ms": 250}
+{"timestamp": "2026-09-24T12:50:03.200Z", "trace_id": "bf-4e8a1", "event": "plan_task", "steps_count": 1, "duration_ms": 1850}
+{"timestamp": "2026-09-24T12:50:05.450Z", "trace_id": "bf-4e8a1", "event": "write_code", "step_id": "1", "files_modified": ["sandbox_repo/calc.py"], "tokens": {"input": 1280, "output": 260}, "duration_ms": 2250}
+{"timestamp": "2026-09-24T12:50:05.780Z", "trace_id": "bf-4e8a1", "event": "command_exec", "step_id": "1", "cmd": ["python", "-m", "unittest", "sandbox_repo/test_calc.py"], "exit_code": 0, "duration_ms": 330}
+{"timestamp": "2026-09-24T12:50:07.100Z", "trace_id": "bf-4e8a1", "event": "draft_pr", "title": "fix(calc): raise ValueError on division by zero", "duration_ms": 1320}
+{"timestamp": "2026-09-24T12:50:07.105Z", "trace_id": "bf-4e8a1", "event": "task_summary", "outcome": "drafted_pr", "total_duration_ms": 6005, "total_tokens": 1840, "est_cost_usd": 0.0077, "status": "SUCCESS"}
+```
+
+#### 3. Tampilan Bersih pada Antarmuka Terminal Pengguna:
+Di layar terminal, pengguna **tidak melihat** dump JSON di atas. Pengguna hanya melihat umpan balik visual yang ringkas dan elegan:
+```text
+=== Step 1: Fix ZeroDivisionError in divide function ===
+[system2/claude] writing code ...
+[tests] PASS (exit 0)
+[system1/jev:mock] next_action = open_pr (confidence: 1.00)
+[system1/jev:mock] diff_risk = low, safe_to_proceed = 0.95
+
+=== Run Summary ===
+  • Step 1 (Fix ZeroDivisionError in divide function): SUCCESS (retries: 0)
+⚡ Turn tokens: 1,280 in / 560 out (1,840 total) | Est. Cost: $0.0077
+```
+Jika terjadi anomali atau tes gagal, developer dapat langsung membuka file `diagnostics.jsonl` dan menyaring dengan `trace_id: "bf-4e8a1"` untuk melihat rekaman lengkap tanpa perlu mereka-reka urutan kejadian.
+
+---
+
 ## Referensi Riset & Literatur
 
-Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, retrieval, reliabilitas, dan keamanan di repositori ini:
+Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, retrieval, reliabilitas, keamanan, serta evaluasi dan observabilitas di repositori ini:
 
 ### Pilar System Design
 1. **Google Cloud Architecture Framework: System Design**
@@ -1238,6 +1565,24 @@ Sumber primer yang mendasari penyusunan pedoman arsitektur, kontrak, retrieval, 
 24. **Model Context Protocol (MCP) Security & Roots Specification — Anthropic / MCP Working Group**
     - Fokus: Penegakan batas sistem berkas (*filesystem roots boundary*), validasi URI untuk mencegah path traversal, dan mekanisme persetujuan pengguna (*human-in-the-loop authorization*).
     - URL: `https://spec.modelcontextprotocol.io/specification/server/roots/`
+    - Tanggal Akses: 24 September 2026.
+
+### Pilar Evaluation and Observability
+25. **Demystifying Evals for AI Agents — Anthropic Research (9 Januari 2026)**
+    - Fokus: Pembedaan Task vs Trial, Transcript vs Outcome, taksonomi Grader (Code-based, Model-based/LLM-as-a-judge, Human), metrik keandalan stokastik pass@k dan pass^k, serta metodologi Evaluation-Driven Development untuk sistem agentik multi-turn.
+    - URL: `https://www.anthropic.com/research/evaluating-ai-agents`
+    - Tanggal Akses: 24 September 2026.
+
+26. **OpenTelemetry Specification: Telemetry Signals & Correlation Concepts — Cloud Native Computing Foundation (CNCF)**
+    - Fokus: Tiga pilar sinyal observabilitas (Logs, Metrics, Traces), propagasi konteks transaksi via Trace ID & Span ID, Semantic Conventions untuk AI/LLM, serta pemisahan metrik performa runtime dari log kejadian terstruktur.
+    - URL: `https://opentelemetry.io/docs/concepts/signals/`
+    - Tanggal Akses: 24 September 2026.
+
+27. **Site Reliability Engineering (SRE): Monitoring Distributed Systems & Practical Alerting — Google SRE Book**
+    - Fokus:
+      - *Chapter 6 (Monitoring Distributed Systems):* Empat sinyal emas (*Four Golden Signals*: Latency, Traffic, Errors, Saturation) yang disesuaikan untuk beban eksekusi lokal dan batas resource komputasi.
+      - *Chapter 10 (Practical Alerting):* Prinsip pembedaan peringatan yang memerlukan tindakan pengguna vs informasi diagnostik latar belakang, serta pencegahan kebisingan telemetri (*telemetry noise*).
+    - URL: `https://sre.google/sre-book/monitoring-distributed-systems/`
     - Tanggal Akses: 24 September 2026.
 
 
