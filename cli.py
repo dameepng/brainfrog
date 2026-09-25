@@ -269,6 +269,7 @@ def execute_task(
     )
 
     cols, rows, box_w, margin, pad = get_layout_dims()
+    right_margin = max(0, cols - box_w - margin)
 
     def log_cli(msg: str) -> None:
         clean = msg.strip()
@@ -287,8 +288,9 @@ def execute_task(
             console.print(Align.center(step_box) if cols > 100 else step_box)
             console.print()
         else:
-            txt = f"[{COLOR_FG_MUTED}]{clean}[/{COLOR_FG_MUTED}]"
-            console.print(Align.center(txt) if cols > 100 else txt)
+            from rich.padding import Padding
+            txt = Text(clean, style=COLOR_FG_MUTED)
+            console.print(Padding(txt, (0, right_margin, 0, margin)))
 
     orchestrator = Orchestrator(
         system1,
@@ -348,15 +350,16 @@ def execute_task(
         console.print()
         console.print(Align.center(summary_table) if cols > 100 else summary_table)
 
-    # Turn token & cost footer (centered)
+    # Turn token & cost footer (left-aligned with text box)
     task_usage = usage_tracker.reset_task()
     provider_tag = getattr(system2, "provider_name", "claude")
     cost_str = "Google Auth (Active Session)" if provider_tag == "antigravity" else f"Est. Cost: ${task_usage.cost_usd:.4f}"
     if task_usage.total_tokens > 0:
+        from rich.padding import Padding
         cost_line = f"⚡ Turn tokens: {task_usage.input_tokens:,} in / {task_usage.output_tokens:,} out ({task_usage.total_tokens:,} total)  ·  {cost_str}"
-        token_txt = f"[{COLOR_FG_MUTED}]{cost_line}[/{COLOR_FG_MUTED}]"
+        token_txt = Text.from_markup(f"[{COLOR_FG_MUTED}]{cost_line}[/{COLOR_FG_MUTED}]")
         console.print()
-        console.print(Align.center(token_txt) if cols > 100 else token_txt)
+        console.print(Padding(token_txt, (0, right_margin, 0, margin)))
         console.print()
     else:
         console.print()
@@ -1214,12 +1217,14 @@ def run_interactive(
             print_banner_box(f"Inisialisasi modules.json untuk {repo_dir.name} selesai!\n{len(new_domains)} domain modul arsitektur terdaftar.", level="success", title="Modules Init")
             continue
 
-        # Execute task with centered live braille spinner
+        # Execute task with live braille spinner aligned with text box
         cols, rows, box_w, margin, pad = get_layout_dims()
+        right_margin = max(0, cols - box_w - margin)
+        from rich.padding import Padding
         if not session:
-            prompt_line = f"[{COLOR_FG_SECONDARY}]{SYM_USER}[/{COLOR_FG_SECONDARY}] [bold {COLOR_FG_PRIMARY}]{prompt}[/bold {COLOR_FG_PRIMARY}]"
+            prompt_line = Text.from_markup(f"[{COLOR_FG_SECONDARY}]{SYM_USER}[/{COLOR_FG_SECONDARY}] [bold {COLOR_FG_PRIMARY}]{prompt}[/bold {COLOR_FG_PRIMARY}]")
             console.print()
-            console.print(Align.center(prompt_line) if cols > 100 else prompt_line)
+            console.print(Padding(prompt_line, (0, right_margin, 0, margin)))
             console.print()
         else:
             console.print()
@@ -1230,7 +1235,7 @@ def run_interactive(
         from rich.live import Live
         from rich.spinner import Spinner
         spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
-        with Live(Align.center(spin) if cols > 100 else spin, console=console, refresh_per_second=12.5, transient=True):
+        with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
             exit_code = execute_task(
                 task=prompt,
                 repo_dir=repo_dir,
