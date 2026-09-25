@@ -19,8 +19,11 @@ class TestAuthManager(unittest.TestCase):
         # Patch GEMINI_HOME to temporary directory
         self.env_patch = patch.dict(os.environ, {"GEMINI_HOME": str(self.gemini_dir)})
         self.env_patch.start()
+        self.keyring_patch = patch.object(auth_manager, "read_windows_keyring_account", return_value=None)
+        self.keyring_patch.start()
 
     def tearDown(self):
+        self.keyring_patch.stop()
         self.env_patch.stop()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -111,6 +114,23 @@ class TestAuthManager(unittest.TestCase):
             ok, msg = auth_manager.remove_account("user2@example.com")
             self.assertTrue(ok)
             self.assertFalse(user2_dir.exists())
+
+    def test_windows_keyring_sync(self):
+        fake_creds = {
+            "access_token": "keyring_token",
+            "refresh_token": "keyring_refresh",
+            "scope": "openid",
+            "token_type": "Bearer",
+            "id_token": "fake_id_token",
+            "expiry_date": 123456789,
+        }
+        with patch.object(auth_manager, "read_windows_keyring_account", return_value=("keyring_user@example.com", fake_creds)):
+            email = auth_manager.sync_windows_keyring_to_vault()
+            self.assertEqual(email, "keyring_user@example.com")
+            vault_file = self.vault_dir / "keyring_user@example.com" / "oauth_creds.json"
+            self.assertTrue(vault_file.exists())
+            saved = json.loads(vault_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved["access_token"], "keyring_token")
 
 
 if __name__ == "__main__":

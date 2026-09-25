@@ -1345,7 +1345,12 @@ def run_interactive(
                 console.print(Align.center(table) if cols > 100 else table)
                 console.print()
             elif subcmd == "login":
-                print_banner_box("Memulai proses Google OAuth login untuk akun baru...", level="info", title="Google Login")
+                login_msg = (
+                    "Membuka jendela login Antigravity di proses terpisah...\n"
+                    "• Silakan pilih & setujui akun Google baru di browser.\n"
+                    "• Setelah login selesai, jendela akan tertutup otomatis dan akun disimpan ke Vault."
+                )
+                print_banner_box(login_msg, level="info", title="Google Login")
                 success, msg = auth_manager.login_new_account_flow()
                 level = "success" if success else "warning"
                 print_banner_box(msg, level=level, title="Google Auth")
@@ -1358,7 +1363,12 @@ def run_interactive(
                     chosen = select_account_interactive()
                     if chosen:
                         if chosen == "__login_new__":
-                            print_banner_box("Memulai proses Google OAuth login untuk akun baru...", level="info", title="Google Login")
+                            login_msg = (
+                                "Membuka jendela login Antigravity di proses terpisah...\n"
+                                "• Silakan pilih & setujui akun Google baru di browser.\n"
+                                "• Setelah login selesai, jendela akan tertutup otomatis dan akun disimpan ke Vault."
+                            )
+                            print_banner_box(login_msg, level="info", title="Google Login")
                             success, msg = auth_manager.login_new_account_flow()
                             level = "success" if success else "warning"
                             print_banner_box(msg, level=level, title="Google Auth")
