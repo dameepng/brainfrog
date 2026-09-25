@@ -328,6 +328,8 @@ def execute_task(
     pr_risk_ceiling: str = "medium",
     max_retries: int = 3,
     skill: Optional[str] = None,
+    mode: str = "build",
+    plan_context: Optional[str] = None,
 ) -> int:
     """Run a single task through the dual-system orchestrator."""
     from config import get_system1
@@ -358,6 +360,9 @@ def execute_task(
 
     domains = load_module_map(repo_dir, Path(module_map) if module_map else None, task=task)
 
+    if mode == "plan":
+        auto_pr = False
+
     cfg = RunConfig(
         repo_dir=repo_dir,
         task=task,
@@ -368,6 +373,8 @@ def execute_task(
         domains=domains,
         min_domain_confidence=min_domain_confidence,
         skill=skill,
+        mode=mode,
+        plan_context=plan_context,
     )
 
     cols, rows, box_w, margin, pad = get_layout_dims()
@@ -412,7 +419,7 @@ def execute_task(
         print_banner_box(f"Orchestration Error: {e}", level="error")
         return 1
 
-    # Render Diagnosis / Question Answer or Scope Clarification
+    # Render Diagnosis / Question Answer / Plan & PRD or Scope Clarification
     for r in results:
         if r.outcome == "diagnosed" and r.detail:
             ans_panel = Panel(
@@ -427,11 +434,24 @@ def execute_task(
             console.print()
             console.print(Align.center(ans_panel) if cols > 100 else ans_panel)
             console.print()
+        elif r.outcome == "planned" and r.detail:
+            plan_panel = Panel(
+                Markdown(r.detail),
+                title=f"[bold #4EC9B0]📋 Plan & PRD ({chosen_model})[/bold #4EC9B0]",
+                title_align="left",
+                box=box.ROUNDED,
+                border_style="#4EC9B0",
+                padding=(1, 2),
+                width=box_w,
+            )
+            console.print()
+            console.print(Align.center(plan_panel) if cols > 100 else plan_panel)
+            console.print()
         elif r.outcome == "needs_clarification" and r.detail:
             print_banner_box(r.detail, level="warning", title="Scope Clarification")
 
     # Render Task Summary Table only for multi-step / code planning tasks
-    is_question_turn = len(results) == 1 and results[0].outcome in ("diagnosed", "needs_clarification")
+    is_question_turn = len(results) == 1 and results[0].outcome in ("diagnosed", "needs_clarification", "planned")
     if not is_question_turn:
         summary_table = Table(
             title=" Task Summary ",
@@ -484,6 +504,9 @@ except Exception:
 
 SLASH_COMMAND_COMPLETIONS = [
     ("/help", "Show help and command list"),
+    ("/plan", "Switch to Plan mode (read-only exploration & PRD planning)"),
+    ("/build", "Switch to Build mode with optional last plan context"),
+    ("/mode", "Show or toggle active mode (plan | build)"),
     ("/undo", "Revert last change cleanly via Git"),
     ("/diff", "View colored git diff of recent changes"),
     ("/cost", "View session token usage & metrics"),
@@ -719,6 +742,7 @@ def run_interactive(
     pr_risk_ceiling: str = "medium",
     max_retries: int = 3,
     initial_skill: Optional[str] = None,
+    initial_mode: str = "build",
 ) -> None:
     """Full-featured interactive TUI session."""
     from modules import load_module_map
@@ -735,6 +759,8 @@ def run_interactive(
         default_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
     active_model = model or claude_model or default_model
     active_skill: Optional[str] = initial_skill
+    active_mode: str = initial_mode
+    active_plan_context: Optional[str] = None
 
     app_state = {"status": "Ready", "icon": "●"}
 
@@ -746,13 +772,24 @@ def run_interactive(
         """Top border for composer box — mathematically aligned with VSplit."""
         cols, rows, box_w, margin, pad = get_layout_dims()
         bar_w = box_w - 2
-        return [("class:input-border", f"{pad}╭{'─' * bar_w}╮")]
+        mode_badge = f" [PLAN] " if active_mode == "plan" else f" [BUILD] "
+        left_line = "──"
+        right_len = max(1, bar_w - len(left_line) - len(mode_badge))
+        right_line = "─" * right_len
+        style_name = "class:mode-plan" if active_mode == "plan" else "class:mode-build"
+        border_style = "class:input-border-plan" if active_mode == "plan" else "class:input-border"
+        return [
+            (border_style, f"{pad}╭{left_line}"),
+            (style_name, mode_badge),
+            (border_style, f"{right_line}╮"),
+        ]
 
     def get_prompt_bottom_border():
         """Bottom border attached directly under input buffer."""
         cols, rows, box_w, margin, pad = get_layout_dims()
         bar_w = box_w - 2
-        return [("class:input-border", f"{pad}╰{'─' * bar_w}╯")]
+        border_style = "class:input-border-plan" if active_mode == "plan" else "class:input-border"
+        return [(border_style, f"{pad}╰{'─' * bar_w}╯")]
 
     # Initialize prompt_toolkit session with autocomplete & history
     session = None
@@ -772,6 +809,11 @@ def run_interactive(
             "toolbar-id": f"{COLOR_FG_PRIMARY} bold bg:{COLOR_BG_BASE}",
             "toolbar-dim": f"{COLOR_FG_MUTED} bg:{COLOR_BG_BASE}",
             "toolbar-sep": f"#2a2a2a bg:{COLOR_BG_BASE}",
+
+            # Mode indicators & borders
+            "mode-plan": "bg:#173b37 #4EC9B0 bold",
+            "mode-build": f"bg:#1f3326 {COLOR_ACCENT} bold",
+            "input-border-plan": "#4EC9B0",
 
             # Input box borders
             "input-border": f"{COLOR_ACCENT}",
@@ -816,10 +858,17 @@ def run_interactive(
 
         @kb.add("tab")
         def _tab_handler(event):
+            nonlocal active_mode
             b = event.current_buffer
             if not b.text.strip():
-                b.text = "/models"
-                b.validate_and_handle()
+                # Toggle between plan and build modes
+                active_mode = "build" if active_mode == "plan" else "plan"
+                # Show brief mode indicator without consuming the prompt
+                mode_label = "PLAN" if active_mode == "plan" else "BUILD"
+                mode_color = "#4EC9B0" if active_mode == "plan" else COLOR_ACCENT
+                console.print(
+                    f"  [{mode_color}]⟳ Mode beralih ke [{mode_color} bold]{mode_label}[/{mode_color} bold][/{mode_color}]"
+                )
             elif b.complete_state:
                 b.complete_next()
             else:
@@ -929,16 +978,19 @@ def run_interactive(
         # Divider line never wider than cols - 1 to prevent auto-wrap
         divider = f"{'─' * max(1, cols - 1)}\n"
 
-        # Model display name — truncate for narrow terminals
+        # Model display name — with mode indicator
         model_parts = active_model.split("-")
+        mode_prefix = f"[{active_mode.upper()}] "
         if cols >= 90:
-            model_disp = active_model
+            model_disp = f"{mode_prefix}{active_model}"
         elif cols >= 60:
-            model_disp = "-".join(model_parts[:3]) if len(model_parts) >= 3 else active_model
+            short_m = "-".join(model_parts[:3]) if len(model_parts) >= 3 else active_model
+            model_disp = f"{mode_prefix}{short_m}"
         elif cols >= 40:
-            model_disp = "-".join(model_parts[:2]) if len(model_parts) >= 2 else active_model
+            short_m = "-".join(model_parts[:2]) if len(model_parts) >= 2 else active_model
+            model_disp = f"{mode_prefix}{short_m}"
         else:
-            model_disp = model_parts[0] if model_parts else active_model
+            model_disp = f"{mode_prefix}{model_parts[0]}" if model_parts else f"{mode_prefix}{active_model}"
 
         repo_max = max(4, cols // 8)
         repo_disp = (repo_dir.name[:repo_max] + "…") if len(repo_dir.name) > repo_max + 1 else repo_dir.name
@@ -964,7 +1016,7 @@ def run_interactive(
             ]
         else:
             # Standard & Wide (>=60 cols): 2-line status bar
-            left_hints = "  tab models    ctrl+p help    @ file"
+            left_hints = "  tab mode    ctrl+p help    @ file    /model ai"
             right_v = f"v{CLI_VERSION}  "
             gap = max(1, cols - len(left_hints) - len(right_v) - 1)
             line2 = f"{left_hints}{' ' * gap}{right_v}"
@@ -1051,19 +1103,25 @@ def run_interactive(
             model_disp = "-".join(model_parts[:2]) if len(model_parts) >= 2 else active_model
         else:
             model_disp = active_model
+
+        mode_color = "#4EC9B0" if active_mode == "plan" else COLOR_ACCENT
+        mode_badge = f"[bold {mode_color}][{active_mode.upper()}][/bold {mode_color}]"
+
         if cols >= 60:
             console.print(
                 f"{pad}[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]"
+                f"  {mode_badge}"
                 f"  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{model_disp}[/{COLOR_FG_SECONDARY}]"
                 f"  [#333333]·[/#333333]  [{COLOR_FG_MUTED}]{repo_dir.name}[/{COLOR_FG_MUTED}]"
             )
         elif cols >= 40:
             console.print(
                 f"{pad}[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]"
+                f"  {mode_badge}"
                 f"  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{model_disp}[/{COLOR_FG_SECONDARY}]"
             )
         else:
-            console.print(f"[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold]BrainFrog[/bold]")
+            console.print(f"[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold]BrainFrog[/bold] {mode_badge}")
         console.print()
 
     def show_help() -> None:
@@ -1085,6 +1143,9 @@ def run_interactive(
             ("Ctrl+P", "Buka bantuan perintah ini", "Shortcut"),
             ("@filename", "Pin konteks file dengan popup pelengkapan otomatis", "Context"),
             ("!command", "Jalankan perintah shell terminal langsung di sesi REPL", "Shell"),
+            ("/plan [task]", "Beralih ke mode Plan (eksplorasi codebase, read-only, PRD)", "Mode"),
+            ("/build [task]", "Beralih ke mode Build (eksekusi rencana terakhir & pengujian)", "Mode"),
+            ("/mode [plan|build]", "Lihat atau ganti mode sesi (Plan | Build)", "Mode"),
             ("/models", "Pilih model AI aktif dari menu interaktif", "AI Model"),
             ("/provider", "Ganti provider AI (1: Antigravity Google Auth, 2: Claude)", "Provider"),
             ("/undo", "Batalkan perubahan kode terakhir secara bersih via Git", "Safety"),
@@ -1147,6 +1208,18 @@ def run_interactive(
         if prompt.startswith("!") or prompt.startswith("$"):
             cmd = prompt[1:].strip()
             if cmd:
+                if active_mode == "plan":
+                    from plans import is_safe_readonly_command
+                    safe, reason = is_safe_readonly_command(cmd)
+                    if not safe:
+                        print_banner_box(
+                            f"Perintah shell ditolak dalam mode Plan:\n{reason}\n\n"
+                            "Dalam mode Plan, hanya perintah inspeksi read-only yang diizinkan (misal: !git status, !dir, !cat).\n"
+                            "Gunakan `/build` untuk beralih ke mode Build guna menjalankan perintah yang mengubah state.",
+                            level="warning",
+                            title="Plan Mode Security",
+                        )
+                        continue
                 cols, rows, box_w, margin, pad = get_layout_dims()
                 console.print(f"\n{pad}[{COLOR_FG_MUTED}]Menjalankan shell:[/{COLOR_FG_MUTED}] [bold {COLOR_INFO}]{cmd}[/bold {COLOR_INFO}]\n")
                 try:
@@ -1170,10 +1243,189 @@ def run_interactive(
             cols, rows = shutil.get_terminal_size(fallback=(95, 35))
             print_splash(cols, rows)
             continue
+        elif lower.startswith("/mode"):
+            parts = prompt.split(maxsplit=1)
+            if len(parts) > 1:
+                target_mode = parts[1].strip().lower()
+                if target_mode in ("plan", "build"):
+                    active_mode = target_mode
+                    if active_mode == "plan":
+                        print_banner_box(
+                            "Mode sesi beralih ke: [bold #4EC9B0]PLAN[/bold #4EC9B0]\n\n"
+                            "• Eksplorasi codebase, tanya jawab, & PRD: [bold #33D17A]Diizinkan[/bold #33D17A]\n"
+                            "• Menulis dokumen rencana (.brainfrog/plans/): [bold #33D17A]Diizinkan[/bold #33D17A]\n"
+                            "• Edit kode sumber, shell mutatif, git commit/PR: [bold #FF5555]Ditolak[/bold #FF5555]",
+                            level="info",
+                            title="Session Mode: PLAN",
+                        )
+                    else:
+                        from plans import get_latest_plan, format_plan_handoff, check_plan_staleness
+                        lp = get_latest_plan(repo_dir)
+                        if lp:
+                            active_plan_context = format_plan_handoff(lp, repo_dir)
+                            stale, stale_reasons = check_plan_staleness(repo_dir, lp)
+                            if stale:
+                                print_banner_box(
+                                    f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
+                                    f"Rencana terakhir dimuat: [bold]{lp.title}[/bold] (.brainfrog/plans/{lp.filename})\n\n"
+                                    f"[bold #F6D32D]⚠️ Peringatan Perubahan Codebase (Stale Plan):[/bold #F6D32D]\n" +
+                                    "\n".join([f"  • {r}" for r in stale_reasons]) +
+                                    "\n\nAgent akan memeriksa ulang file terkait sebelum mengeksekusi.",
+                                    level="warning",
+                                    title="Session Mode: BUILD (Stale Plan)",
+                                )
+                            else:
+                                print_banner_box(
+                                    f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
+                                    f"Rencana terakhir dimuat: [bold]{lp.title}[/bold] (.brainfrog/plans/{lp.filename})\n"
+                                    "Konteks rencana akan digunakan untuk implementasi kode.",
+                                    level="success",
+                                    title="Session Mode: BUILD",
+                                )
+                        else:
+                            active_plan_context = None
+                            print_banner_box(
+                                f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
+                                "Tidak ada rencana tersimpan di .brainfrog/plans/. Eksekusi langsung aktif.",
+                                level="info",
+                                title="Session Mode: BUILD",
+                            )
+                else:
+                    print_banner_box(f"Mode tidak dikenal: '{parts[1]}'. Pilihan: `/mode plan` atau `/mode build`.", level="error", title="Mode Error")
+            else:
+                desc = (
+                    "Eksplorasi codebase, tanya jawab, pembuatan PRD dan rencana implementasi.\n"
+                    "Perubahan source code dan shell mutatif dinonaktifkan."
+                    if active_mode == "plan"
+                    else
+                    "Eksekusi implementasi kode, pengujian otomatis, dan pembuatan commit/PR."
+                )
+                print_banner_box(
+                    f"Mode sesi saat ini: [bold {COLOR_ACCENT}]{active_mode.upper()}[/bold {COLOR_ACCENT}]\n{desc}\n\n"
+                    "Gunakan `/plan` untuk beralih ke Plan atau `/build` untuk beralih ke Build.",
+                    level="info",
+                    title="Session Mode",
+                )
+            continue
+        elif lower.startswith("/plan"):
+            parts = prompt.split(maxsplit=1)
+            active_mode = "plan"
+            if len(parts) > 1:
+                sub_task = parts[1].strip()
+                cols, rows, box_w, margin, pad = get_layout_dims()
+                right_margin = max(0, cols - box_w - margin)
+                from rich.padding import Padding
+                from rich.live import Live
+                from rich.spinner import Spinner
+                spin = Spinner("dots", text=f" [bold #4EC9B0]Mengeksplorasi codebase & menyusun PRD...[/bold #4EC9B0]", style="#4EC9B0")
+                with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
+                    execute_task(
+                        task=sub_task,
+                        repo_dir=repo_dir,
+                        backend=active_backend,
+                        model=active_model,
+                        provider=active_provider,
+                        test_cmd=active_test_cmd,
+                        module_map=module_map,
+                        min_domain_confidence=min_domain_confidence,
+                        auto_pr=auto_pr,
+                        pr_risk_ceiling=pr_risk_ceiling,
+                        max_retries=max_retries,
+                        skill=active_skill,
+                        mode="plan",
+                    )
+            else:
+                print_banner_box(
+                    "Mode sesi beralih ke: [bold #4EC9B0]PLAN[/bold #4EC9B0]\n\n"
+                    "• Eksplorasi codebase, tanya jawab, & penyusunan PRD: [bold #33D17A]Diizinkan[/bold #33D17A]\n"
+                    "• Penulisan dokumen rencana dalam .brainfrog/plans/: [bold #33D17A]Diizinkan[/bold #33D17A]\n"
+                    "• Modifikasi kode sumber, shell mutatif, git commit/PR: [bold #FF5555]Ditolak[/bold #FF5555]\n\n"
+                    "Ketikkan apa yang ingin dieksplorasi atau direncanakan.",
+                    level="info",
+                    title="Mode: PLAN",
+                )
+            continue
+        elif lower.startswith("/build"):
+            parts = prompt.split(maxsplit=1)
+            active_mode = "build"
+            from plans import get_latest_plan, format_plan_handoff, check_plan_staleness
+            lp = get_latest_plan(repo_dir)
+            is_stale = False
+            stale_reasons = []
+            if lp:
+                active_plan_context = format_plan_handoff(lp, repo_dir)
+                is_stale, stale_reasons = check_plan_staleness(repo_dir, lp)
+            else:
+                active_plan_context = None
+
+            if len(parts) > 1:
+                sub_task = parts[1].strip()
+                if is_stale:
+                    print_banner_box(
+                        f"Rencana terakhir dimuat ([bold]{lp.title}[/bold]), tetapi repository telah berubah sejak dibuat:\n" +
+                        "\n".join([f"  • {r}" for r in stale_reasons]) +
+                        "\n\nAgent akan memeriksa ulang file terkait sebelum mengeksekusi.",
+                        level="warning",
+                        title="Stale Plan Warning",
+                    )
+                cols, rows, box_w, margin, pad = get_layout_dims()
+                right_margin = max(0, cols - box_w - margin)
+                from rich.padding import Padding
+                from rich.live import Live
+                from rich.spinner import Spinner
+                spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas (Build)...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
+                with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
+                    execute_task(
+                        task=sub_task,
+                        repo_dir=repo_dir,
+                        backend=active_backend,
+                        model=active_model,
+                        provider=active_provider,
+                        test_cmd=active_test_cmd,
+                        module_map=module_map,
+                        min_domain_confidence=min_domain_confidence,
+                        auto_pr=auto_pr,
+                        pr_risk_ceiling=pr_risk_ceiling,
+                        max_retries=max_retries,
+                        skill=active_skill,
+                        mode="build",
+                        plan_context=active_plan_context,
+                    )
+            else:
+                if lp:
+                    if is_stale:
+                        print_banner_box(
+                            f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
+                            f"Rencana terakhir dimuat: [bold]{lp.title}[/bold] (.brainfrog/plans/{lp.filename})\n\n"
+                            f"[bold #F6D32D]⚠️ Peringatan Perubahan Codebase:[/bold #F6D32D]\n" +
+                            "\n".join([f"  • {r}" for r in stale_reasons]) +
+                            "\n\nAgent akan memeriksa ulang file terkait sebelum mengeksekusi langkah.",
+                            level="warning",
+                            title="Mode: BUILD (Stale Plan)",
+                        )
+                    else:
+                        print_banner_box(
+                            f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
+                            f"Rencana terakhir dimuat: [bold]{lp.title}[/bold] (.brainfrog/plans/{lp.filename})\n"
+                            "Konteks rencana akan digunakan saat Anda memberikan instruksi implementasi.",
+                            level="success",
+                            title="Mode: BUILD",
+                        )
+                else:
+                    print_banner_box(
+                        f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
+                        "Tidak ada rencana sebelumnya di .brainfrog/plans/. Eksekusi langsung aktif.",
+                        level="info",
+                        title="Mode: BUILD",
+                    )
+            continue
         elif lower == "/status":
             branch = get_git_branch(repo_dir)
             remote_url = get_git_remote_url(repo_dir, "origin") or "none (local only)"
+            mode_color = "#4EC9B0" if active_mode == "plan" else COLOR_ACCENT
+            mode_desc = "Eksplorasi codebase & penyusunan PRD" if active_mode == "plan" else "Eksekusi kode & pengujian"
             status_text = (
+                f"[{COLOR_FG_PRIMARY}]Session Mode:[/{COLOR_FG_PRIMARY}] [bold {mode_color}]{active_mode.upper()}[/bold {mode_color}] ({mode_desc})\n"
                 f"[{COLOR_FG_PRIMARY}]Workspace:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{repo_dir}[/{COLOR_ACCENT}]\n"
                 f"[{COLOR_FG_PRIMARY}]Git Branch:[/{COLOR_FG_PRIMARY}] [{COLOR_INFO}]{branch}[/{COLOR_INFO}]\n"
                 f"[{COLOR_FG_PRIMARY}]Git Remote:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{remote_url}[/{COLOR_ACCENT}]\n"
@@ -1214,6 +1466,14 @@ def run_interactive(
                     ensure_git_remote(repo_dir)
             continue
         elif lower == "/undo":
+            if active_mode == "plan":
+                print_banner_box(
+                    "Perintah `/undo` ditolak dalam mode Plan karena memodifikasi state repositori.\n"
+                    "Beralihlah ke mode Build (`/build`) jika ingin membatalkan perubahan kode.",
+                    level="warning",
+                    title="Plan Mode Safety",
+                )
+                continue
             # 1. Check uncommitted changes first
             status = subprocess.run(["git", "status", "--porcelain"], cwd=repo_dir, capture_output=True, text=True).stdout.strip()
             if status:
@@ -1441,6 +1701,14 @@ def run_interactive(
             console.print()
             continue
         elif lower.startswith("/init"):
+            if active_mode == "plan":
+                print_banner_box(
+                    "Perintah `/init` ditolak dalam mode Plan karena membuat/mengubah berkas modules.json.\n"
+                    "Beralihlah ke mode Build (`/build`) jika ingin menginisialisasi modul arsitektur.",
+                    level="warning",
+                    title="Plan Mode Safety",
+                )
+                continue
             from modules import auto_generate_modules_json
             parts = prompt.split(maxsplit=1)
             stack_arg = parts[1].strip().lower() if len(parts) > 1 else None
@@ -1467,7 +1735,9 @@ def run_interactive(
 
         from rich.live import Live
         from rich.spinner import Spinner
-        spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
+        spinner_style = "#4EC9B0" if active_mode == "plan" else COLOR_ACCENT
+        spinner_text = "Mengeksplorasi codebase & menyusun PRD..." if active_mode == "plan" else "Mengeksekusi rencana tugas..."
+        spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]{spinner_text}[/bold {COLOR_FG_PRIMARY}]", style=spinner_style)
         with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
             exit_code = execute_task(
                 task=prompt,
@@ -1482,6 +1752,8 @@ def run_interactive(
                 pr_risk_ceiling=pr_risk_ceiling,
                 max_retries=max_retries,
                 skill=active_skill,
+                mode=active_mode,
+                plan_context=active_plan_context if active_mode == "build" else None,
             )
         if exit_code == 0:
             app_state["status"] = "Done"
@@ -1507,6 +1779,7 @@ def main() -> int:
     p.add_argument("-m", "--model", "--claude-model", dest="model", default=None, help="Model name (e.g. gemini-3.8-flash-high, claude-sonnet-5)")
     p.add_argument("--provider", choices=["claude", "antigravity", "gemini", "auto"], default=None, help="System 2 AI provider (antigravity: Google Login, claude: Anthropic API)")
     p.add_argument("--skill", default=None, help="Explicitly activate a modular skill (e.g. --skill audit-anti-slop)")
+    p.add_argument("--mode", choices=["build", "plan"], default="build", help="Session mode: build (default) or plan")
     p.add_argument("--auto-pr", action="store_true", help="Push branch and open GitHub PR when approved")
     p.add_argument("--pr-risk-ceiling", choices=["low", "medium", "high"], default="medium")
     p.add_argument("--max-retries", type=int, default=3)
@@ -1551,6 +1824,7 @@ def main() -> int:
             pr_risk_ceiling=args.pr_risk_ceiling,
             max_retries=args.max_retries,
             skill=args.skill,
+            mode=args.mode,
         )
     else:
         run_interactive(
@@ -1565,6 +1839,7 @@ def main() -> int:
             pr_risk_ceiling=args.pr_risk_ceiling,
             max_retries=args.max_retries,
             initial_skill=args.skill,
+            initial_mode=args.mode,
         )
         return 0
 
