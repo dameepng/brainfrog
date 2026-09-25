@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -65,16 +66,58 @@ usage_tracker = UsageTracker()
 def _extract_json(text: str) -> Dict[str, Any]:
     """Pull the first valid {...} JSON object out of a model response.
 
-    Uses json.JSONDecoder.raw_decode so it correctly handles nested braces
-    inside string values (e.g. CSS rules, JS objects inside HTML content).
-    Falls back to stripping markdown fences first if the response is wrapped.
+    Handles free-form thought processes, markdown prose preceding JSON,
+    markdown fences (```json ... ```), nested braces, and trailing commas.
     """
+    decoder = json.JSONDecoder()
     text = text.strip()
 
-    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    # 1. Check for markdown fenced json blocks first (e.g. ```json { ... } ```)
+    fence_pattern = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.DOTALL)
+    for match in fence_pattern.finditer(text):
+        content = match.group(1).strip()
+        try:
+            obj, _ = decoder.raw_decode(content)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            # Try cleaning trailing commas
+            try:
+                cleaned = re.sub(r",\s*([\]\}])", r"\1", content)
+                obj = json.loads(cleaned)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+
+    # 2. Iterate through all '{' occurrences and try decoding
+    candidates = []
+    idx = 0
+    while True:
+        pos = text.find("{", idx)
+        if pos == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, pos)
+            if isinstance(obj, dict):
+                candidates.append((pos, end, obj))
+                idx = end
+            else:
+                idx = pos + 1
+        except json.JSONDecodeError:
+            idx = pos + 1
+
+    if candidates:
+        expected_keys = {"files", "steps", "plan", "title", "body", "answer", "tasks"}
+        for _, _, obj in candidates:
+            if any(k in obj for k in expected_keys):
+                return obj
+        candidates.sort(key=lambda c: len(c[2]), reverse=True)
+        return candidates[0][2]
+
+    # 3. Last fallback: try stripped fences as in original implementation
     if text.startswith("```"):
         lines = text.splitlines()
-        # Drop first line (```json or ```) and last line (```)
         inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
         if inner and inner[-1].strip() == "```":
             inner = inner[:-1]
@@ -84,7 +127,6 @@ def _extract_json(text: str) -> Dict[str, Any]:
     if start == -1:
         raise ValueError(f"No JSON object found in model output:\n{text[:500]}")
 
-    decoder = json.JSONDecoder()
     try:
         obj, _ = decoder.raw_decode(text, start)
         return obj
