@@ -131,7 +131,11 @@ class AntigravitySystem2Client:
 
     # -- 1. planning --------------------------------------------------
     def plan_task(
-        self, task: str, repo_tree: str, pinned_files: Optional[Dict[str, str]] = None
+        self,
+        task: str,
+        repo_tree: str,
+        pinned_files: Optional[Dict[str, str]] = None,
+        plan_context: Optional[str] = None,
     ) -> List[PlanStep]:
         system = (
             "You are a senior software engineer planning a small, safe change. "
@@ -143,6 +147,8 @@ class AntigravitySystem2Client:
             "Keep steps small and independently testable. No prose outside the JSON."
         )
         user_parts = [f"Task:\n{task}\n\nRepository file tree:\n{repo_tree}"]
+        if plan_context:
+            user_parts.append(f"\n[Active Plan Context]\n{plan_context}")
         if pinned_files:
             user_parts.append(
                 f"\nUser explicitly pinned files:\n{json.dumps(pinned_files, indent=2)}"
@@ -150,6 +156,57 @@ class AntigravitySystem2Client:
         raw = self._call(system, "\n".join(user_parts), max_tokens=1500)
         data = _extract_json(raw)
         return [PlanStep(**s) for s in data["steps"]]
+
+    # -- 1b. Plan mode PRD & implementation planning (read-only) -------
+    def plan_and_prd(
+        self,
+        task: str,
+        repo_tree: str,
+        focus_files: Dict[str, str],
+        pinned_files: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Generate a practical PRD and step-by-step implementation plan in Plan mode."""
+        system = (
+            "You are a principal software engineer operating in PLAN mode. "
+            "Your role is architectural exploration, PRD creation, and implementation planning. "
+            "You must NOT generate diffs or edit code in this mode. "
+            "Examine the provided repository files and structure carefully.\n\n"
+            "Quality Guidelines:\n"
+            "- For small, obvious tasks: keep it concise with 1-3 direct steps.\n"
+            "- For large or ambiguous tasks: construct a practical, rigorous PRD.\n"
+            "- Separate inspected codebase FACTS (citing specific files/functions) from your technical ASSUMPTIONS and PROPOSALS.\n"
+            "- Define concrete, testable acceptance criteria.\n"
+            "- Identify risks or trade-offs.\n"
+            "- Ask clarifying questions ONLY if there are material, critical decisions not answered in the repo or prompt.\n\n"
+            "Respond with ONLY a JSON object formatted as:\n"
+            "{\n"
+            '  "title": "Short descriptive title of the change",\n'
+            '  "is_small_task": true,\n'
+            '  "problem": "Problem statement and context",\n'
+            '  "goals": ["Goal 1", "Goal 2"],\n'
+            '  "scope": ["Included item 1"],\n'
+            '  "non_scope": ["Excluded item 1"],\n'
+            '  "codebase_findings": ["Fact 1 (citing file.py:function)", "Fact 2"],\n'
+            '  "assumptions": ["Assumption/Proposal 1"],\n'
+            '  "clarifying_questions": [],\n'
+            '  "acceptance_criteria": ["Testable criterion 1", "Testable criterion 2"],\n'
+            '  "steps": [{"id": "1", "description": "Step 1", "files": ["path/a.py"]}],\n'
+            '  "relevant_files": ["path/a.py"],\n'
+            '  "markdown_doc": "# Full formatted PRD and Plan in Markdown\\n\\n..."\n'
+            "}\n"
+            "No prose outside the JSON."
+        )
+        user_parts = [f"Task:\n{task}"]
+        if repo_tree:
+            user_parts.append(f"Repository file tree:\n{repo_tree}")
+        if focus_files:
+            user_parts.append(f"Relevant inspected files:\n{json.dumps(focus_files, indent=2)}")
+        if pinned_files:
+            user_parts.append(f"User pinned files:\n{json.dumps(pinned_files, indent=2)}")
+
+        raw = self._call(system, "\n\n".join(user_parts), max_tokens=4000)
+        data = _extract_json(raw)
+        return data
 
     # -- 2. writing code ------------------------------------------------
     def write_code(

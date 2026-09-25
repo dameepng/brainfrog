@@ -47,6 +47,8 @@ class RunConfig:
     domains: Dict[str, Domain] = field(default_factory=dict)
     min_domain_confidence: float = 0.55
     skill: Optional[str] = None
+    mode: str = "build"
+    plan_context: Optional[str] = None
 
 
 @dataclass
@@ -186,7 +188,11 @@ def _read_files(repo_dir: Path, paths: List[str]) -> Dict[str, str]:
     return out
 
 
-def _write_files(repo_dir: Path, files: Dict[str, str]) -> None:
+def _write_files(repo_dir: Path, files: Dict[str, str], mode: str = "build") -> None:
+    if mode == "plan":
+        raise PermissionError(
+            "Modifikasi berkas source code dilarang dalam mode Plan. Gunakan mode Build untuk melakukan perubahan."
+        )
     for rel, content in files.items():
         norm = _normalize_rel_path(repo_dir, rel)
         f = repo_dir / norm
@@ -293,14 +299,31 @@ class Orchestrator:
         elif base_rules:
             self.s2.guidelines = base_rules
         self.pinned_files = extract_mentioned_files(self.cfg.task, self.cfg.repo_dir)
+        if self.cfg.mode == "plan":
+            self.cfg.auto_pr = False
 
     def _log(self, msg: str) -> None:
         if self.log_fn:
-            self.log_fn(msg)
+            try:
+                self.log_fn(msg)
+            except Exception:
+                try:
+                    clean = msg.encode("ascii", errors="replace").decode("ascii")
+                    self.log_fn(clean)
+                except Exception:
+                    pass
         else:
-            print(msg)
+            try:
+                print(msg)
+            except UnicodeEncodeError:
+                print(msg.encode("ascii", errors="replace").decode("ascii"))
 
     def run(self) -> List[StepResult]:
+        if self.cfg.mode == "plan":
+            self._log("[brainfrog] 🧭 Mode: [bold #4EC9B0]PLAN[/bold #4EC9B0] (Eksplorasi codebase & penyusunan rencana)")
+        else:
+            self._log("[brainfrog] 🔨 Mode: [bold #33D17A]BUILD[/bold #33D17A] (Eksekusi perubahan & pengujian)")
+
         if self.guidelines_files:
             file_names = ", ".join([f.name for f in self.guidelines_files])
             self._log(f"[brainfrog] 🧠 Injected guidelines & rules: [bold #33D17A]{file_names}[/bold #33D17A]")
@@ -344,8 +367,137 @@ class Orchestrator:
             answer = self.s2.diagnose(self.cfg.task, focus_files, domain_label, repo_tree=repo_files)
             return [StepResult(PlanStep("0", "diagnosis", []), "diagnosed", 0, answer)]
 
+        if self.cfg.mode == "plan":
+            # Plan mode: read-only exploration and PRD/plan generation
+            tree = scope.focus_tree or _repo_tree(self.cfg.repo_dir)
+            max_f = 20 if not scope.domain else 40
+            focus_files = _read_files_from_tree(self.cfg.repo_dir, tree, max_files=max_f)
+            for k in list(focus_files.keys()):
+                if len(focus_files[k]) > 4000:
+                    focus_files[k] = focus_files[k][:4000] + "\n... (truncated)"
+            if self.pinned_files:
+                focus_files.update(self.pinned_files)
+            for key_file in (
+                "README.md", "readme.md", "modules.json", "package.json",
+                "pyproject.toml", "index.html", "main.py"
+            ):
+                kf = self.cfg.repo_dir / key_file
+                if kf.exists() and kf.is_file() and key_file not in focus_files:
+                    try:
+                        focus_files[key_file] = kf.read_text(encoding="utf-8", errors="replace")[:3000]
+                    except Exception:
+                        pass
+
+            repo_files = _repo_tree(self.cfg.repo_dir)
+            self._log(f"[system2/{self.s2_tag}] exploring codebase & drafting PRD in Plan mode ...")
+            plan_data = self.s2.plan_and_prd(
+                task=self.cfg.task,
+                repo_tree=repo_files,
+                focus_files=focus_files,
+                pinned_files=self.pinned_files,
+            )
+
+            # Generate filename & save plan doc into .brainfrog/plans/
+            from plans import save_plan_document, compute_file_hash
+            from datetime import datetime
+
+            title = plan_data.get("title", "Rencana Implementasi")
+            slug = re.sub(r"[^a-zA-Z0-9_\-]+", "_", title.lower()).strip("_") or "plan"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            plan_filename = f"{timestamp}_{slug}.md"
+
+            commit_hash = ""
+            git_status = ""
+            try:
+                c_res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.cfg.repo_dir, capture_output=True, text=True)
+                if c_res.returncode == 0:
+                    commit_hash = c_res.stdout.strip()
+                s_res = subprocess.run(["git", "status", "--porcelain"], cwd=self.cfg.repo_dir, capture_output=True, text=True)
+                if s_res.returncode == 0:
+                    git_status = s_res.stdout
+            except Exception:
+                pass
+
+            relevant_files = plan_data.get("relevant_files", [])
+            file_hashes = {}
+            for rf in relevant_files:
+                rf_norm = _normalize_rel_path(self.cfg.repo_dir, rf)
+                rf_path = self.cfg.repo_dir / rf_norm
+                if rf_path.exists() and rf_path.is_file():
+                    file_hashes[rf_norm] = compute_file_hash(rf_path)
+
+            metadata = {
+                "title": title,
+                "goal": plan_data.get("goals", [self.cfg.task])[0] if plan_data.get("goals") else self.cfg.task,
+                "is_small_task": plan_data.get("is_small_task", False),
+                "acceptance_criteria": plan_data.get("acceptance_criteria", []),
+                "assumptions": plan_data.get("assumptions", []),
+                "steps": plan_data.get("steps", []),
+                "relevant_files": relevant_files,
+                "commit_hash": commit_hash,
+                "git_status_snapshot": git_status,
+                "file_hashes": file_hashes,
+                "created_at": datetime.now().isoformat(),
+            }
+
+            doc_content = plan_data.get("markdown_doc", "")
+            if not doc_content:
+                lines = [f"# {title}\n"]
+                if plan_data.get("problem"):
+                    lines.append(f"## Masalah (Problem)\n{plan_data['problem']}\n")
+                if plan_data.get("goals"):
+                    lines.append("## Tujuan (Goals)")
+                    for g in plan_data["goals"]:
+                        lines.append(f"- {g}")
+                    lines.append("")
+                if plan_data.get("codebase_findings"):
+                    lines.append("## Temuan Codebase (Facts)")
+                    for f in plan_data["codebase_findings"]:
+                        lines.append(f"- {f}")
+                    lines.append("")
+                if plan_data.get("assumptions"):
+                    lines.append("## Asumsi & Usulan (Assumptions)")
+                    for a in plan_data["assumptions"]:
+                        lines.append(f"- {a}")
+                    lines.append("")
+                if plan_data.get("acceptance_criteria"):
+                    lines.append("## Kriteria Penerimaan (Acceptance Criteria)")
+                    for ac in plan_data["acceptance_criteria"]:
+                        lines.append(f"- [ ] {ac}")
+                    lines.append("")
+                if plan_data.get("steps"):
+                    lines.append("## Rencana Langkah Implementasi")
+                    for s in plan_data["steps"]:
+                        if isinstance(s, dict):
+                            lines.append(f"### Langkah {s.get('id')}: {s.get('description')}")
+                            if s.get("files"):
+                                lines.append(f"Files: {', '.join(s['files'])}\n")
+                        else:
+                            lines.append(f"- {s}")
+                doc_content = "\n".join(lines)
+
+            saved_path = save_plan_document(self.cfg.repo_dir, plan_filename, doc_content, metadata=metadata)
+            try:
+                rel_saved = str(saved_path.relative_to(self.cfg.repo_dir))
+            except Exception:
+                rel_saved = str(saved_path)
+            self._log(f"[brainfrog] 📋 Plan document saved: [bold #4EC9B0]{rel_saved}[/bold #4EC9B0]")
+
+            clarifying = plan_data.get("clarifying_questions", [])
+            detail_msg = doc_content
+            if clarifying:
+                detail_msg += "\n\n### ❓ Pertanyaan Klarifikasi (Material Decisions):\n" + "\n".join([f"- {q}" for q in clarifying])
+
+            return [StepResult(PlanStep("0", title, relevant_files), "planned", 0, detail_msg)]
+
+        # BUILD mode: planning with plan_context handoff
         self._log(f"[system2/{self.s2_tag}] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
-        steps = self.s2.plan_task(self.cfg.task, scope.focus_tree, pinned_files=self.pinned_files)
+        steps = self.s2.plan_task(
+            self.cfg.task,
+            scope.focus_tree,
+            pinned_files=self.pinned_files,
+            plan_context=self.cfg.plan_context,
+        )
         for s in steps:
             s.files = [_normalize_rel_path(self.cfg.repo_dir, f) for f in s.files]
         self._log(f"[system2/{self.s2_tag}] plan has {len(steps)} step(s)")
@@ -413,12 +565,14 @@ class Orchestrator:
         return ScopeDecision(domain=domain, change_type=change_type, focus_tree=focus_tree)
 
     def _run_step(self, step: PlanStep, sensitive: bool = False) -> StepResult:
+        if self.cfg.mode == "plan":
+            raise PermissionError("Eksekusi langkah modifikasi kode dilarang dalam mode Plan.")
         self._log(f"=== Step {step.id}: {step.description} ===")
         file_contents = _read_files(self.cfg.repo_dir, step.files)
 
         self._log(f"[system2/{self.s2_tag}] writing code ...")
         new_files = self.s2.write_code(step, self.cfg.task, file_contents, pinned_files=self.pinned_files)
-        _write_files(self.cfg.repo_dir, new_files)
+        _write_files(self.cfg.repo_dir, new_files, mode=self.cfg.mode)
 
         retries = 0
         while True:
@@ -448,7 +602,7 @@ class Orchestrator:
                 self._log(f"[system2/{self.s2_tag}] reviewing failure, attempt {retries}/{self.cfg.max_retries} ...")
                 current = _read_files(self.cfg.repo_dir, list(new_files.keys()) or step.files)
                 fixed = self.s2.review_and_fix(self.cfg.task, step, current, output)
-                _write_files(self.cfg.repo_dir, fixed)
+                _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
                 new_files.update(fixed)
                 continue
 
@@ -463,6 +617,8 @@ class Orchestrator:
             )
 
     def _finalize_pr(self, step: PlanStep, retries: int, test_output: str, sensitive: bool = False) -> StepResult:
+        if self.cfg.mode == "plan":
+            raise PermissionError("Pembuatan commit atau pull request dilarang dalam mode Plan.")
         stat = _diff_stat(self.cfg.repo_dir)
         pr_state = {"task": self.cfg.task, "test_passed": True, "sensitive_domain": sensitive, **stat}
         risk_answers = self.s1.decide(
@@ -535,6 +691,8 @@ class Orchestrator:
         return StepResult(step, "opened_pr" if auto_ok else "drafted_pr", retries, detail)
 
     def _open_pr(self, step: PlanStep, pr_copy: Dict[str, str]) -> None:
+        if self.cfg.mode == "plan":
+            raise PermissionError("Pembuatan pull request dilarang dalam mode Plan.")
         branch = f"{self.cfg.branch_prefix}{step.id}"
         _run(["git", "checkout", "-b", branch], self.cfg.repo_dir)
         _run(["git", "add", "-A"], self.cfg.repo_dir)
