@@ -307,6 +307,10 @@ def detect_default_test_cmd(repo_dir: Path) -> str:
         return "cmd /c gradlew.bat test" if os.name == "nt" else "./gradlew test"
     if (repo_dir / "package.json").exists():
         return "npm test"
+    for test_folder in ("test", "tests"):
+        t_dir = repo_dir / test_folder
+        if t_dir.exists() and any(t_dir.glob("*.test.js")):
+            return f"node --test {test_folder}/"
     if (repo_dir / "pytest.ini").exists() or (repo_dir / "tests").exists():
         return "pytest -q"
     return "cmd /c exit 0" if os.name == "nt" else "true"
@@ -1594,7 +1598,12 @@ def run_interactive(
         elif lower.startswith("/remote"):
             parts = prompt.split(maxsplit=1)
             if len(parts) > 1:
-                new_url = parts[1].strip()
+                raw_url = parts[1].strip()
+                new_url = raw_url
+                for w in raw_url.split():
+                    if w.startswith("http://") or w.startswith("https://") or w.startswith("git@"):
+                        new_url = w
+                        break
                 try:
                     check_proc = subprocess.run(["git", "remote"], cwd=repo_dir, capture_output=True, text=True)
                     if "origin" in check_proc.stdout.split():
