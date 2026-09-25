@@ -532,6 +532,7 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/skills", "List all available modular skills"),
     ("/skill", "Activate modular skill (e.g. /skill audit-anti-slop)"),
     ("/domains", "List detected domain modules and paths"),
+    ("/whoami", "Show active Google account & provider info"),
     ("/clear", "Clear terminal screen"),
     ("/exit", "Exit BrainFrog session"),
 ]
@@ -726,10 +727,26 @@ def select_model_interactive(provider: str, current_model: str) -> Optional[str]
     return _picker(f"Models  ·  {provider}", items, current_model, id_col="Model")
 
 
+def get_active_google_account() -> Optional[str]:
+    """Return the currently logged-in Google email for Antigravity, if any."""
+    try:
+        acct_path = Path.home() / ".gemini" / "google_accounts.json"
+        if acct_path.exists():
+            data = json.loads(acct_path.read_text(encoding="utf-8"))
+            active = data.get("active")
+            if isinstance(active, str) and active.strip():
+                return active.strip()
+    except Exception:
+        pass
+    return None
+
+
 def select_provider_interactive(current_provider: str) -> Optional[str]:
     """Interactive provider picker — erases itself after selection."""
+    google_acct = get_active_google_account()
+    google_desc = f"Google Auth ({google_acct}) — no API key, free quota" if google_acct else "Google Auth Login — no API key, free quota"
     items = [
-        ("antigravity", "antigravity", "Google Auth Login — no API key, free quota"),
+        ("antigravity", "antigravity", google_desc),
         ("claude",      "claude",      "Anthropic API Key — pay per token"),
     ]
     return _picker("Providers", items, current_provider, id_col="Provider")
@@ -1160,10 +1177,11 @@ def run_interactive(
         table.add_column("Kategori", style=COLOR_FG_SECONDARY)
 
         commands = [
-            ("Tab", "Ganti model (saat input kosong) / lengkapi teks", "Shortcut"),
+            ("Tab", "Ganti mode sesi Plan / Build (saat input kosong)", "Shortcut"),
             ("Ctrl+P", "Buka bantuan perintah ini", "Shortcut"),
             ("@filename", "Pin konteks file dengan popup pelengkapan otomatis", "Context"),
             ("!command", "Jalankan perintah shell terminal langsung di sesi REPL", "Shell"),
+            ("/whoami", "Tampilkan akun Google aktif & info sesi BrainFrog", "Identity"),
             ("/plan [task]", "Beralih ke mode Plan (eksplorasi codebase, read-only, PRD)", "Mode"),
             ("/build [task]", "Beralih ke mode Build (eksekusi rencana terakhir & pengujian)", "Mode"),
             ("/mode [plan|build]", "Lihat atau ganti mode sesi (Plan | Build)", "Mode"),
@@ -1263,6 +1281,21 @@ def run_interactive(
             is_first_turn[0] = True
             cols, rows = shutil.get_terminal_size(fallback=(95, 35))
             print_splash(cols, rows)
+            continue
+        elif lower in ("/whoami", "/account", "/auth"):
+            google_acct = get_active_google_account()
+            acct_display = f"[bold {COLOR_ACCENT}]{google_acct}[/bold {COLOR_ACCENT}]" if google_acct else "[italic dim]Belum terdeteksi / tidak login[/italic dim]"
+            prov_display = f"[bold {COLOR_FG_PRIMARY}]{active_provider}[/bold {COLOR_FG_PRIMARY}]"
+            model_display = f"[bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}]"
+            mode_display = f"[bold #4EC9B0]PLAN[/bold #4EC9B0]" if active_mode == "plan" else f"[bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]"
+            info_msg = (
+                f"• Akun Google (Antigravity): {acct_display}\n"
+                f"• Provider AI aktif: {prov_display}\n"
+                f"• Model AI aktif: {model_display}\n"
+                f"• Mode Sesi: {mode_display}\n"
+                f"• Repositori aktif: `{repo_dir}`"
+            )
+            print_banner_box(info_msg, level="info", title="Identitas Akun & Sesi")
             continue
         elif lower.startswith("/mode"):
             parts = prompt.split(maxsplit=1)
