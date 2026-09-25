@@ -630,17 +630,14 @@ def run_interactive(
     app_state = {"status": "Ready", "icon": "●"}
 
     def get_prompt_tokens():
-        """Top border and input prefix for composer box (Section 5.2)."""
+        """Input prompt symbol for composer box."""
+        return [("class:accent", f"{SYM_PROMPT} ")]
+
+    def get_prompt_top_border():
+        """Top border for composer box (Section 5.2)."""
         cols, rows, box_w, margin, pad = get_layout_dims()
         bar = "─" * (box_w - 2)
-
-        top_border = f"{pad}╭{bar}╮\n"
-        prefix = f"{pad}│  "
-        return [
-            ("class:input-border", top_border),
-            ("class:input-border", prefix),
-            ("class:accent", f"{SYM_PROMPT} "),
-        ]
+        return [("class:input-border", f"{pad}╭{bar}╮")]
 
     def get_prompt_bottom_border():
         """Bottom border attached directly under input buffer for a contiguous composer box."""
@@ -714,19 +711,47 @@ def run_interactive(
             complete_while_typing=True,
         )
 
-        # Attach contiguous bottom border directly under the prompt input buffer
+        # Structure composer into a bounded, centered box with full borders and pinned footer
         try:
-            from prompt_toolkit.layout.containers import Window
+            from prompt_toolkit.layout.containers import Window, ConditionalContainer, VSplit
             from prompt_toolkit.layout.controls import FormattedTextControl
-            from prompt_toolkit.filters import Always
+            from prompt_toolkit.filters import Always, is_done
 
-            float_cont = session.app.layout.container.children[0].alternative_content
+            root = session.app.layout.container
+            float_cont = root.children[0].alternative_content
             hsplit = float_cont.content
+
             if len(hsplit.children) > 1 and hasattr(hsplit.children[1], "content"):
-                hsplit.children[1].content.dont_extend_height = Always()
-            hsplit.children.append(
-                Window(FormattedTextControl(get_prompt_bottom_border), height=1, dont_extend_height=True)
-            )
+                default_buf_win = hsplit.children[1].content
+                default_buf_win.dont_extend_height = Always()
+                default_buf_win.width = lambda: get_layout_dims()[2] - 4
+
+                left_margin_win = Window(width=lambda: get_layout_dims()[3], dont_extend_width=True)
+                left_border_win = Window(char="│", width=1, style="class:input-border", dont_extend_width=True)
+                inner_pad_left = Window(width=1, dont_extend_width=True)
+                inner_pad_right = Window(width=1, dont_extend_width=True)
+                right_border_win = Window(char="│", width=1, style="class:input-border", dont_extend_width=True)
+                right_margin_win = Window()
+
+                vsplit = VSplit([
+                    left_margin_win,
+                    left_border_win,
+                    inner_pad_left,
+                    default_buf_win,
+                    inner_pad_right,
+                    right_border_win,
+                    right_margin_win,
+                ])
+                hsplit.children[1].content = vsplit
+
+            top_border = Window(FormattedTextControl(get_prompt_top_border), height=1, dont_extend_height=True)
+            bottom_border = Window(FormattedTextControl(get_prompt_bottom_border), height=1, dont_extend_height=True)
+            hsplit.children[0] = top_border
+            hsplit.children.append(bottom_border)
+
+            # Insert expanding vertical spacer before bottom_toolbar so toolbar is pinned to terminal footer
+            spacer = ConditionalContainer(Window(dont_extend_height=False), filter=~is_done)
+            root.children.insert(-1, spacer)
         except Exception:
             pass
 
@@ -889,11 +914,13 @@ def run_interactive(
                 prompt = session.prompt(
                     get_prompt_tokens,
                     placeholder="Tanya BrainFrog…",
+                    prompt_continuation=lambda w, l, c: [("class:accent", "  ")],
                     bottom_toolbar=get_chat_toolbar,
                     refresh_interval=0,
                 ).strip()
             else:
-                prompt = console.input(f"  [bold {COLOR_ACCENT}]{SYM_PROMPT} [/bold {COLOR_ACCENT}]").strip()
+                cols, rows, box_w, margin, pad = get_layout_dims()
+                prompt = console.input(f"{pad}[bold {COLOR_ACCENT}]{SYM_PROMPT} [/bold {COLOR_ACCENT}]").strip()
         except (KeyboardInterrupt, EOFError):
             console.print(f"\n  [{COLOR_FG_MUTED}]Sampai jumpa! {SYM_ASSISTANT}[/{COLOR_FG_MUTED}]\n")
             break
