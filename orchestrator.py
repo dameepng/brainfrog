@@ -335,13 +335,26 @@ class Orchestrator:
         scope = self._scope_gate()
 
         if scope.clarify_message:
-            self._log(f"[system1/jev:{self.s1.name}] scope gate: not confident enough, asking the user")
-            return [StepResult(PlanStep("0", "scope clarification", []), "needs_clarification", 0, scope.clarify_message)]
+            # BUILD mode with an active plan context: we already know what to build.
+            # Skip scope clarification and proceed with full repo tree.
+            if self.cfg.mode == "build" and self.cfg.plan_context:
+                self._log("[system1/jev] scope gate: low confidence but plan_context present — skipping clarification")
+                scope = ScopeDecision(
+                    domain=None,
+                    change_type=scope.change_type,
+                    focus_tree=_repo_tree(self.cfg.repo_dir),
+                    clarify_message=None,
+                )
+            else:
+                self._log(f"[system1/jev:{self.s1.name}] scope gate: not confident enough, asking the user")
+                return [StepResult(PlanStep("0", "scope clarification", []), "needs_clarification", 0, scope.clarify_message)]
 
         domain_label = scope.domain.key if scope.domain else "unscoped"
         self._log(f"[system1/jev:{self.s1.name}] scope gate: domain='{domain_label}' change_type='{scope.change_type}'")
 
-        if scope.change_type == "question_only":
+        if scope.change_type == "question_only" and self.cfg.mode != "plan" and not (self.cfg.mode == "build" and self.cfg.plan_context):
+            # question_only in PLAN mode still goes to plan_and_prd below
+            # (so PRD is saved). Only short-circuit to diagnose in BUILD/non-plan.
             tree = scope.focus_tree or _repo_tree(self.cfg.repo_dir)
             max_f = 10 if not scope.domain else 30
             focus_files = _read_files_from_tree(self.cfg.repo_dir, tree, max_files=max_f)
