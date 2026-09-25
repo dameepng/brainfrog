@@ -68,6 +68,11 @@ class AntigravitySystem2Client:
 
     def _call(self, system: str, user: str, max_tokens: int = 4000) -> str:
         full_system = self._apply_guidelines(system)
+        tool_guard = (
+            "IMPORTANT: Do NOT execute any external tools, scripts, or terminal commands. "
+            "You are operating in structured output mode. Respond ONLY with the requested JSON format."
+        )
+        full_system = f"{full_system}\n\n{tool_guard}"
         prompt = (
             f"[SYSTEM INSTRUCTIONS]\n{full_system}\n\n"
             f"[TASK]\n{user}"
@@ -77,6 +82,7 @@ class AntigravitySystem2Client:
             self.bin_path,
             "--model", self.model,
             "--output-format", "json",
+            "--dangerously-skip-permissions",
         ]
 
         # Retry up to 2 times on transient "empty model output" errors

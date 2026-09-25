@@ -343,6 +343,15 @@ def execute_task(
             print_banner_box(f"{repo_dir} is not a git repository.", level="error", title="Git Error")
             return 1
 
+    if mode == "build" and not plan_context:
+        try:
+            from plans import get_latest_plan, format_plan_handoff
+            lp = get_latest_plan(repo_dir)
+            if lp:
+                plan_context = format_plan_handoff(lp, repo_dir)
+        except Exception:
+            pass
+
     active_test_cmd = test_cmd or detect_default_test_cmd(repo_dir)
 
     try:
@@ -761,6 +770,13 @@ def run_interactive(
     active_skill: Optional[str] = initial_skill
     active_mode: str = initial_mode
     active_plan_context: Optional[str] = None
+    if active_mode == "build":
+        try:
+            from plans import get_latest_plan, format_plan_handoff
+            _lp = get_latest_plan(repo_dir)
+            active_plan_context = format_plan_handoff(_lp, repo_dir) if _lp else None
+        except Exception:
+            active_plan_context = None
 
     app_state = {"status": "Ready", "icon": "●"}
 
@@ -1610,6 +1626,13 @@ def run_interactive(
                     active_test_cmd = detect_default_test_cmd(repo_dir)
                     print_banner_box(f"Direktori repositori dipindah ke:\n{repo_dir}", level="success", title="Switch Repo")
                     ensure_git_remote(repo_dir)
+                    if active_mode == "build":
+                        try:
+                            from plans import get_latest_plan, format_plan_handoff
+                            _lp = get_latest_plan(repo_dir)
+                            active_plan_context = format_plan_handoff(_lp, repo_dir) if _lp else None
+                        except Exception:
+                            active_plan_context = None
                 else:
                     print_banner_box(f"Direktori tidak ditemukan:\n{parts[1]}", level="error", title="Repo Error")
             else:

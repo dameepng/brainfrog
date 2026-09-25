@@ -517,6 +517,46 @@ class TestPlanAndBuildModes(unittest.TestCase):
         self.assertIn("/models", cmd_dict)
         self.assertIn("/provider", cmd_dict)
 
+    # -------------------------------------------------------------------------
+    # 11. Build mode executes directly from saved plan
+    # -------------------------------------------------------------------------
+    def test_build_mode_executes_directly_from_saved_plan(self):
+        # Save a plan document into .brainfrog/plans/
+        meta = {
+            "title": "Aplikasi CRUD Todo",
+            "goal": "Membangun aplikasi CRUD Todo",
+            "steps": [
+                {"id": "1", "description": "Create index.html", "files": ["index.html"]},
+                {"id": "2", "description": "Create app.js", "files": ["app.js"]},
+            ],
+            "relevant_files": ["index.html", "app.js"],
+        }
+        save_plan_document(self.repo_dir, "20260925_crud_todo.md", "# Aplikasi CRUD Todo", metadata=meta)
+
+        s1 = MockSystem1()
+        s2 = MockSystem2()
+        # Ensure plan_task is NOT called when executing directly from plan
+        s2.plan_task = MagicMock(side_effect=RuntimeError("plan_task should not be called"))
+
+        cfg = RunConfig(
+            repo_dir=self.repo_dir,
+            task="execute from plans.",
+            test_command=["python", "--version"],
+            mode=MODE_BUILD,
+            plan_context=None,  # Not provided explicitly; must be auto-loaded!
+        )
+        orchestrator = Orchestrator(s1, s2, cfg)
+        results = orchestrator.run()
+
+        # Should execute the 2 steps directly from the plan document
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].step.id, "1")
+        self.assertEqual(results[0].step.description, "Create index.html")
+        self.assertEqual(results[1].step.id, "2")
+        self.assertEqual(results[1].step.description, "Create app.js")
+        s2.plan_task.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
+

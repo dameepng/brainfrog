@@ -352,9 +352,11 @@ class Orchestrator:
         domain_label = scope.domain.key if scope.domain else "unscoped"
         self._log(f"[system1/jev:{self.s1.name}] scope gate: domain='{domain_label}' change_type='{scope.change_type}'")
 
-        if scope.change_type == "question_only" and self.cfg.mode not in ("plan", "build"):
-            # question_only in PLAN mode still goes to plan_and_prd below
-            # (so PRD is saved). Only short-circuit to diagnose in BUILD/non-plan.
+        _is_exec_trigger = any(
+            kw in self.cfg.task.lower()
+            for kw in ("execute", "jalankan", "eksekusi", "implement", "build", "bangun", "kerjakan", "gass", "gas")
+        )
+        if scope.change_type == "question_only" and not _is_exec_trigger:
             tree = scope.focus_tree or _repo_tree(self.cfg.repo_dir)
             max_f = 10 if not scope.domain else 30
             focus_files = _read_files_from_tree(self.cfg.repo_dir, tree, max_files=max_f)
@@ -504,31 +506,76 @@ class Orchestrator:
             return [StepResult(PlanStep("0", title, relevant_files), "planned", 0, detail_msg)]
 
         # BUILD mode: planning with plan_context handoff
-        # If task is short/ambiguous and plan_context is available, enrich the task
-        # with the plan goal so the AI has enough context to generate concrete steps.
-        effective_task = self.cfg.task
-        if self.cfg.plan_context:
-            _execute_keywords = {
-                "execute", "eksekusi", "jalankan", "lakukan", "implement", "implementasikan",
-                "build", "bangun", "kerjakan", "do it", "gass", "gas", "mulai", "start",
-                "proceed", "lanjut", "langsung", "run the plan", "sesuai plan",
-            }
-            task_words = set(self.cfg.task.lower().split())
-            is_ambiguous = len(self.cfg.task.strip().split()) <= 10 or task_words & _execute_keywords
-            if is_ambiguous:
-                effective_task = (
-                    f"Implement the following plan as described in the plan context below.\n"
-                    f"Original user instruction: {self.cfg.task}\n\n"
-                    f"[Active Plan Context to Implement]\n{self.cfg.plan_context}"
-                )
+        latest_plan = None
+        if self.cfg.mode == "build":
+            from plans import get_latest_plan, format_plan_handoff
+            latest_plan = get_latest_plan(self.cfg.repo_dir)
+            if not self.cfg.plan_context and latest_plan:
+                self.cfg.plan_context = format_plan_handoff(latest_plan, self.cfg.repo_dir)
 
-        self._log(f"[system2/{self.s2_tag}] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
-        steps = self.s2.plan_task(
-            effective_task,
-            scope.focus_tree,
-            pinned_files=self.pinned_files,
-            plan_context=self.cfg.plan_context if effective_task == self.cfg.task else None,
+        task_clean = self.cfg.task.strip().lower()
+        plan_triggers = {
+            "execute from plans.", "execute from plans", "execute from plan", "execute plan",
+            "eksekusi plan", "jalankan plan", "run the plan", "run plan", "implement plan",
+            "build from plan", "sesuai plan", "gass", "gas", "do it", "lanjutkan", "kerjakan plan",
+            "execute", "eksekusi", "jalankan",
+        }
+        is_direct_plan_exec = (
+            task_clean in plan_triggers
+            or any(kw in task_clean for kw in ("execute from plan", "execute plan", "jalankan plan", "eksekusi plan", "sesuai plan", "run the plan", "build from plan"))
         )
+
+        steps: List[PlanStep] = []
+        if is_direct_plan_exec and latest_plan and latest_plan.steps:
+            self._log(f"[brainfrog] 📋 Executing directly from plan: [bold #4EC9B0]{latest_plan.title}[/bold #4EC9B0]")
+            for i, s in enumerate(latest_plan.steps):
+                if isinstance(s, dict):
+                    step_id = str(s.get("id", i + 1))
+                    step_desc = s.get("description", "")
+                    step_files = s.get("files", [])
+                else:
+                    step_id = str(i + 1)
+                    step_desc = str(s)
+                    step_files = []
+                steps.append(PlanStep(id=step_id, description=step_desc, files=step_files))
+
+        if not steps:
+            # If task is short/ambiguous and plan_context is available, enrich the task
+            # with the plan goal so the AI has enough context to generate concrete steps.
+            effective_task = self.cfg.task
+            if self.cfg.plan_context:
+                _execute_keywords = {
+                    "execute", "eksekusi", "jalankan", "lakukan", "implement", "implementasikan",
+                    "build", "bangun", "kerjakan", "do it", "gass", "gas", "mulai", "start",
+                    "proceed", "lanjut", "langsung", "run the plan", "sesuai plan", "plan", "plans",
+                }
+                task_words = set(self.cfg.task.lower().split())
+                is_ambiguous = len(self.cfg.task.strip().split()) <= 10 or bool(task_words & _execute_keywords)
+                if is_ambiguous:
+                    effective_task = (
+                        f"Implement the following plan as described in the plan context below.\n"
+                        f"Original user instruction: {self.cfg.task}\n\n"
+                        f"[Active Plan Context to Implement]\n{self.cfg.plan_context}"
+                    )
+
+            self._log(f"[system2/{self.s2_tag}] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
+            try:
+                steps = self.s2.plan_task(
+                    effective_task,
+                    scope.focus_tree,
+                    pinned_files=self.pinned_files,
+                    plan_context=self.cfg.plan_context if effective_task == self.cfg.task else None,
+                )
+            except Exception as e:
+                if latest_plan and latest_plan.steps:
+                    self._log(f"[brainfrog] ⚠️ System 2 planning failed ({e}); falling back to saved plan steps...")
+                    for i, s in enumerate(latest_plan.steps):
+                        if isinstance(s, dict):
+                            steps.append(PlanStep(id=str(s.get("id", i + 1)), description=s.get("description", ""), files=s.get("files", [])))
+                        else:
+                            steps.append(PlanStep(id=str(i + 1), description=str(s), files=[]))
+                else:
+                    raise
         for s in steps:
             s.files = [_normalize_rel_path(self.cfg.repo_dir, f) for f in s.files]
         self._log(f"[system2/{self.s2_tag}] plan has {len(steps)} step(s)")
@@ -601,8 +648,12 @@ class Orchestrator:
         self._log(f"=== Step {step.id}: {step.description} ===")
         file_contents = _read_files(self.cfg.repo_dir, step.files)
 
+        effective_task = self.cfg.task
+        if self.cfg.plan_context and (len(self.cfg.task.split()) <= 10 or any(kw in self.cfg.task.lower() for kw in ("plan", "execute", "jalankan", "eksekusi", "build", "gass"))):
+            effective_task = f"{self.cfg.task}\n\n[Active Plan Context]\n{self.cfg.plan_context}"
+
         self._log(f"[system2/{self.s2_tag}] writing code ...")
-        new_files = self.s2.write_code(step, self.cfg.task, file_contents, pinned_files=self.pinned_files)
+        new_files = self.s2.write_code(step, effective_task, file_contents, pinned_files=self.pinned_files)
         _write_files(self.cfg.repo_dir, new_files, mode=self.cfg.mode)
 
         retries = 0
@@ -632,7 +683,7 @@ class Orchestrator:
                 retries += 1
                 self._log(f"[system2/{self.s2_tag}] reviewing failure, attempt {retries}/{self.cfg.max_retries} ...")
                 current = _read_files(self.cfg.repo_dir, list(new_files.keys()) or step.files)
-                fixed = self.s2.review_and_fix(self.cfg.task, step, current, output)
+                fixed = self.s2.review_and_fix(effective_task, step, current, output)
                 _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
                 new_files.update(fixed)
                 continue
