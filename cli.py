@@ -538,6 +538,9 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/preview", "Capture and inspect headless screenshot of frontend UI"),
     ("/cost", "View session token usage & metrics"),
     ("/rules", "View or create BRAINFROG.md guidelines"),
+    ("/learn", "Teach BrainFrog a new rule (e.g. /learn always use dark mode)"),
+    ("/memory", "View all learned rules & preferences"),
+    ("/forget", "Remove a learned rule by ID (e.g. /forget L-1234567890)"),
     ("/init", "Auto-generate modules.json for stack"),
     ("/status", "Show current workspace & agent status"),
     ("/provider", "Switch AI provider (antigravity: Google Login, claude: Anthropic API)"),
@@ -1833,7 +1836,7 @@ def run_interactive(
             else:
                 print_banner_box("Gagal mengambil tangkapan layar headless.", level="error", title="Preview Error")
             continue
-        elif lower in ("/rules", "/memory"):
+        elif lower == "/rules":
             from orchestrator import get_guideline_files
             files = get_guideline_files(repo_dir)
             rules = load_project_guidelines(repo_dir)
@@ -1865,6 +1868,150 @@ def run_interactive(
                         print_banner_box("Template BRAINFROG.md berhasil dibuat!", level="success")
                 except Exception:
                     pass
+            continue
+        # ── /learn — Teach BrainFrog a new rule ──
+        elif lower.startswith("/learn"):
+            from memory import (
+                load_workspace_memory,
+                save_workspace_memory,
+                load_global_memory,
+                save_global_memory,
+                add_learning,
+            )
+            parts = prompt.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                print_banner_box(
+                    "Gunakan: `/learn <instruksi>`\n\n"
+                    "Contoh:\n"
+                    "  /learn Always use CSS Grid instead of float for layout\n"
+                    "  /learn Never use inline styles, always use classes\n"
+                    "  /learn global: Prefer dark mode for all projects",
+                    level="info",
+                    title="Learn Usage",
+                )
+                continue
+
+            rule_text = parts[1].strip()
+            is_global = rule_text.lower().startswith("global:")
+            if is_global:
+                rule_text = rule_text[len("global:"):].strip()
+                store = load_global_memory()
+                learning = add_learning(store, rule=rule_text, source="explicit")
+                save_global_memory(store)
+                scope_label = "Global (semua proyek)"
+            else:
+                store = load_workspace_memory(repo_dir)
+                learning = add_learning(store, rule=rule_text, source="explicit", repo_name=repo_dir.name)
+                save_workspace_memory(store, repo_dir)
+                scope_label = f"Workspace ({repo_dir.name})"
+
+            tag_str = ", ".join(learning.tags)
+            print_banner_box(
+                f"\U0001f9e0 Learned!\n\n"
+                f"Rule: [bold]{learning.rule}[/bold]\n"
+                f"Tags: [{COLOR_INFO}]{tag_str}[/{COLOR_INFO}]\n"
+                f"Scope: {scope_label}\n"
+                f"ID: [dim]{learning.id}[/dim]",
+                level="success",
+                title="Continuous Learning",
+            )
+            continue
+        # ── /memory — View all learned rules ──
+        elif lower == "/memory":
+            from memory import load_workspace_memory, load_global_memory
+            ws_mem = load_workspace_memory(repo_dir)
+            gl_mem = load_global_memory()
+
+            cols, rows, box_w, margin, pad = get_layout_dims()
+
+            if not ws_mem.learnings and not gl_mem.learnings:
+                print_banner_box(
+                    "Belum ada aturan yang dipelajari.\n\n"
+                    "Gunakan `/learn <instruksi>` untuk mengajarkan BrainFrog,\n"
+                    "atau biarkan auto-reflection belajar dari retry & visual fixes.",
+                    level="info",
+                    title="\U0001f9e0 Memory Bank",
+                )
+                continue
+
+            table = Table(
+                title=" \U0001f9e0 BrainFrog Memory Bank ",
+                box=box.ROUNDED,
+                border_style=COLOR_FG_MUTED,
+                header_style=f"bold {COLOR_ACCENT}",
+                width=box_w,
+            )
+            table.add_column("ID", style="dim", width=16)
+            table.add_column("Rule", style=f"bold {COLOR_FG_PRIMARY}", ratio=3)
+            table.add_column("Tags", style=COLOR_INFO, width=18)
+            table.add_column("Source", width=10)
+            table.add_column("Hits", justify="right", width=5)
+            table.add_column("Scope", width=10)
+
+            for l in ws_mem.learnings:
+                table.add_row(
+                    l.id, l.rule[:80], ", ".join(l.tags), l.source,
+                    str(l.hit_count), f"[bold]workspace[/bold]",
+                )
+            for l in gl_mem.learnings:
+                table.add_row(
+                    l.id, l.rule[:80], ", ".join(l.tags), l.source,
+                    str(l.hit_count), f"[dim]global[/dim]",
+                )
+
+            console.print()
+            console.print(Align.center(table) if cols > 100 else table)
+            console.print()
+            total = len(ws_mem.learnings) + len(gl_mem.learnings)
+            console.print(f"  [dim]Total: {total} learned rule(s) | Gunakan /forget <ID> untuk menghapus[/dim]")
+            console.print()
+            continue
+        # ── /forget — Remove a learned rule by ID ──
+        elif lower.startswith("/forget"):
+            from memory import (
+                load_workspace_memory,
+                save_workspace_memory,
+                load_global_memory,
+                save_global_memory,
+                remove_learning,
+                clear_learnings,
+            )
+            parts = prompt.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                print_banner_box(
+                    "Gunakan:\n"
+                    "  /forget <ID>     — Hapus 1 aturan berdasarkan ID\n"
+                    "  /forget all      — Hapus semua aturan workspace\n"
+                    "  /forget global   — Hapus semua aturan global",
+                    level="info",
+                    title="Forget Usage",
+                )
+                continue
+
+            arg = parts[1].strip()
+            if arg.lower() == "all":
+                store = load_workspace_memory(repo_dir)
+                count = clear_learnings(store)
+                save_workspace_memory(store, repo_dir)
+                print_banner_box(f"\U0001f5d1\ufe0f Menghapus {count} aturan workspace.", level="success", title="Memory Cleared")
+            elif arg.lower() == "global":
+                store = load_global_memory()
+                count = clear_learnings(store)
+                save_global_memory(store)
+                print_banner_box(f"\U0001f5d1\ufe0f Menghapus {count} aturan global.", level="success", title="Memory Cleared")
+            else:
+                # Try workspace first, then global
+                ws_store = load_workspace_memory(repo_dir)
+                if remove_learning(ws_store, arg):
+                    save_workspace_memory(ws_store, repo_dir)
+                    print_banner_box(f"\U0001f5d1\ufe0f Aturan [{COLOR_ACCENT}]{arg}[/{COLOR_ACCENT}] berhasil dihapus dari workspace.", level="success", title="Forgotten")
+                else:
+                    gl_store = load_global_memory()
+                    if remove_learning(gl_store, arg):
+                        save_global_memory(gl_store)
+                        print_banner_box(f"\U0001f5d1\ufe0f Aturan [{COLOR_ACCENT}]{arg}[/{COLOR_ACCENT}] berhasil dihapus dari global.", level="success", title="Forgotten")
+                    else:
+                        print_banner_box(f"Aturan dengan ID '{arg}' tidak ditemukan.", level="warning", title="Not Found")
             continue
         elif lower == "/skills":
             from skills import index_skills

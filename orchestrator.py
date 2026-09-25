@@ -317,6 +317,26 @@ class Orchestrator:
             self.s2.guidelines = f"{base_rules}\n\n[Active Modular Skill: {self.active_skill.name}]\n{skill_text}".strip()
         elif base_rules:
             self.s2.guidelines = base_rules
+
+        # Continuous Learning: inject relevant learnings into System 2 context
+        from memory import (
+            load_workspace_memory,
+            load_global_memory,
+            get_relevant_learnings,
+            format_learnings_for_prompt,
+        )
+        ws_mem = load_workspace_memory(self.cfg.repo_dir)
+        gl_mem = load_global_memory()
+        all_learnings = ws_mem.learnings + gl_mem.learnings
+        if all_learnings:
+            from memory import MemoryStore
+            combined = MemoryStore(learnings=all_learnings)
+            relevant = get_relevant_learnings(combined, task=self.cfg.task)
+            memory_block = format_learnings_for_prompt(relevant)
+            if memory_block:
+                self.s2.guidelines = f"{self.s2.guidelines}\n\n{memory_block}".strip()
+                self._log(f"[memory] 🧠 Injected {len(relevant)} learned rule(s) into context")
+
         self.pinned_files = extract_mentioned_files(self.cfg.task, self.cfg.repo_dir)
         if self.cfg.mode == "plan":
             self.cfg.auto_pr = False
@@ -696,7 +716,10 @@ class Orchestrator:
             self._log(f"[system1/jev:{self.s1.name}] next_action = {decision}")
 
             if decision.choice == "open_pr":
-                self._run_visual_quality_gate(step, effective_task, new_files)
+                visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
+                # Continuous Learning: auto-reflect if task was difficult
+                if retries > 0 or visual_fixed:
+                    self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
                 return self._finalize_pr(step, retries, output, sensitive=sensitive)
 
             if decision.choice == "retry_fix" and retries < self.cfg.max_retries:
@@ -723,15 +746,17 @@ class Orchestrator:
         step: PlanStep,
         task: str,
         new_files: Dict[str, str],
-    ) -> None:
+    ) -> bool:
         """Visual inspection & anti-slop quality gate for frontend changes.
 
         Captures a headless viewport screenshot of the rendered HTML entrypoint,
         runs multimodal visual critique via System 2 (Gemini / Claude), and
         automatically applies styling fixes if visual defects or slop are detected.
+
+        Returns True if visual fixes were applied, False otherwise.
         """
         if not hasattr(self.s2, "visual_review_and_fix"):
-            return
+            return False
 
         from system2.visual_inspector import (
             find_browser_bin,
@@ -749,18 +774,18 @@ class Orchestrator:
             pass
 
         if not is_frontend_change(all_touched):
-            return
+            return False
 
         # 2. Locate HTML entrypoint
         entrypoint = find_html_entrypoint(self.cfg.repo_dir)
         if not entrypoint:
-            return
+            return False
 
         # 3. Locate headless browser (Chrome or Edge)
         browser_bin = find_browser_bin()
         if not browser_bin:
             self._log("[visual-engine] ℹ️ Headless browser (Chrome/Edge) not found. Skipping visual inspection.")
-            return
+            return False
 
         # 4. Capture screenshot into .brainfrog/scratch/preview.png
         scratch_dir = self.cfg.repo_dir / ".brainfrog" / "scratch"
@@ -776,7 +801,7 @@ class Orchestrator:
         captured = capture_screenshot(entrypoint, preview_png, browser_bin=browser_bin)
         if not captured:
             self._log("[visual-engine] ⚠️ Could not capture headless screenshot. Skipping visual gate.")
-            return
+            return False
 
         try:
             rel_png = str(preview_png.relative_to(self.cfg.repo_dir))
@@ -806,13 +831,13 @@ class Orchestrator:
             )
         except Exception as e:
             self._log(f"[visual-engine] ⚠️ Visual critique skipped ({e})")
-            return
+            return False
 
         if visual_pass and not fixed_files:
             self._log(f"[visual-engine] ✅ Visual inspection passed! Layout clean & anti-slop verified.")
             if critique:
                 self._log(f"[visual-engine] 💬 Critique: {critique}")
-            return
+            return False
 
         # 7. Visual defects found - apply fixes and verify tests
         self._log(f"[visual-engine] ⚠️ Visual critique: {critique}")
@@ -828,9 +853,88 @@ class Orchestrator:
                 # Re-capture verified screenshot
                 capture_screenshot(entrypoint, preview_png, browser_bin=browser_bin)
                 self._log(f"[visual-engine] ✨ Visual polish verified! Unit tests pass cleanly.")
+                return True
             else:
                 self._log(f"[visual-engine] ⚠️ Visual fixes broke unit tests. Reverting visual changes to preserve functional correctness.")
                 _write_files(self.cfg.repo_dir, current_contents, mode=self.cfg.mode)
+                return False
+        return False
+
+    def _auto_reflect(
+        self,
+        task: str,
+        retries: int,
+        visual_fixed: bool,
+        error_summary: str = "",
+    ) -> None:
+        """Extract lessons learned after a difficult task via System 2 reflection.
+
+        Stores extracted learnings in workspace memory for future context injection.
+        """
+        try:
+            from memory import (
+                generate_reflection_prompt,
+                load_workspace_memory,
+                save_workspace_memory,
+                add_learning,
+            )
+
+            prompt = generate_reflection_prompt(task, retries, visual_fixed, error_summary)
+            self._log("[memory] 🧠 Extracting lessons learned from this session ...")
+
+            # Use System 2 to generate structured reflection
+            system_msg = (
+                "You are a software engineering mentor. Analyze what went wrong "
+                "and extract concise, actionable lessons. Respond in JSON only."
+            )
+            try:
+                raw = self.s2._call(system_msg, prompt, max_tokens=1000)
+            except Exception:
+                # Fallback: create a generic learning from retries/visual info
+                raw = None
+
+            store = load_workspace_memory(self.cfg.repo_dir)
+            learned_count = 0
+
+            if raw:
+                # Parse JSON response
+                import re as _re
+                json_match = _re.search(r'\{[\s\S]*\}', raw)
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group())
+                        for item in data.get("learnings", []):
+                            rule = item.get("rule", "").strip()
+                            tags = item.get("tags", [])
+                            if rule:
+                                add_learning(
+                                    store,
+                                    rule=rule,
+                                    source="reflection",
+                                    context=f"Task: {task[:100]}",
+                                    tags=tags if tags else None,
+                                    repo_name=self.cfg.repo_dir.name,
+                                )
+                                learned_count += 1
+                    except json.JSONDecodeError:
+                        pass
+
+            # Fallback: if no structured reflection, store a generic one
+            if learned_count == 0 and retries > 0:
+                add_learning(
+                    store,
+                    rule=f"Task '{task[:60]}...' required {retries} retries — double-check test expectations before writing.",
+                    source="reflection",
+                    context=f"Auto-generated after {retries} retries",
+                    repo_name=self.cfg.repo_dir.name,
+                )
+                learned_count = 1
+
+            if learned_count > 0:
+                save_workspace_memory(store, self.cfg.repo_dir)
+                self._log(f"[memory] 💾 Stored {learned_count} new lesson(s) in workspace memory")
+        except Exception as e:
+            self._log(f"[memory] ⚠️ Auto-reflection failed ({e}), continuing without saving")
 
     def _finalize_pr(self, step: PlanStep, retries: int, test_output: str, sensitive: bool = False) -> StepResult:
         if self.cfg.mode == "plan":
