@@ -46,6 +46,18 @@ from rich.text import Text
 console = Console(legacy_windows=False)
 CLI_VERSION = "0.1.0"
 
+
+def sanitize_surrogates(text: str) -> str:
+    """Sanitize unpaired or malformed surrogate characters that break UTF-8 encoders on Windows."""
+    if not text:
+        return ""
+    try:
+        text = text.encode("utf-16", "surrogatepass").decode("utf-16", errors="replace")
+    except Exception:
+        pass
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 # -------------------------------------------------------------------------
 # Design System & UI Color Tokens (BrainFrog TUI Design Guidelines)
 # -------------------------------------------------------------------------
@@ -860,6 +872,22 @@ def run_interactive(
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.formatted_text import FormattedText
 
+        class SafeFileHistory(FileHistory):
+            """FileHistory subclass that safely handles surrogate characters from Windows paste."""
+            def store_string(self, string: str) -> None:
+                clean_string = sanitize_surrogates(string)
+                try:
+                    import datetime
+                    with open(self.filename, "ab") as f:
+                        def write(t: str) -> None:
+                            f.write(t.encode("utf-8", errors="replace"))
+
+                        write(f"\n# {datetime.datetime.now()}\n")
+                        for line in clean_string.split("\n"):
+                            write(f"+{line}\n")
+                except Exception:
+                    pass
+
         pt_style = Style.from_dict({
             # Bottom toolbar: blends into base dark background
             "bottom-toolbar": f"noinherit nobold bg:{COLOR_BG_BASE} {COLOR_FG_MUTED}",
@@ -952,7 +980,7 @@ def run_interactive(
         GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         session = PromptSession(
             completer=BrainFrogCompleter(lambda: repo_dir),
-            history=FileHistory(str(history_file)),
+            history=SafeFileHistory(str(history_file)),
             style=pt_style,
             key_bindings=kb,
             complete_while_typing=True,
@@ -1263,6 +1291,8 @@ def run_interactive(
         except (KeyboardInterrupt, EOFError):
             console.print(f"\n  [{COLOR_FG_MUTED}]Sampai jumpa! {SYM_ASSISTANT}[/{COLOR_FG_MUTED}]\n")
             break
+
+        prompt = sanitize_surrogates(prompt)
 
         console.print()
 

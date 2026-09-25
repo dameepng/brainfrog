@@ -41,6 +41,17 @@ def find_antigravity_bin() -> Optional[str]:
     return None
 
 
+def sanitize_surrogates(text: str) -> str:
+    """Sanitize unpaired or malformed surrogate characters that break UTF-8 encoders on Windows."""
+    if not text:
+        return ""
+    try:
+        text = text.encode("utf-16", "surrogatepass").decode("utf-16", errors="replace")
+    except Exception:
+        pass
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 class AntigravitySystem2Client:
     """System 2 client powered by Google Antigravity (Google Auth login session)."""
 
@@ -73,7 +84,7 @@ class AntigravitySystem2Client:
             "You are operating in structured output mode. Respond ONLY with the requested JSON format."
         )
         full_system = f"{full_system}\n\n{tool_guard}"
-        prompt = (
+        prompt = sanitize_surrogates(
             f"[SYSTEM INSTRUCTIONS]\n{full_system}\n\n"
             f"[TASK]\n{user}"
         )
@@ -99,6 +110,7 @@ class AntigravitySystem2Client:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
             )
             stdout, stderr = proc.communicate(input=prompt)
 

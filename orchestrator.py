@@ -144,9 +144,28 @@ def extract_mentioned_files(task: str, repo_dir: Path) -> Dict[str, str]:
     return pinned
 
 
+def sanitize_surrogates(text: str) -> str:
+    """Sanitize unpaired or malformed surrogate characters that break UTF-8 encoders on Windows."""
+    if not text:
+        return ""
+    try:
+        text = text.encode("utf-16", "surrogatepass").decode("utf-16", errors="replace")
+    except Exception:
+        pass
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 def _run(cmd: List[str], cwd: Path) -> subprocess.CompletedProcess:
     use_shell = sys.platform == "win32"
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, shell=use_shell)
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        shell=use_shell,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
 def _repo_tree(repo_dir: Path, max_files: int = 200) -> str:
@@ -289,7 +308,7 @@ class Orchestrator:
             self.available_skills,
             explicit_skill_name=self.cfg.skill,
         )
-        self.cfg.task = clean_task
+        self.cfg.task = sanitize_surrogates(clean_task)
 
         # Prepare System 2 guidelines (project memory + active skill if any)
         base_rules = self.guidelines or self.s2.guidelines or ""
