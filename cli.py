@@ -535,6 +535,7 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/mode", "Show or toggle active mode (plan | build)"),
     ("/undo", "Revert last change cleanly via Git"),
     ("/diff", "View colored git diff of recent changes"),
+    ("/preview", "Capture and inspect headless screenshot of frontend UI"),
     ("/cost", "View session token usage & metrics"),
     ("/rules", "View or create BRAINFROG.md guidelines"),
     ("/init", "Auto-generate modules.json for stack"),
@@ -1245,6 +1246,7 @@ def run_interactive(
             ("/provider", "Ganti provider AI (1: Antigravity Google Auth, 2: Claude)", "Provider"),
             ("/undo", "Batalkan perubahan kode terakhir secara bersih via Git", "Safety"),
             ("/diff", "Lihat perbandingan git diff berwarna dari perubahan", "Safety"),
+            ("/preview [file|url]", "Render & ambil tangkapan layar headless UI frontend", "Visual"),
             ("/cost, /stats", "Lihat penggunaan token sesi dan estimasi biaya API", "Metrics"),
             ("/skills", "Lihat daftar modular skill dan status aktifnya", "Skills"),
             ("/skill [name]", "Aktifkan atau nonaktifkan modular skill spesifik", "Skills"),
@@ -1612,6 +1614,9 @@ def run_interactive(
             remote_url = get_git_remote_url(repo_dir, "origin") or "none (local only)"
             mode_color = "#4EC9B0" if active_mode == "plan" else COLOR_ACCENT
             mode_desc = "Eksplorasi codebase & penyusunan PRD" if active_mode == "plan" else "Eksekusi kode & pengujian"
+            from system2.visual_inspector import find_browser_bin
+            browser_bin = find_browser_bin()
+            browser_label = f"[{COLOR_ACCENT}]{Path(browser_bin).name} (Headless Ready)[/{COLOR_ACCENT}]" if browser_bin else f"[{COLOR_FG_MUTED}]Not detected[/{COLOR_FG_MUTED}]"
             status_text = (
                 f"[{COLOR_FG_PRIMARY}]Session Mode:[/{COLOR_FG_PRIMARY}] [bold {mode_color}]{active_mode.upper()}[/bold {mode_color}] ({mode_desc})\n"
                 f"[{COLOR_FG_PRIMARY}]Workspace:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{repo_dir}[/{COLOR_ACCENT}]\n"
@@ -1620,6 +1625,7 @@ def run_interactive(
                 f"[{COLOR_FG_PRIMARY}]AI Provider:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{active_provider}[/{COLOR_ACCENT}]\n"
                 f"[{COLOR_FG_PRIMARY}]AI Model:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_PRIMARY} bold]{active_model}[/{COLOR_FG_PRIMARY} bold]\n"
                 f"[{COLOR_FG_PRIMARY}]Active Skill:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{active_skill or 'auto-detect'}[/{COLOR_ACCENT}]\n"
+                f"[{COLOR_FG_PRIMARY}]Visual Engine:[/{COLOR_FG_PRIMARY}] {browser_label}\n"
                 f"[{COLOR_FG_PRIMARY}]System 1 Backend:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_SECONDARY}]{active_backend}[/{COLOR_FG_SECONDARY}]\n"
                 f"[{COLOR_FG_PRIMARY}]Test Command:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_MUTED}]{active_test_cmd}[/{COLOR_FG_MUTED}]"
             )
@@ -1714,6 +1720,103 @@ def run_interactive(
             console.print()
             console.print(Align.center(table) if cols > 100 else table)
             console.print()
+            continue
+        elif lower.startswith("/preview") or lower.startswith("/shot"):
+            from system2.visual_inspector import (
+                find_browser_bin,
+                find_html_entrypoint,
+                capture_screenshot,
+            )
+            browser = find_browser_bin()
+            if not browser:
+                print_banner_box(
+                    "Headless browser tidak ditemukan!\n"
+                    "Pastikan Google Chrome atau Microsoft Edge terpasang di sistem Anda.",
+                    level="error",
+                    title="Visual Engine",
+                )
+                continue
+
+            parts = prompt.split(maxsplit=1)
+            target = None
+            do_audit = False
+
+            if len(parts) > 1 and parts[1].strip():
+                arg = parts[1].strip()
+                if "audit" in arg.lower():
+                    do_audit = True
+                    arg = arg.replace("audit", "").strip()
+
+                if arg.startswith(("http://", "https://", "file://")):
+                    target = arg
+                elif arg:
+                    cand = repo_dir / arg
+                    if cand.exists():
+                        target = cand
+                    else:
+                        print_banner_box(f"Berkas target tidak ditemukan: {arg}", level="error", title="Preview Error")
+                        continue
+
+            if not target:
+                target = find_html_entrypoint(repo_dir)
+
+            if not target:
+                print_banner_box(
+                    "Tidak ada berkas HTML entrypoint (index.html) yang ditemukan di repositori.\n"
+                    "Gunakan: `/preview path/ke/file.html` atau `/preview http://localhost:3000`",
+                    level="warning",
+                    title="Preview Target",
+                )
+                continue
+
+            scratch_dir = repo_dir / ".brainfrog" / "scratch"
+            scratch_dir.mkdir(parents=True, exist_ok=True)
+            preview_png = scratch_dir / "preview.png"
+
+            print_banner_box(
+                f"Mengambil tangkapan layar headless untuk:\n[bold {COLOR_ACCENT}]{target}[/bold {COLOR_ACCENT}] ...",
+                level="info",
+                title="Visual Preview",
+            )
+            ok = capture_screenshot(target, preview_png, browser_bin=browser)
+            if ok:
+                size_kb = preview_png.stat().st_size / 1024
+                browser_name = Path(browser).name
+                print_banner_box(
+                    f"Tangkapan layar viewport berhasil dibuat ({size_kb:.1f} KB)!\n"
+                    f"Lokasi: [bold {COLOR_ACCENT}]{preview_png.resolve()}[/bold {COLOR_ACCENT}]\n\n"
+                    f"Browser Engine: [dim]{browser_name} (Headless)[/dim]",
+                    level="success",
+                    title="Visual Preview",
+                )
+                if sys.platform == "win32":
+                    try:
+                        os.startfile(str(preview_png.resolve()))
+                    except Exception:
+                        pass
+
+                if do_audit:
+                    print_banner_box(
+                        f"Menjalankan visual critique multimodal via {active_provider} ({active_model})...",
+                        level="info",
+                        title="Visual Audit",
+                    )
+                    s2_engine = get_system2_client(
+                        provider=active_provider,
+                        model=active_model,
+                        guidelines=load_project_guidelines(repo_dir),
+                    )
+                    from orchestrator import _read_files
+                    f_contents = _read_files(repo_dir, [target.name if isinstance(target, Path) else "index.html", "style.css"])
+                    _, v_pass, critique = s2_engine.visual_review_and_fix("Review UI visual composition and styling", preview_png, f_contents)
+                    lvl = "success" if v_pass else "warning"
+                    print_banner_box(
+                        f"Hasil Inspeksi Visual ({'PASS' if v_pass else 'DEFECTS DETECTED'}):\n\n{critique}",
+                        level=lvl,
+                        title="Visual Critique",
+                    )
+            else:
+                print_banner_box("Gagal mengambil tangkapan layar headless.", level="error", title="Preview Error")
             continue
         elif lower in ("/rules", "/memory"):
             from orchestrator import get_guideline_files

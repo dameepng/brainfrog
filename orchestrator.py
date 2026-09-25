@@ -696,6 +696,7 @@ class Orchestrator:
             self._log(f"[system1/jev:{self.s1.name}] next_action = {decision}")
 
             if decision.choice == "open_pr":
+                self._run_visual_quality_gate(step, effective_task, new_files)
                 return self._finalize_pr(step, retries, output, sensitive=sensitive)
 
             if decision.choice == "retry_fix" and retries < self.cfg.max_retries:
@@ -716,6 +717,120 @@ class Orchestrator:
                 retries,
                 f"Stopped for human review after {retries} retr(ies). Last test output:\n{output[-1500:]}",
             )
+
+    def _run_visual_quality_gate(
+        self,
+        step: PlanStep,
+        task: str,
+        new_files: Dict[str, str],
+    ) -> None:
+        """Visual inspection & anti-slop quality gate for frontend changes.
+
+        Captures a headless viewport screenshot of the rendered HTML entrypoint,
+        runs multimodal visual critique via System 2 (Gemini / Claude), and
+        automatically applies styling fixes if visual defects or slop are detected.
+        """
+        if not hasattr(self.s2, "visual_review_and_fix"):
+            return
+
+        from system2.visual_inspector import (
+            find_browser_bin,
+            find_html_entrypoint,
+            is_frontend_change,
+            capture_screenshot,
+        )
+
+        # 1. Determine if any frontend files were touched
+        all_touched = list(new_files.keys()) or step.files
+        try:
+            diff_names = _run(["git", "diff", "--name-only"], self.cfg.repo_dir).stdout.split()
+            all_touched = list(set(all_touched + diff_names))
+        except Exception:
+            pass
+
+        if not is_frontend_change(all_touched):
+            return
+
+        # 2. Locate HTML entrypoint
+        entrypoint = find_html_entrypoint(self.cfg.repo_dir)
+        if not entrypoint:
+            return
+
+        # 3. Locate headless browser (Chrome or Edge)
+        browser_bin = find_browser_bin()
+        if not browser_bin:
+            self._log("[visual-engine] ℹ️ Headless browser (Chrome/Edge) not found. Skipping visual inspection.")
+            return
+
+        # 4. Capture screenshot into .brainfrog/scratch/preview.png
+        scratch_dir = self.cfg.repo_dir / ".brainfrog" / "scratch"
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        preview_png = scratch_dir / "preview.png"
+
+        try:
+            rel_entry = entrypoint.relative_to(self.cfg.repo_dir)
+        except Exception:
+            rel_entry = entrypoint.name
+
+        self._log(f"[visual-engine] 👁️ Rendering viewport for [bold #33D17A]{rel_entry}[/bold #33D17A] ...")
+        captured = capture_screenshot(entrypoint, preview_png, browser_bin=browser_bin)
+        if not captured:
+            self._log("[visual-engine] ⚠️ Could not capture headless screenshot. Skipping visual gate.")
+            return
+
+        try:
+            rel_png = str(preview_png.relative_to(self.cfg.repo_dir))
+        except Exception:
+            rel_png = str(preview_png)
+
+        self._log(f"[visual-engine] 📸 Screenshot captured: [bold #4EC9B0]{rel_png}[/bold #4EC9B0]")
+        self._log(f"[visual-engine] 🔍 Multimodal visual critique & anti-slop inspection via {self.s2_tag} ...")
+
+        # 5. Read relevant frontend files to supply context for fixing
+        frontend_files_to_read = []
+        for rel in all_touched:
+            ext = Path(rel).suffix.lower()
+            if ext in (".html", ".htm", ".css", ".js", ".jsx", ".tsx", ".vue"):
+                frontend_files_to_read.append(rel)
+        if not frontend_files_to_read:
+            frontend_files_to_read = [str(rel_entry)]
+
+        current_contents = _read_files(self.cfg.repo_dir, frontend_files_to_read)
+
+        # 6. Call multimodal visual review & fix
+        try:
+            fixed_files, visual_pass, critique = self.s2.visual_review_and_fix(
+                task=task,
+                screenshot_path=preview_png,
+                file_contents=current_contents,
+            )
+        except Exception as e:
+            self._log(f"[visual-engine] ⚠️ Visual critique skipped ({e})")
+            return
+
+        if visual_pass and not fixed_files:
+            self._log(f"[visual-engine] ✅ Visual inspection passed! Layout clean & anti-slop verified.")
+            if critique:
+                self._log(f"[visual-engine] 💬 Critique: {critique}")
+            return
+
+        # 7. Visual defects found - apply fixes and verify tests
+        self._log(f"[visual-engine] ⚠️ Visual critique: {critique}")
+        if fixed_files:
+            fix_names = ", ".join(fixed_files.keys())
+            self._log(f"[visual-engine] 🎨 Applying visual polish to: [bold #33D17A]{fix_names}[/bold #33D17A] ...")
+            _write_files(self.cfg.repo_dir, fixed_files, mode=self.cfg.mode)
+
+            # Re-verify test suite still passes
+            test_proc = _run(self.cfg.test_command, self.cfg.repo_dir)
+            if test_proc.returncode == 0:
+                new_files.update(fixed_files)
+                # Re-capture verified screenshot
+                capture_screenshot(entrypoint, preview_png, browser_bin=browser_bin)
+                self._log(f"[visual-engine] ✨ Visual polish verified! Unit tests pass cleanly.")
+            else:
+                self._log(f"[visual-engine] ⚠️ Visual fixes broke unit tests. Reverting visual changes to preserve functional correctness.")
+                _write_files(self.cfg.repo_dir, current_contents, mode=self.cfg.mode)
 
     def _finalize_pr(self, step: PlanStep, retries: int, test_output: str, sensitive: bool = False) -> StepResult:
         if self.cfg.mode == "plan":

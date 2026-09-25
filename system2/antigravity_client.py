@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from system2.claude_client import PlanStep, _extract_json, usage_tracker
 
@@ -308,3 +308,46 @@ class AntigravitySystem2Client:
         user = f"Task:\n{task}\n\nFiles changed:\n{changed_files}\n\nTest result:\n{test_summary}"
         raw = self._call(system, user, max_tokens=800)
         return _extract_json(raw)
+
+    # -- 5. visual critique & fix via multimodal eyes ------------------
+    def visual_review_and_fix(
+        self,
+        task: str,
+        screenshot_path: Path,
+        file_contents: Dict[str, str],
+    ) -> Tuple[Dict[str, str], bool, str]:
+        """Inspect actual rendered screenshot, critique visual layout, and fix styling defects.
+
+        Returns (fixed_files, visual_pass, critique_summary).
+        """
+        system = (
+            "You are a World-Class Principal UI/UX Designer and Frontend Architect. "
+            "You are evaluating the ACTUAL RENDERED SCREENSHOT of the user interface. "
+            "Your job is to eliminate AI slop, awkward nesting, overlapping text, "
+            "and unbalanced composition.\n\n"
+            "Examine the rendered screenshot carefully against modern design standards (Linear / Raycast / Apple):\n"
+            "1. Card-ception & Nesting: Is there an unnecessary card inside a card? Outer container must be clean/transparent, not a duplicate bordered box.\n"
+            "2. Visual Balance & Alignment: Are logo, headings, taglines, and buttons cleanly aligned and proportional?\n"
+            "3. Spacing & Whitespace: Are elements cramped or awkward? Ensure generous, comfortable breathing room.\n"
+            "4. Contrast & Color: Are text elements legible? Does glassmorphism have visible ambient background lighting, or is it a flat muddy box?\n"
+            "5. Micro-details: Are links/badges properly styled (e.g. no unstyled blue text)? Are form controls sleek?\n\n"
+            "If the visual presentation is already clean, polished, and top-tier, return visual_pass=true and files={}.\n"
+            "If any visual defect, awkward nesting, or slop pattern exists, fix the HTML and/or CSS files to make it gorgeous.\n"
+            "Respond with ONLY JSON:\n"
+            '{"visual_pass": false, "critique": "brief diagnosis of what looks off", "files": {"path": "<full new content>"}}\n'
+            "Return full content for any file you change. No prose outside the JSON."
+        )
+
+        user = (
+            f"Overall Task: {task}\n\n"
+            f"Rendered Interface Screenshot is located at:\n{str(screenshot_path.resolve())}\n\n"
+            f"Please inspect the visual screenshot at {str(screenshot_path.resolve())}.\n\n"
+            f"Current file contents:\n{json.dumps(file_contents, indent=2)}"
+        )
+
+        raw = self._call(system, user, max_tokens=64000)
+        data = _extract_json(raw)
+        visual_pass = bool(data.get("visual_pass", False))
+        critique = str(data.get("critique", ""))
+        files = data.get("files", {}) or {}
+        return files, visual_pass, critique
