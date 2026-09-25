@@ -70,10 +70,29 @@ SYM_ASSISTANT = "🐸"
 
 
 def get_layout_dims() -> tuple[int, int, int, int, str]:
-    """Calculate unified responsive terminal dimensions, panel width, and left padding."""
+    """Calculate unified responsive terminal dimensions, panel width, and left padding.
+
+    Breakpoints:
+      cols >= 120 : box_w = min(96, cols - 4), centered
+      cols >= 100 : box_w = cols - 8, centered
+      cols >= 60  : box_w = cols - 4, centered
+      cols >= 40  : box_w = cols - 2, centered
+      cols <  40  : box_w = max(18, cols - 2), margin=1
+    """
     cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-    box_w = min(96, cols - 8) if cols > 100 else max(24, cols - (4 if cols >= 60 else 2))
-    margin = max(0, (cols - box_w) // 2) if cols > 100 else (2 if cols >= 60 else 1)
+    if cols >= 120:
+        box_w = min(96, cols - 4)
+    elif cols >= 100:
+        box_w = cols - 8
+    elif cols >= 60:
+        box_w = cols - 4
+    elif cols >= 40:
+        box_w = cols - 2
+    else:
+        box_w = max(18, cols - 2)
+    # Safety clamp: box_w must never exceed cols - 2 so lines never touch right edge
+    box_w = max(18, min(box_w, cols - 2 if cols > 20 else cols))
+    margin = max(0, (cols - box_w) // 2)
     pad = " " * margin
     return cols, rows, box_w, margin, pad
 
@@ -724,16 +743,16 @@ def run_interactive(
         return [("class:accent", f"{SYM_PROMPT} ")]
 
     def get_prompt_top_border():
-        """Top border for composer box (Section 5.2)."""
+        """Top border for composer box — mathematically aligned with VSplit."""
         cols, rows, box_w, margin, pad = get_layout_dims()
-        bar = "─" * (box_w - 2)
-        return [("class:input-border", f"{pad}╭{bar}╮")]
+        bar_w = box_w - 2
+        return [("class:input-border", f"{pad}╭{'─' * bar_w}╮")]
 
     def get_prompt_bottom_border():
-        """Bottom border attached directly under input buffer for a contiguous composer box."""
+        """Bottom border attached directly under input buffer."""
         cols, rows, box_w, margin, pad = get_layout_dims()
-        bar = "─" * (box_w - 2)
-        return [("class:input-border", f"{pad}╰{bar}╯")]
+        bar_w = box_w - 2
+        return [("class:input-border", f"{pad}╰{'─' * bar_w}╯")]
 
     # Initialize prompt_toolkit session with autocomplete & history
     session = None
@@ -806,6 +825,15 @@ def run_interactive(
             else:
                 event.app.current_buffer.start_completion(select_first=True)
 
+        # Block page-up/page-down to prevent scrolling outside the chat area
+        @kb.add("pageup")
+        def _no_page_up(event):
+            pass  # Intentionally block — scroll only in chat history
+
+        @kb.add("pagedown")
+        def _no_page_down(event):
+            pass  # Intentionally block — scroll only in chat history
+
         history_file = GLOBAL_CONFIG_DIR / "history.txt"
         GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         session = PromptSession(
@@ -814,13 +842,25 @@ def run_interactive(
             style=pt_style,
             key_bindings=kb,
             complete_while_typing=True,
+            mouse_support=False,  # Prevent mouse-scroll from breaking pinned layout
         )
+
+        is_first_turn = [True]
 
         # Structure composer into a bounded, centered box with full borders and pinned footer
         try:
             from prompt_toolkit.layout.containers import Window, ConditionalContainer, VSplit
             from prompt_toolkit.layout.controls import FormattedTextControl
             from prompt_toolkit.filters import Always, is_done
+
+            def _get_buf_width():
+                """Dynamic buffer width that stays inside the box borders."""
+                _, _, box_w, _, _ = get_layout_dims()
+                return max(10, box_w - 4)  # subtract │+pad on each side
+
+            def _get_margin_width():
+                """Dynamic left margin for centering."""
+                return get_layout_dims()[3]
 
             root = session.app.layout.container
             float_cont = root.children[0].alternative_content
@@ -829,9 +869,9 @@ def run_interactive(
             if len(hsplit.children) > 1 and hasattr(hsplit.children[1], "content"):
                 default_buf_win = hsplit.children[1].content
                 default_buf_win.dont_extend_height = Always()
-                default_buf_win.width = lambda: get_layout_dims()[2] - 4
+                default_buf_win.width = _get_buf_width
 
-                left_margin_win = Window(width=lambda: get_layout_dims()[3], dont_extend_width=True)
+                left_margin_win = Window(width=_get_margin_width, dont_extend_width=True)
                 left_border_win = Window(char="│", width=1, style="class:input-border", dont_extend_width=True)
                 inner_pad_left = Window(width=1, dont_extend_width=True)
                 inner_pad_right = Window(width=1, dont_extend_width=True)
@@ -854,9 +894,23 @@ def run_interactive(
             hsplit.children[0] = top_border
             hsplit.children.append(bottom_border)
 
-            # Insert expanding vertical spacer before bottom_toolbar so toolbar is pinned to terminal footer
-            spacer = ConditionalContainer(Window(dont_extend_height=False), filter=~is_done)
-            root.children.insert(-1, spacer)
+            # Ensure bottom_toolbar is always visible without CPR delay
+            if len(root.children) > 5 and hasattr(root.children[5], "filter"):
+                root.children[5].filter = ~is_done
+
+            # Set fast polling for window resize events
+            session.app.terminal_size_polling_interval = 0.25
+
+            # Hook terminal resize: re-render splash cleanly on landing screen
+            orig_on_resize = session.app._on_resize
+            def _on_resize_handler():
+                if is_first_turn[0]:
+                    console.clear()
+                    c, r = shutil.get_terminal_size(fallback=(95, 35))
+                    print_splash(c, r)
+                    session.app.renderer.reset()
+                orig_on_resize()
+            session.app._on_resize = _on_resize_handler
         except Exception:
             pass
 
@@ -864,27 +918,43 @@ def run_interactive(
         session = None
 
     def get_chat_toolbar():
-        """Full-width divider + 2-line status bar at bottom of the terminal window (Section 4 & 5.4)."""
-        cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-        divider = f"{'─' * cols}\n"
+        """Full-width divider + status bar at bottom of the terminal window.
 
-        # Model display name
+        Responsive breakpoints:
+          cols >= 60 : 2-line status bar (model + repo | shortcuts + version)
+          cols >= 40 : 1-line compact bar (model · repo · version)
+          cols <  40 : minimal (model only)
+        """
+        cols, rows = shutil.get_terminal_size(fallback=(95, 35))
+        # Divider line never wider than cols - 1 to prevent auto-wrap
+        divider = f"{'─' * max(1, cols - 1)}\n"
+
+        # Model display name — truncate for narrow terminals
         model_parts = active_model.split("-")
         if cols >= 90:
             model_disp = active_model
         elif cols >= 60:
             model_disp = "-".join(model_parts[:3]) if len(model_parts) >= 3 else active_model
-        else:
+        elif cols >= 40:
             model_disp = "-".join(model_parts[:2]) if len(model_parts) >= 2 else active_model
+        else:
+            model_disp = model_parts[0] if model_parts else active_model
 
-        repo_max = max(6, cols // 8)
+        repo_max = max(4, cols // 8)
         repo_disp = (repo_dir.name[:repo_max] + "…") if len(repo_dir.name) > repo_max + 1 else repo_dir.name
 
-        if cols < 60:
-            # Narrow (<60 cols): 1-line status bar (merged info + hint, prioritizing info)
+        if cols < 40:
+            # Ultra-narrow: model only
+            return [
+                ("class:toolbar-divider", divider),
+                ("class:toolbar-accent", " ● "),
+                ("class:toolbar-id", model_disp),
+            ]
+        elif cols < 60:
+            # Narrow (<60 cols): 1-line status bar
             left = f" ● {model_disp} · {repo_disp}"
             right = f"v{CLI_VERSION} "
-            gap = max(1, cols - len(left) - len(right))
+            gap = max(1, cols - len(left) - len(right) - 1)
             return [
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
@@ -894,11 +964,9 @@ def run_interactive(
             ]
         else:
             # Standard & Wide (>=60 cols): 2-line status bar
-            # Line 1: Identity (bold)
-            # Line 2: Shortcuts + version at right end
             left_hints = "  tab models    ctrl+p help    @ file"
             right_v = f"v{CLI_VERSION}  "
-            gap = max(2, cols - len(left_hints) - len(right_v))
+            gap = max(1, cols - len(left_hints) - len(right_v) - 1)
             line2 = f"{left_hints}{' ' * gap}{right_v}"
 
             return [
@@ -909,57 +977,93 @@ def run_interactive(
             ]
 
     def print_splash(cols: int, rows: int) -> None:
-        """Render splash/welcome screen for empty state (Section 4 & 5.1)."""
+        """Render splash/welcome screen for empty state (Section 4 & 5.1).
+
+        Responsive breakpoints:
+          cols >= 80  : full ASCII logo centered
+          cols >= 60  : compact logo (shorter wordmark)
+          cols >= 40  : text-only header with model info
+          cols <  40  : minimal BrainFrog label
+        """
         console.clear()
+        _, _, box_w, margin, pad = get_layout_dims()
 
-        # Responsive margins: centered when > 100 cols, standard pad when <= 100 cols
-        logo_w = 47
-        logo_pad = " " * max(0, (cols - logo_w) // 2) if cols > 100 else ("  " if cols >= 60 else " ")
         tagline = "Tanya BrainFrog apapun soal project ini."
-        tagline_pad = " " * max(0, (cols - len(tagline)) // 2) if cols > 100 else ("  " if cols >= 60 else " ")
+        # Truncate tagline if it wouldn't fit
+        if len(tagline) > cols - 4:
+            tagline = "Tanya BrainFrog apa saja." if cols >= 35 else "Tanya BrainFrog."
 
-        # Vertical breathing room: ~1/3 of remaining height so hero sits comfortably in upper-middle
-        top_pad = max(1, (rows - 14) // 3) if rows >= 20 else 1
+        # Vertical breathing room: fitted so whole UI fits comfortably in viewport without scrolling
+        top_pad = max(1, (rows - 16) // 3) if rows >= 20 else 0
         for _ in range(top_pad):
             console.print()
 
-        if cols < 60:
-            # Narrow: skip large logo, show compact header directly
-            console.print(f"  [{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{active_model}[/{COLOR_FG_SECONDARY}]")
-            console.print(f"  [{COLOR_FG_MUTED}]{tagline}[/{COLOR_FG_MUTED}]")
+        if cols < 40:
+            # Ultra-narrow: minimal single-line label
+            console.print(f"[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold]BrainFrog[/bold]")
+            console.print(f"[{COLOR_FG_MUTED}]{tagline}[/{COLOR_FG_MUTED}]")
             console.print()
             return
 
-        # Wordmark with clear O and frog touch (2-tone: gray BRAIN, white FROG, green accent)
-        logo_lines = [
-            f"{logo_pad}[#888888]█▀▀▄ █▀▀▄ ▄▀▀▄ ▀█▀ █▄  █[/#888888]   [#E8E8E8]█▀▀ █▀▀▄ [/#E8E8E8][{COLOR_ACCENT}]▄▀ ▀▄[/{COLOR_ACCENT}][#E8E8E8] █▀▀▀[/#E8E8E8]",
-            f"{logo_pad}[#888888]█▀▀▄ █▀▀▄ █▀▀█  █  █ ▀▄█[/#888888]   [#E8E8E8]█▀  █▀▀▄ [/#E8E8E8][{COLOR_ACCENT}]█   █[/{COLOR_ACCENT}][#E8E8E8] █ ▀█[/#E8E8E8]",
-            f"{logo_pad}[#888888]▀▀▀  ▀  ▀ ▀  ▀ ▀▀▀ ▀   ▀[/#888888]   [#E8E8E8]▀   ▀  ▀ [/#E8E8E8][{COLOR_ACCENT}]▀▄▄▄▀[/{COLOR_ACCENT}][#E8E8E8] ▀▀▀▀[/#E8E8E8]",
-        ]
-        for line in logo_lines:
-            console.print(line)
+        if cols < 60:
+            # Narrow: skip large logo, show compact header
+            console.print(f"{pad}[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{active_model}[/{COLOR_FG_SECONDARY}]")
+            console.print(f"{pad}[{COLOR_FG_MUTED}]{tagline}[/{COLOR_FG_MUTED}]")
+            console.print()
+            return
+
+        # Logo rendering (cols >= 60)
+        # The full logo needs ~47 visible chars width
+        logo_w = 47
+        if cols >= 80:
+            # Full ASCII logo — fits comfortably
+            logo_pad = " " * max(0, (cols - logo_w) // 2)
+            logo_lines = [
+                f"{logo_pad}[#888888]█▀▀▄ █▀▀▄ ▄▀▀▄ ▀█▀ █▄  █[/#888888]   [#E8E8E8]█▀▀ █▀▀▄ [/#E8E8E8][{COLOR_ACCENT}]▄▀ ▀▄[/{COLOR_ACCENT}][#E8E8E8] █▀▀▀[/#E8E8E8]",
+                f"{logo_pad}[#888888]█▀▀▄ █▀▀▄ █▀▀█  █  █ ▀▄█[/#888888]   [#E8E8E8]█▀  █▀▀▄ [/#E8E8E8][{COLOR_ACCENT}]█   █[/{COLOR_ACCENT}][#E8E8E8] █ ▀█[/#E8E8E8]",
+                f"{logo_pad}[#888888]▀▀▀  ▀  ▀ ▀  ▀ ▀▀▀ ▀   ▀[/#888888]   [#E8E8E8]▀   ▀  ▀ [/#E8E8E8][{COLOR_ACCENT}]▀▄▄▄▀[/{COLOR_ACCENT}][#E8E8E8] ▀▀▀▀[/#E8E8E8]",
+            ]
+            for line in logo_lines:
+                console.print(line)
+        else:
+            # cols 60-79: compact text logo (no ASCII art — would wrap)
+            console.print(Align.center(
+                Text.from_markup(
+                    f"[{COLOR_ACCENT} bold]{SYM_ASSISTANT}[/{COLOR_ACCENT} bold]  "
+                    f"[bold {COLOR_FG_PRIMARY}]B R A I N F R O G[/bold {COLOR_FG_PRIMARY}]"
+                ),
+                width=cols,
+            ))
 
         console.print()
+        tagline_pad = " " * max(0, (cols - len(tagline)) // 2)
         console.print(f"{tagline_pad}[{COLOR_FG_MUTED}]{tagline}[/{COLOR_FG_MUTED}]")
         console.print()
 
     def print_compact_header(cols: int) -> None:
-        """Render 1-line top header when history exists (Section 4 & 5.3)."""
+        """Render 1-line top header when history exists — responsive."""
         console.print()
         cols, rows, box_w, margin, pad = get_layout_dims()
         model_parts = active_model.split("-")
-        model_disp = "-".join(model_parts[:2]) if cols < 60 and len(model_parts) >= 2 else active_model
+        if cols < 40:
+            model_disp = model_parts[0] if model_parts else active_model
+        elif cols < 60:
+            model_disp = "-".join(model_parts[:2]) if len(model_parts) >= 2 else active_model
+        else:
+            model_disp = active_model
         if cols >= 60:
             console.print(
                 f"{pad}[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]"
                 f"  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{model_disp}[/{COLOR_FG_SECONDARY}]"
                 f"  [#333333]·[/#333333]  [{COLOR_FG_MUTED}]{repo_dir.name}[/{COLOR_FG_MUTED}]"
             )
-        else:
+        elif cols >= 40:
             console.print(
                 f"{pad}[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold {COLOR_FG_PRIMARY}]BrainFrog[/bold {COLOR_FG_PRIMARY}]"
                 f"  [#333333]·[/#333333]  [{COLOR_FG_SECONDARY}]{model_disp}[/{COLOR_FG_SECONDARY}]"
             )
+        else:
+            console.print(f"[{COLOR_ACCENT}]{SYM_ASSISTANT}[/{COLOR_ACCENT}] [bold]BrainFrog[/bold]")
         console.print()
 
     def show_help() -> None:
@@ -1009,11 +1113,11 @@ def run_interactive(
     cols, rows = shutil.get_terminal_size(fallback=(95, 35))
     print_splash(cols, rows)
     ensure_git_remote(repo_dir)
-    is_first_turn = True
+    is_first_turn[0] = True
 
     while True:
         cols, rows = shutil.get_terminal_size(fallback=(95, 35))
-        if not is_first_turn:
+        if not is_first_turn[0]:
             print_compact_header(cols)
 
         try:
@@ -1037,7 +1141,7 @@ def run_interactive(
         if not prompt:
             continue
 
-        is_first_turn = False
+        is_first_turn[0] = False
 
         # Shell command passthrough: !cmd or $cmd
         if prompt.startswith("!") or prompt.startswith("$"):
@@ -1062,7 +1166,7 @@ def run_interactive(
             continue
         elif lower == "/clear":
             console.clear()
-            is_first_turn = True
+            is_first_turn[0] = True
             cols, rows = shutil.get_terminal_size(fallback=(95, 35))
             print_splash(cols, rows)
             continue
