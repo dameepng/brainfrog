@@ -1801,9 +1801,10 @@ def run_interactive(
                         level="info",
                         title="Visual Audit",
                     )
-                    s2_engine = get_system2_client(
-                        provider=active_provider,
+                    from system2 import System2Client
+                    s2_engine = System2Client(
                         model=active_model,
+                        provider=active_provider,
                         guidelines=load_project_guidelines(repo_dir),
                     )
                     from orchestrator import _read_files
