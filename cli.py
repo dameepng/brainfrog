@@ -269,11 +269,32 @@ def execute_task(
     )
 
     cols, rows, box_w, margin, pad = get_layout_dims()
+
+    def log_cli(msg: str) -> None:
+        clean = msg.strip()
+        if not clean:
+            return
+        if clean.startswith("=== Step") and clean.endswith("==="):
+            step_title = clean.strip("= ").strip()
+            step_box = Panel(
+                Text(step_title, style=f"bold {COLOR_FG_PRIMARY}", justify="center"),
+                box=box.ROUNDED,
+                border_style=COLOR_ACCENT,
+                padding=(0, 1),
+                width=box_w,
+            )
+            console.print()
+            console.print(Align.center(step_box) if cols > 100 else step_box)
+            console.print()
+        else:
+            txt = f"[{COLOR_FG_MUTED}]{clean}[/{COLOR_FG_MUTED}]"
+            console.print(Align.center(txt) if cols > 100 else txt)
+
     orchestrator = Orchestrator(
         system1,
         system2,
         cfg,
-        log_fn=lambda msg: console.print(f"{pad}[{COLOR_FG_MUTED}]{msg}[/{COLOR_FG_MUTED}]"),
+        log_fn=log_cli,
     )
     try:
         results = orchestrator.run()
@@ -327,15 +348,16 @@ def execute_task(
         console.print()
         console.print(Align.center(summary_table) if cols > 100 else summary_table)
 
-    # Turn token & cost footer
+    # Turn token & cost footer (centered)
     task_usage = usage_tracker.reset_task()
     provider_tag = getattr(system2, "provider_name", "claude")
     cost_str = "Google Auth (Active Session)" if provider_tag == "antigravity" else f"Est. Cost: ${task_usage.cost_usd:.4f}"
     if task_usage.total_tokens > 0:
-        console.print(
-            f"\n{pad}[{COLOR_FG_MUTED}]⚡ Turn tokens: {task_usage.input_tokens:,} in / {task_usage.output_tokens:,} out "
-            f"({task_usage.total_tokens:,} total)  ·  {cost_str}[/{COLOR_FG_MUTED}]\n"
-        )
+        cost_line = f"⚡ Turn tokens: {task_usage.input_tokens:,} in / {task_usage.output_tokens:,} out ({task_usage.total_tokens:,} total)  ·  {cost_str}"
+        token_txt = f"[{COLOR_FG_MUTED}]{cost_line}[/{COLOR_FG_MUTED}]"
+        console.print()
+        console.print(Align.center(token_txt) if cols > 100 else token_txt)
+        console.print()
     else:
         console.print()
 
@@ -1150,13 +1172,23 @@ def run_interactive(
             print_banner_box(f"Inisialisasi modules.json untuk {repo_dir.name} selesai!\n{len(new_domains)} domain modul arsitektur terdaftar.", level="success", title="Modules Init")
             continue
 
-        # Execute task with user prompt prefix and live braille spinner (Section 5.3 & 5.5)
+        # Execute task with centered live braille spinner
         cols, rows, box_w, margin, pad = get_layout_dims()
-        console.print(f"\n{pad}[{COLOR_FG_SECONDARY}]{SYM_USER}[/{COLOR_FG_SECONDARY}] [bold {COLOR_FG_PRIMARY}]{prompt}[/bold {COLOR_FG_PRIMARY}]\n")
+        if not session:
+            prompt_line = f"[{COLOR_FG_SECONDARY}]{SYM_USER}[/{COLOR_FG_SECONDARY}] [bold {COLOR_FG_PRIMARY}]{prompt}[/bold {COLOR_FG_PRIMARY}]"
+            console.print()
+            console.print(Align.center(prompt_line) if cols > 100 else prompt_line)
+            console.print()
+        else:
+            console.print()
+
         app_state["status"] = "Processing..."
         app_state["icon"] = "◌"
 
-        with console.status(f"[bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas...[/bold {COLOR_FG_PRIMARY}]", spinner="dots", spinner_style=COLOR_ACCENT):
+        from rich.live import Live
+        from rich.spinner import Spinner
+        spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
+        with Live(Align.center(spin) if cols > 100 else spin, console=console, refresh_per_second=12.5, transient=True):
             exit_code = execute_task(
                 task=prompt,
                 repo_dir=repo_dir,

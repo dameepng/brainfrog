@@ -354,7 +354,7 @@ class Orchestrator:
         return ScopeDecision(domain=domain, change_type=change_type, focus_tree=focus_tree)
 
     def _run_step(self, step: PlanStep, sensitive: bool = False) -> StepResult:
-        self._log(f"\n=== Step {step.id}: {step.description} ===")
+        self._log(f"=== Step {step.id}: {step.description} ===")
         file_contents = _read_files(self.cfg.repo_dir, step.files)
 
         self._log(f"[system2/{self.s2_tag}] writing code ...")
