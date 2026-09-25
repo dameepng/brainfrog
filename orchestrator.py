@@ -504,12 +504,30 @@ class Orchestrator:
             return [StepResult(PlanStep("0", title, relevant_files), "planned", 0, detail_msg)]
 
         # BUILD mode: planning with plan_context handoff
+        # If task is short/ambiguous and plan_context is available, enrich the task
+        # with the plan goal so the AI has enough context to generate concrete steps.
+        effective_task = self.cfg.task
+        if self.cfg.plan_context:
+            _execute_keywords = {
+                "execute", "eksekusi", "jalankan", "lakukan", "implement", "implementasikan",
+                "build", "bangun", "kerjakan", "do it", "gass", "gas", "mulai", "start",
+                "proceed", "lanjut", "langsung", "run the plan", "sesuai plan",
+            }
+            task_words = set(self.cfg.task.lower().split())
+            is_ambiguous = len(self.cfg.task.strip().split()) <= 10 or task_words & _execute_keywords
+            if is_ambiguous:
+                effective_task = (
+                    f"Implement the following plan as described in the plan context below.\n"
+                    f"Original user instruction: {self.cfg.task}\n\n"
+                    f"[Active Plan Context to Implement]\n{self.cfg.plan_context}"
+                )
+
         self._log(f"[system2/{self.s2_tag}] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
         steps = self.s2.plan_task(
-            self.cfg.task,
+            effective_task,
             scope.focus_tree,
             pinned_files=self.pinned_files,
-            plan_context=self.cfg.plan_context,
+            plan_context=self.cfg.plan_context if effective_task == self.cfg.task else None,
         )
         for s in steps:
             s.files = [_normalize_rel_path(self.cfg.repo_dir, f) for f in s.files]
