@@ -1740,12 +1740,16 @@ def run_interactive(
             parts = prompt.split(maxsplit=1)
             target = None
             do_audit = False
+            do_open = False
 
             if len(parts) > 1 and parts[1].strip():
                 arg = parts[1].strip()
                 if "audit" in arg.lower():
                     do_audit = True
-                    arg = arg.replace("audit", "").strip()
+                    arg = re.sub(r"\baudit\b", "", arg, flags=re.IGNORECASE).strip()
+                if "open" in arg.lower():
+                    do_open = True
+                    arg = re.sub(r"\bopen\b", "", arg, flags=re.IGNORECASE).strip()
 
                 if arg.startswith(("http://", "https://", "file://")):
                     target = arg
@@ -1789,11 +1793,18 @@ def run_interactive(
                     level="success",
                     title="Visual Preview",
                 )
-                if sys.platform == "win32":
+                if do_open and sys.platform == "win32":
                     try:
                         os.startfile(str(preview_png.resolve()))
                     except Exception:
                         pass
+                elif not do_audit:
+                    print_banner_box(
+                        "Ketik `/preview open` untuk membuka gambar di penampil bawaan Windows,\n"
+                        "atau `/preview audit` untuk ulasan visual AI.",
+                        level="info",
+                        title="Tip",
+                    )
 
                 if do_audit:
                     print_banner_box(
@@ -1801,21 +1812,24 @@ def run_interactive(
                         level="info",
                         title="Visual Audit",
                     )
-                    from system2 import System2Client
-                    s2_engine = System2Client(
-                        model=active_model,
-                        provider=active_provider,
-                        guidelines=load_project_guidelines(repo_dir),
-                    )
-                    from orchestrator import _read_files
-                    f_contents = _read_files(repo_dir, [target.name if isinstance(target, Path) else "index.html", "style.css"])
-                    _, v_pass, critique = s2_engine.visual_review_and_fix("Review UI visual composition and styling", preview_png, f_contents)
-                    lvl = "success" if v_pass else "warning"
-                    print_banner_box(
-                        f"Hasil Inspeksi Visual ({'PASS' if v_pass else 'DEFECTS DETECTED'}):\n\n{critique}",
-                        level=lvl,
-                        title="Visual Critique",
-                    )
+                    try:
+                        from system2 import System2Client
+                        s2_engine = System2Client(
+                            model=active_model,
+                            provider=active_provider,
+                            guidelines=load_project_guidelines(repo_dir),
+                        )
+                        from orchestrator import _read_files
+                        f_contents = _read_files(repo_dir, [target.name if isinstance(target, Path) else "index.html", "style.css"])
+                        _, v_pass, critique = s2_engine.visual_review_and_fix("Review UI visual composition and styling", preview_png, f_contents)
+                        lvl = "success" if v_pass else "warning"
+                        print_banner_box(
+                            f"Hasil Inspeksi Visual ({'PASS' if v_pass else 'DEFECTS DETECTED'}):\n\n{critique}",
+                            level=lvl,
+                            title="Visual Critique",
+                        )
+                    except Exception as exc:
+                        print_banner_box(f"Gagal menjalankan visual audit: {exc}", level="error", title="Visual Audit Error")
             else:
                 print_banner_box("Gagal mengambil tangkapan layar headless.", level="error", title="Preview Error")
             continue
