@@ -233,8 +233,9 @@ class System2Client:
     # -- 4. PR copy -------------------------------------------------
     def draft_pr(self, task: str, changed_files: List[str], test_summary: str) -> Dict[str, str]:
         system = (
-            "Write a concise pull request title and description for a code change. "
+            "Write a concise pull request and Git commit title and description following Conventional Commits format (e.g. feat: ..., fix: ..., refactor: ..., test: ...). "
             'Respond with ONLY JSON: {"title": "...", "body": "..."}. '
+            "Title must be a clean, single-line conventional commit message. "
             "Body should be short: what changed, why, and how it was tested. No prose outside the JSON."
         )
         user = f"Task:\n{task}\n\nFiles changed:\n{changed_files}\n\nTest result:\n{test_summary}"

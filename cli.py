@@ -200,6 +200,87 @@ def get_git_branch(repo_dir: Path) -> str:
     return "none"
 
 
+def get_git_remote_url(repo_dir: Path, remote_name: str = "origin") -> str:
+    """Return the fetch/push URL for git remote or empty string."""
+    try:
+        proc = subprocess.run(
+            ["git", "remote", "get-url", remote_name],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def ensure_git_remote(repo_dir: Path) -> None:
+    """Check if repository has a git remote; prompt user to configure one if missing."""
+    # 1. Initialize git repo if not present
+    if not (repo_dir / ".git").exists():
+        try:
+            subprocess.run(["git", "init"], cwd=repo_dir, capture_output=True, text=True)
+            print_banner_box(
+                f"Repositori Git baru diinisialisasi untuk folder: [bold {COLOR_ACCENT}]{repo_dir.name}[/bold {COLOR_ACCENT}]",
+                level="success",
+                title="Git Init",
+            )
+        except Exception:
+            return
+
+    # 2. Check if remote origin already exists
+    current_url = get_git_remote_url(repo_dir, "origin")
+    if current_url:
+        return
+
+    # 3. Prompt user for remote URL
+    print_banner_box(
+        "Project ini belum terhubung ke remote repository GitHub.\n"
+        "Hubungkan remote agar setiap perubahan kode otomatis di-commit rapi dan di-push ke GitHub.\n\n"
+        "[dim]Contoh: https://github.com/dameepng/testing-agentic.git[/dim]",
+        level="info",
+        title="Git Remote Setup",
+    )
+
+    cols, rows, box_w, margin, pad = get_layout_dims()
+    prompt_str = f"{pad}[bold {COLOR_ACCENT}]▸[/bold {COLOR_ACCENT}] [{COLOR_FG_PRIMARY}]Masukkan Git Remote URL (atau tekan Enter untuk lewati): [/{COLOR_FG_PRIMARY}]"
+    try:
+        entered = console.input(prompt_str).strip()
+    except (KeyboardInterrupt, EOFError):
+        entered = ""
+
+    if entered:
+        try:
+            check_proc = subprocess.run(["git", "remote"], cwd=repo_dir, capture_output=True, text=True)
+            if "origin" in check_proc.stdout.split():
+                subprocess.run(["git", "remote", "set-url", "origin", entered], cwd=repo_dir, capture_output=True, text=True)
+            else:
+                subprocess.run(["git", "remote", "add", "origin", entered], cwd=repo_dir, capture_output=True, text=True)
+
+            branch = get_git_branch(repo_dir)
+            if branch in ("none", "master", ""):
+                subprocess.run(["git", "branch", "-M", "main"], cwd=repo_dir, capture_output=True, text=True)
+
+            print_banner_box(
+                f"Remote origin berhasil dikonfigurasi ke:\n[bold {COLOR_ACCENT}]{entered}[/bold {COLOR_ACCENT}]\n"
+                "Semua perubahan kode sukses akan otomatis di-commit rapi & di-push ke GitHub.",
+                level="success",
+                title="Git Remote Connected",
+            )
+        except Exception as e:
+            print_banner_box(f"Gagal menambahkan git remote: {e}", level="error", title="Git Error")
+    else:
+        print_banner_box(
+            "Konfigurasi remote dilewati. Perubahan akan disimpan secara lokal saja.\n"
+            "Gunakan perintah `/remote <url>` kapan saja untuk menghubungkan remote GitHub.",
+            level="info",
+            title="Git Remote Skipped",
+        )
+
+
 def detect_default_test_cmd(repo_dir: Path) -> str:
     """Detect plausible test runner for the workspace."""
     if (repo_dir / "gradlew").exists() or (repo_dir / "gradlew.bat").exists():
@@ -236,8 +317,10 @@ def execute_task(
     from system2 import System2Client, usage_tracker
 
     if not (repo_dir / ".git").exists():
-        print_banner_box(f"{repo_dir} is not a git repository.", level="error", title="Git Error")
-        return 1
+        ensure_git_remote(repo_dir)
+        if not (repo_dir / ".git").exists():
+            print_banner_box(f"{repo_dir} is not a git repository.", level="error", title="Git Error")
+            return 1
 
     active_test_cmd = test_cmd or detect_default_test_cmd(repo_dir)
 
@@ -289,7 +372,10 @@ def execute_task(
             console.print()
         else:
             from rich.padding import Padding
-            txt = Text(clean, style=COLOR_FG_MUTED)
+            try:
+                txt = Text.from_markup(clean)
+            except Exception:
+                txt = Text(clean, style=COLOR_FG_MUTED)
             console.print(Padding(txt, (0, right_margin, 0, margin)))
 
     orchestrator = Orchestrator(
@@ -389,6 +475,7 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/models", "List available models for active provider"),
     ("/model", "Switch model (e.g. gemini-3.8-flash-high, claude-sonnet-5)"),
     ("/repo", "Switch target workspace repository"),
+    ("/remote", "View or configure Git remote origin repository"),
     ("/test-cmd", "Change test command"),
     ("/backend", "Switch System 1 backend (mock|typesafe|auto)"),
     ("/skills", "List all available modular skills"),
@@ -904,6 +991,7 @@ def run_interactive(
             ("/rules, /memory", "Tampilkan atau buat aturan proyek (BRAINFROG.md)", "Config"),
             ("/status", "Tampilkan status workspace, branch git, dan agen saat ini", "System"),
             ("/repo <path>", "Pindah direktori repositori target workspace", "Workspace"),
+            ("/remote [url]", "Lihat atau atur Git remote repository GitHub", "Workspace"),
             ("/test-cmd <cmd>", "Ganti perintah test runner (mis. pytest, npm test)", "Config"),
             ("/backend <name>", "Ganti System 1 backend (mock | typesafe | auto)", "System"),
             ("/domains", "Tampilkan domain modul arsitektur yang terdeteksi", "Architecture"),
@@ -920,6 +1008,7 @@ def run_interactive(
 
     cols, rows = shutil.get_terminal_size(fallback=(95, 35))
     print_splash(cols, rows)
+    ensure_git_remote(repo_dir)
     is_first_turn = True
 
     while True:
@@ -979,9 +1068,11 @@ def run_interactive(
             continue
         elif lower == "/status":
             branch = get_git_branch(repo_dir)
+            remote_url = get_git_remote_url(repo_dir, "origin") or "none (local only)"
             status_text = (
                 f"[{COLOR_FG_PRIMARY}]Workspace:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{repo_dir}[/{COLOR_ACCENT}]\n"
                 f"[{COLOR_FG_PRIMARY}]Git Branch:[/{COLOR_FG_PRIMARY}] [{COLOR_INFO}]{branch}[/{COLOR_INFO}]\n"
+                f"[{COLOR_FG_PRIMARY}]Git Remote:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{remote_url}[/{COLOR_ACCENT}]\n"
                 f"[{COLOR_FG_PRIMARY}]AI Provider:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{active_provider}[/{COLOR_ACCENT}]\n"
                 f"[{COLOR_FG_PRIMARY}]AI Model:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_PRIMARY} bold]{active_model}[/{COLOR_FG_PRIMARY} bold]\n"
                 f"[{COLOR_FG_PRIMARY}]Active Skill:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{active_skill or 'auto-detect'}[/{COLOR_ACCENT}]\n"
@@ -989,6 +1080,34 @@ def run_interactive(
                 f"[{COLOR_FG_PRIMARY}]Test Command:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_MUTED}]{active_test_cmd}[/{COLOR_FG_MUTED}]"
             )
             print_banner_box(status_text, level="info", title="System Status")
+            continue
+        elif lower.startswith("/remote"):
+            parts = prompt.split(maxsplit=1)
+            if len(parts) > 1:
+                new_url = parts[1].strip()
+                try:
+                    check_proc = subprocess.run(["git", "remote"], cwd=repo_dir, capture_output=True, text=True)
+                    if "origin" in check_proc.stdout.split():
+                        subprocess.run(["git", "remote", "set-url", "origin", new_url], cwd=repo_dir, capture_output=True, text=True)
+                    else:
+                        subprocess.run(["git", "remote", "add", "origin", new_url], cwd=repo_dir, capture_output=True, text=True)
+                    print_banner_box(
+                        f"Git remote origin berhasil dikonfigurasi ke:\n[bold {COLOR_ACCENT}]{new_url}[/bold {COLOR_ACCENT}]",
+                        level="success",
+                        title="Git Remote",
+                    )
+                except Exception as e:
+                    print_banner_box(f"Gagal mengatur remote: {e}", level="error", title="Git Error")
+            else:
+                current_url = get_git_remote_url(repo_dir, "origin")
+                if current_url:
+                    print_banner_box(
+                        f"Git remote origin saat ini:\n[bold {COLOR_ACCENT}]{current_url}[/bold {COLOR_ACCENT}]",
+                        level="info",
+                        title="Git Remote",
+                    )
+                else:
+                    ensure_git_remote(repo_dir)
             continue
         elif lower == "/undo":
             # 1. Check uncommitted changes first
@@ -1112,6 +1231,7 @@ def run_interactive(
                     repo_dir = find_git_root(new_path)
                     active_test_cmd = detect_default_test_cmd(repo_dir)
                     print_banner_box(f"Direktori repositori dipindah ke:\n{repo_dir}", level="success", title="Switch Repo")
+                    ensure_git_remote(repo_dir)
                 else:
                     print_banner_box(f"Direktori tidak ditemukan:\n{parts[1]}", level="error", title="Repo Error")
             else:

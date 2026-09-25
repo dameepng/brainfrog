@@ -1881,8 +1881,47 @@ Base: hitam pekat (`#0A0A0A`) dengan accent hue hijau konsisten (`#33D17A`), plu
   - `60–100 kolom`: Layout standar lengkap.
   - `> 100 kolom`: Lebar panel dibatasi (*cap*) maksimal ~96–100 kolom di tengah (*centered*).
 
+---
 
+## Git Remote, Automated Commits & GitHub Push Rules
 
+> Aturan wajib pengelolaan Git, inisialisasi remote otomatis, standardisasi pesan commit, dan sinkronisasi push ke GitHub.
 
+### 1. Inisialisasi & Deteksi Git Remote Otomatis
+1. **Pemeriksaan Repositori Baru:**
+   - Setiap kali sesi BrainFrog diaktifkan (`brainfrog`) atau saat berganti repositori melalui perintah `/repo <path>`, CLI wajib memverifikasi status Git repositori.
+   - Jika direktori belum berformat Git repo (tidak ada direktori `.git`), CLI menginisialisasi secara otomatis (`git init`).
+2. **Setup Git Remote Interaktif:**
+   - Jika remote `origin` belum terhubung (`git remote get-url origin` kosong), CLI secara proaktif menampilkan banner konfigurasi dan meminta URL remote GitHub dari pengguna (contoh: `https://github.com/dameepng/testing-agentic.git`).
+   - Jika pengguna memasukkan URL:
+     - Tambahkan remote dengan `git remote add origin <url>` (atau `set-url` jika remote sudah ada).
+     - Pastikan default branch diseragamkan ke `main` (`git branch -M main`).
+     - Tampilkan notifikasi keberhasilan bahwa remote telah aktif.
+   - Jika pengguna menekan Enter untuk melewati, perubahan akan tetap dicatat secara lokal dan pengguna dapat menghubungkannya kapan saja via perintah `/remote <url>`.
+3. **Manajemen Remote via REPL:**
+   - Perintah `/remote` menampilkan remote URL aktif saat ini (atau menawarkan konfigurasi jika belum ada).
+   - Perintah `/remote <url>` langsung memperbarui/menetapkan URL remote GitHub.
+   - Perintah `/status` menyertakan baris status `Git Remote:` secara transparan.
 
+### 2. Standardisasi Conventional Commit Otomatis
+1. **Format Pesan Commit:**
+   - Setiap langkah modifikasi kode yang berhasil dieksekusi dan lolos pengujian (unit test / validation pass) **wajib** dibuatkan Git commit secara otomatis.
+   - **Dilarang keras** menggunakan pesan commit generik, asal-asalan, atau placeholder (misalnya: `"update"`, `"fix"`, `"checkpoint"`, atau `"brainfrog: step"`).
+   - Pesan commit wajib mengikuti standar **Conventional Commits**:
+     - **Format Judul:** `<type>(<scope>): <deskripsi imperatif singkat>` (misal: `feat(calc): implement safe add function` atau `fix(parser): resolve null pointer on empty input`).
+     - **Tipe yang Diizinkan:** `feat`, `fix`, `refactor`, `style`, `test`, `docs`, `perf`, `chore`.
+     - **Body:** Rincian poin-poin konkret mengenai apa yang diubah, alasan perubahan, dan hasil pengujian.
+2. **Generasi via System 2 Model:**
+   - Judul dan deskripsi commit dihasilkan langsung oleh model System 2 (Claude / Gemini Antigravity) melalui method `draft_pr()` untuk memastikan kualitas narasi teknis yang tinggi.
 
+### 3. Automated Push ke GitHub
+1. **Push Otomatis Pasca-Commit:**
+   - Begitu Git commit berhasil dicatat dan remote `origin` terdeteksi, CLI secara otomatis melakukan push ke branch aktif di GitHub:
+     `git push -u origin <branch>` (dengan fallback `git push origin <branch>`).
+2. **Feedback Status di Layar Terminal:**
+   - CLI wajib mencatat status operasi Git secara visual:
+     - `[git] 📦 Committed: <commit_title>`
+     - `[git] 🚀 Pushing changes to origin/<branch> ...`
+     - `[git] ✅ Successfully pushed to origin/<branch>`
+3. **Penanganan Kegagalan Jaringan / Otentikasi (Non-Blocking):**
+   - Jika proses push mengalami kendala (misal: belum login GitHub CLI, koneksi internet terputus, atau rejected upstream), CLI mencatat peringatan secara elegan (`[git] ⚠️ Push notice: ...`) tanpa merusak working tree lokal atau memutus alur kerja pengguna.

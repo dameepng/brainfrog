@@ -419,12 +419,38 @@ class Orchestrator:
         changed = _run(["git", "diff", "--name-only"], self.cfg.repo_dir).stdout.split()
         pr_copy = self.s2.draft_pr(self.cfg.task, changed, "PASS" if not test_output.strip() else "PASS (see logs)")
 
-        # Create Git checkpoint commit for /undo
+        # Create clean Git commit with auto-generated conventional message
+        commit_title = pr_copy.get("title", "").strip() or f"feat: {step.description}"
+        commit_body = pr_copy.get("body", "").strip()
+        commit_msg = f"{commit_title}\n\n{commit_body}" if commit_body else commit_title
+
         try:
             _run(["git", "add", "-A"], self.cfg.repo_dir)
-            _run(["git", "commit", "-m", f"brainfrog: {step.description}"], self.cfg.repo_dir)
-        except Exception:
-            pass
+            commit_res = _run(["git", "commit", "-m", commit_msg], self.cfg.repo_dir)
+            if commit_res.returncode == 0:
+                self._log(f"[git] 📦 Committed: [bold #E8E8E8]{commit_title}[/bold #E8E8E8]")
+        except Exception as e:
+            self._log(f"[git] Commit error: {e}")
+
+        # Automatically push changes to remote origin if configured
+        try:
+            remotes = _run(["git", "remote"], self.cfg.repo_dir).stdout.split()
+            if "origin" in remotes:
+                cur_branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], self.cfg.repo_dir).stdout.strip()
+                if cur_branch and cur_branch != "HEAD":
+                    self._log(f"[git] 🚀 Pushing changes to origin/{cur_branch} ...")
+                    push_res = _run(["git", "push", "-u", "origin", cur_branch], self.cfg.repo_dir)
+                    if push_res.returncode == 0:
+                        self._log(f"[git] ✅ Successfully pushed to origin/{cur_branch}")
+                    else:
+                        push_fallback = _run(["git", "push", "origin", cur_branch], self.cfg.repo_dir)
+                        if push_fallback.returncode == 0:
+                            self._log(f"[git] ✅ Successfully pushed to origin/{cur_branch}")
+                        else:
+                            push_err = push_res.stderr.strip() or push_fallback.stderr.strip()
+                            self._log(f"[git] ⚠️ Push notice: {push_err}")
+        except Exception as e:
+            self._log(f"[git] Push error: {e}")
 
         ceiling = "low" if sensitive else self.cfg.pr_risk_ceiling
         safety_bar = 0.9 if sensitive else 0.7
