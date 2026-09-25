@@ -10,6 +10,7 @@ Equipped with 5 Killer Features:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -730,6 +731,11 @@ def select_model_interactive(provider: str, current_model: str) -> Optional[str]
 
 def get_active_google_account() -> Optional[str]:
     """Return the currently logged-in Google email for Antigravity, if any."""
+    try:
+        import auth_manager
+        return auth_manager.get_active_account()
+    except Exception:
+        pass
     try:
         acct_path = Path.home() / ".gemini" / "google_accounts.json"
         if acct_path.exists():
