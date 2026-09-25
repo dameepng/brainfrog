@@ -532,6 +532,7 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/skills", "List all available modular skills"),
     ("/skill", "Activate modular skill (e.g. /skill audit-anti-slop)"),
     ("/domains", "List detected domain modules and paths"),
+    ("/auth", "Manage and switch Google accounts for Antigravity"),
     ("/whoami", "Show active Google account & provider info"),
     ("/clear", "Clear terminal screen"),
     ("/exit", "Exit BrainFrog session"),
@@ -750,6 +751,22 @@ def select_provider_interactive(current_provider: str) -> Optional[str]:
         ("claude",      "claude",      "Anthropic API Key — pay per token"),
     ]
     return _picker("Providers", items, current_provider, id_col="Provider")
+
+
+def select_account_interactive() -> Optional[str]:
+    """Interactive Google account picker — erases itself after selection."""
+    import auth_manager
+    accts = auth_manager.list_accounts()
+    active_email = auth_manager.get_active_account() or ""
+
+    items = []
+    for a in accts:
+        email = a["email"]
+        desc = "Tersimpan di Vault (swap instan)" if a["has_creds"] else "Perlu Login Ulang"
+        items.append((email, email, desc))
+    items.append(("__login_new__", "+ Hubungkan Akun Google Baru...", "Buka browser untuk login OAuth"))
+
+    return _picker("Google Accounts  ·  Antigravity", items, active_email, id_col="Email")
 
 
 # -------------------------------------------------------------------------
@@ -1182,6 +1199,7 @@ def run_interactive(
             ("@filename", "Pin konteks file dengan popup pelengkapan otomatis", "Context"),
             ("!command", "Jalankan perintah shell terminal langsung di sesi REPL", "Shell"),
             ("/whoami", "Tampilkan akun Google aktif & info sesi BrainFrog", "Identity"),
+            ("/auth [switch|login|list]", "Kelola & ganti akun Google Antigravity (<100ms)", "Identity"),
             ("/plan [task]", "Beralih ke mode Plan (eksplorasi codebase, read-only, PRD)", "Mode"),
             ("/build [task]", "Beralih ke mode Build (eksekusi rencana terakhir & pengujian)", "Mode"),
             ("/mode [plan|build]", "Lihat atau ganti mode sesi (Plan | Build)", "Mode"),
@@ -1282,7 +1300,7 @@ def run_interactive(
             cols, rows = shutil.get_terminal_size(fallback=(95, 35))
             print_splash(cols, rows)
             continue
-        elif lower in ("/whoami", "/account", "/auth"):
+        elif lower == "/whoami":
             google_acct = get_active_google_account()
             acct_display = f"[bold {COLOR_ACCENT}]{google_acct}[/bold {COLOR_ACCENT}]" if google_acct else "[italic dim]Belum terdeteksi / tidak login[/italic dim]"
             prov_display = f"[bold {COLOR_FG_PRIMARY}]{active_provider}[/bold {COLOR_FG_PRIMARY}]"
@@ -1293,9 +1311,75 @@ def run_interactive(
                 f"• Provider AI aktif: {prov_display}\n"
                 f"• Model AI aktif: {model_display}\n"
                 f"• Mode Sesi: {mode_display}\n"
-                f"• Repositori aktif: `{repo_dir}`"
+                f"• Repositori aktif: `{repo_dir}`\n\n"
+                f"Gunakan `/auth` untuk mengelola atau berpindah akun Google."
             )
             print_banner_box(info_msg, level="info", title="Identitas Akun & Sesi")
+            continue
+        elif lower.startswith("/auth") or lower.startswith("/account"):
+            import auth_manager
+            parts = prompt.split(maxsplit=2)
+            subcmd = parts[1].strip().lower() if len(parts) > 1 else None
+            arg = parts[2].strip() if len(parts) > 2 else None
+
+            if subcmd == "list":
+                accts = auth_manager.list_accounts()
+                cols, rows, box_w, margin, pad = get_layout_dims()
+                table = Table(title=" Google Accounts Vault ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, header_style=f"bold {COLOR_ACCENT}", width=box_w)
+                table.add_column("Akun Google (Email)", style=f"bold {COLOR_FG_PRIMARY}")
+                table.add_column("Status Vault", style=COLOR_FG_SECONDARY)
+                table.add_column("Status Sesi", justify="center")
+                for a in accts:
+                    is_act = a["is_active"]
+                    status = f"[bold {COLOR_ACCENT}]● AKTIF[/bold {COLOR_ACCENT}]" if is_act else f"[{COLOR_FG_MUTED}]Standby[/{COLOR_FG_MUTED}]"
+                    v_status = "[bold #33D17A]Tersimpan di Vault[/bold #33D17A]" if a["has_creds"] else "[bold #F6D32D]Perlu Login Ulang[/bold #F6D32D]"
+                    r_style = f"on {COLOR_BG_SURFACE}" if is_act else None
+                    table.add_row(a["email"], v_status, status, style=r_style)
+                console.print()
+                console.print(Align.center(table) if cols > 100 else table)
+                console.print()
+            elif subcmd == "login":
+                print_banner_box("Memulai proses Google OAuth login untuk akun baru...", level="info", title="Google Login")
+                success, msg = auth_manager.login_new_account_flow()
+                level = "success" if success else "warning"
+                print_banner_box(msg, level=level, title="Google Auth")
+            elif subcmd == "switch":
+                if arg:
+                    success, msg = auth_manager.switch_account(arg)
+                    level = "success" if success else "error"
+                    print_banner_box(msg, level=level, title="Switch Google Account")
+                else:
+                    chosen = select_account_interactive()
+                    if chosen:
+                        if chosen == "__login_new__":
+                            print_banner_box("Memulai proses Google OAuth login untuk akun baru...", level="info", title="Google Login")
+                            success, msg = auth_manager.login_new_account_flow()
+                            level = "success" if success else "warning"
+                            print_banner_box(msg, level=level, title="Google Auth")
+                        else:
+                            success, msg = auth_manager.switch_account(chosen)
+                            level = "success" if success else "error"
+                            print_banner_box(msg, level=level, title="Switch Google Account")
+            elif subcmd in ("remove", "delete"):
+                if arg:
+                    success, msg = auth_manager.remove_account(arg)
+                    level = "success" if success else "error"
+                    print_banner_box(msg, level=level, title="Remove Account")
+                else:
+                    print_banner_box("Format salah. Gunakan: `/auth remove <email>`", level="warning", title="Auth Remove")
+            else:
+                # Default: interactive picker
+                chosen = select_account_interactive()
+                if chosen:
+                    if chosen == "__login_new__":
+                        print_banner_box("Memulai proses Google OAuth login untuk akun baru...", level="info", title="Google Login")
+                        success, msg = auth_manager.login_new_account_flow()
+                        level = "success" if success else "warning"
+                        print_banner_box(msg, level=level, title="Google Auth")
+                    else:
+                        success, msg = auth_manager.switch_account(chosen)
+                        level = "success" if success else "error"
+                        print_banner_box(msg, level=level, title="Switch Google Account")
             continue
         elif lower.startswith("/mode"):
             parts = prompt.split(maxsplit=1)
