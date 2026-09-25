@@ -465,7 +465,7 @@ class BrainFrogCompleter(BaseCompleter):
                     if query.lower() in path_str.lower():
                         display_token = f"@{path_str}"
                         yield Completion(
-                            display_token,
+                            f"@{path_str} ",
                             start_position=-(len(query) + 1),
                             display=display_token,
                             display_meta=rel_path.name,
@@ -686,6 +686,19 @@ def run_interactive(
         })
 
         kb = KeyBindings()
+        from prompt_toolkit.filters import has_completions
+
+        @kb.add("enter", filter=has_completions)
+        def _accept_completion_handler(event):
+            """Accept active completion on 1st Enter; 2nd Enter sends prompt."""
+            b = event.current_buffer
+            if b.complete_state:
+                if b.complete_state.current_completion:
+                    b.apply_completion(b.complete_state.current_completion)
+                elif b.complete_state.completions:
+                    b.apply_completion(b.complete_state.completions[0])
+                else:
+                    b.complete_state = None
 
         @kb.add("c-p")
         def _palette(event):
@@ -698,8 +711,10 @@ def run_interactive(
             if not b.text.strip():
                 b.text = "/models"
                 b.validate_and_handle()
+            elif b.complete_state:
+                b.complete_next()
             else:
-                event.app.current_buffer.start_completion(select_first=False)
+                event.app.current_buffer.start_completion(select_first=True)
 
         history_file = GLOBAL_CONFIG_DIR / "history.txt"
         GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
