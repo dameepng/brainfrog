@@ -1159,10 +1159,19 @@ def run_interactive(
             console.print()
             continue
         elif lower in ("/rules", "/memory"):
+            from orchestrator import get_guideline_files
+            files = get_guideline_files(repo_dir)
             rules = load_project_guidelines(repo_dir)
             if rules:
+                file_titles = ", ".join(f.name for f in files)
                 cols, rows, box_w, margin, pad = get_layout_dims()
-                rules_panel = Panel(Markdown(rules), title=" Project Rules (BRAINFROG.md) ", box=box.ROUNDED, border_style=COLOR_INFO, width=box_w)
+                rules_panel = Panel(
+                    Markdown(rules),
+                    title=f" Project Rules & Design Guidelines ({file_titles}) ",
+                    box=box.ROUNDED,
+                    border_style=COLOR_INFO,
+                    width=box_w,
+                )
                 console.print()
                 console.print(Align.center(rules_panel) if cols > 100 else rules_panel)
                 console.print()

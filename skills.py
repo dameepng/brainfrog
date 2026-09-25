@@ -85,9 +85,15 @@ def index_skills(repo_dir: Path) -> Dict[str, SkillMetadata]:
     """Scan .brainfrog/skills (and ~/.brainfrog/skills) and index ONLY name & description."""
     indexed: Dict[str, SkillMetadata] = {}
 
+    pkg_skills_dir = Path(__file__).resolve().parent / ".brainfrog" / "skills"
     search_dirs = [
         repo_dir / ".brainfrog" / "skills",
+        repo_dir / ".agents" / "skills",
+        repo_dir / "skills",
+        pkg_skills_dir,
         Path.home() / ".brainfrog" / "skills",
+        Path.home() / ".agents" / "skills",
+        Path.home() / ".gemini" / "antigravity-ide" / "builtin" / "skills",
     ]
 
     for base_dir in search_dirs:
@@ -141,21 +147,23 @@ def _matches_anti_slop(task_lower: str) -> bool:
     # 2. UI / copy audit & polish with slop indicators
     is_ui_or_copy = any(k in task_lower for k in [
         "ui", "ux", "frontend", "interface", "halaman", "page", "copy", "desain",
-        "design", "komponen", "component", "landing page", "web"
+        "design", "komponen", "component", "landing page", "web", "html", "css",
+        "airbnb", "layout", "grid", "menu", "header", "footer", "style"
     ])
 
     audit_or_polish = any(k in task_lower for k in [
         "audit", "periksa", "cek", "review", "polish", "tingkatkan", "poles",
-        "kurangi", "perbaiki tampilan", "improve"
+        "kurangi", "perbaiki tampilan", "improve", "fix", "bikin", "buat", "rapikan", "rapihkan"
     ])
 
     slop_indicators = any(k in task_lower for k in [
         "slop", "generic", "generik", "placeholder", "lorem", "lorem ipsum",
         "unsupported claim", "unverified claim", "klaim palsu", "dead button",
-        "tombol mati", "inert", "weak design", "pemanis berlebih", "card berulang"
+        "tombol mati", "inert", "weak design", "pemanis berlebih", "card berulang",
+        "acak-acakan", "berantakan", "hancur", "overlap", "tumpang tindih"
     ])
 
-    if is_ui_or_copy and (slop_indicators or (audit_or_polish and "slop" in task_lower)):
+    if is_ui_or_copy and (slop_indicators or (audit_or_polish and "slop" in task_lower) or any(k in task_lower for k in ["acak-acakan", "berantakan", "overlap", "tumpang tindih"])):
         return True
 
     if audit_or_polish and slop_indicators:

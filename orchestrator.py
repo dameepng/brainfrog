@@ -57,16 +57,73 @@ class ScopeDecision:
     clarify_message: Optional[str] = None
 
 
-def load_project_guidelines(repo_dir: Path) -> str:
-    """Read persistent rules from BRAINFROG.md or CLAUDE.md if present."""
-    for name in ("BRAINFROG.md", "brainfrog.md", "CLAUDE.md", "claude.md", "AGENTS.md"):
+def get_guideline_files(repo_dir: Path) -> List[Path]:
+    """Find all relevant guideline, rules, and design specification files."""
+    found: List[Path] = []
+    seen_names = set()
+
+    # 1. Check priority files in workspace
+    priority_names = [
+        "BRAINFROG.md", "brainfrog.md",
+        "DESIGN.md", "design.md",
+        "CLAUDE.md", "claude.md",
+        "AGENTS.md", "agents.md",
+        "RULES.md", "rules.md",
+    ]
+    for name in priority_names:
         p = repo_dir / name
-        if p.exists() and p.is_file():
+        if p.exists() and p.is_file() and p.name.lower() not in seen_names:
+            found.append(p)
+            seen_names.add(p.name.lower())
+
+    # 2. Glob for any DESIGN*.md, design*.md, STYLE*.md, style*.md in workspace
+    for pattern in ("DESIGN*.md", "design*.md", "STYLE*.md", "style*.md", "*design*.md", "UI*.md"):
+        try:
+            for p in sorted(repo_dir.glob(pattern)):
+                if p.is_file() and p.name.lower() not in seen_names:
+                    found.append(p)
+                    seen_names.add(p.name.lower())
+        except Exception:
+            pass
+
+    # 3. Check rules folders (.agents/rules or .brainfrog/rules)
+    for rules_dir in (repo_dir / ".agents" / "rules", repo_dir / ".brainfrog" / "rules"):
+        if rules_dir.exists() and rules_dir.is_dir():
             try:
-                return p.read_text(encoding="utf-8").strip()
+                for p in sorted(rules_dir.glob("*.md")):
+                    if p.is_file() and p.name.lower() not in seen_names:
+                        found.append(p)
+                        seen_names.add(p.name.lower())
             except Exception:
                 pass
-    return ""
+
+    # 4. If repo_dir does NOT have its own BRAINFROG.md, include the bundled core BRAINFROG.md
+    if "brainfrog.md" not in seen_names:
+        pkg_brainfrog = Path(__file__).resolve().parent / "BRAINFROG.md"
+        if pkg_brainfrog.exists() and pkg_brainfrog.is_file():
+            found.append(pkg_brainfrog)
+            seen_names.add("brainfrog.md")
+
+    return found
+
+
+def load_project_guidelines(repo_dir: Path) -> str:
+    """Read and aggregate persistent rules, design specifications, and guidelines."""
+    files = get_guideline_files(repo_dir)
+    if not files:
+        return ""
+
+    sections = []
+    for f in files:
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace").strip()
+            if content:
+                label = f"Project Design Specification: {f.name}" if "design" in f.name.lower() or "style" in f.name.lower() else f"System Memory & Guidelines: {f.name}"
+                sections.append(f"### [{label}]\n{content}")
+        except Exception:
+            pass
+
+    return "\n\n".join(sections).strip()
 
 
 def extract_mentioned_files(task: str, repo_dir: Path) -> Dict[str, str]:
@@ -215,6 +272,7 @@ class Orchestrator:
         self.s2_tag = getattr(self.s2, "provider_name", "claude")
         self.cfg = config
         self.log_fn = log_fn
+        self.guidelines_files = get_guideline_files(self.cfg.repo_dir)
         self.guidelines = load_project_guidelines(self.cfg.repo_dir)
 
         # Index available modular skills (metadata only: name & description)
@@ -243,10 +301,11 @@ class Orchestrator:
             print(msg)
 
     def run(self) -> List[StepResult]:
-        if self.guidelines:
-            self._log("[brainfrog] 🧠 Applied project memory/rules from BRAINFROG.md")
+        if self.guidelines_files:
+            file_names = ", ".join([f.name for f in self.guidelines_files])
+            self._log(f"[brainfrog] 🧠 Injected guidelines & rules: [bold #33D17A]{file_names}[/bold #33D17A]")
         if self.active_skill:
-            self._log(f"[brainfrog] 🎯 Skill: {self.active_skill.name}")
+            self._log(f"[brainfrog] 🎯 Skill: [bold #33D17A]{self.active_skill.name}[/bold #33D17A]")
         if self.pinned_files:
             self._log(f"[brainfrog] 📌 Pinned {len(self.pinned_files)} context file(s): {', '.join(self.pinned_files.keys())}")
 
