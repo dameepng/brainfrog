@@ -293,11 +293,11 @@ def login_new_account_flow(agy_bin: Optional[str] = None) -> Tuple[bool, str]:
         except Exception:
             pass
 
-    # 3. Launch agy so Google OAuth flow triggers in terminal/browser
+    # 3. Launch agy non-interactively to trigger OAuth without hijacking the terminal into Gemini CLI TUI
     try:
         import subprocess
-        # Run agy interactive so user authenticates
-        subprocess.run([binary], shell=False)
+        # Using --print "login" runs non-interactively, completing OAuth if needed and immediately exiting
+        subprocess.run([binary, "--print", "login"], shell=False, capture_output=True, text=True)
     except Exception as e:
         if bak_path.exists() and not creds_path.exists():
             shutil.copy2(bak_path, creds_path)
