@@ -21,8 +21,11 @@ class TestAuthManager(unittest.TestCase):
         self.env_patch.start()
         self.keyring_patch = patch.object(auth_manager, "read_windows_keyring_account", return_value=None)
         self.keyring_patch.start()
+        self.keyring_write_patch = patch.object(auth_manager, "write_windows_keyring_account", return_value=True)
+        self.keyring_write_patch.start()
 
     def tearDown(self):
+        self.keyring_write_patch.stop()
         self.keyring_patch.stop()
         self.env_patch.stop()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
