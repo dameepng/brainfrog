@@ -861,14 +861,9 @@ def run_interactive(
             nonlocal active_mode
             b = event.current_buffer
             if not b.text.strip():
-                # Toggle between plan and build modes
+                # Toggle between plan and build modes — let PT redraw the border
                 active_mode = "build" if active_mode == "plan" else "plan"
-                # Show brief mode indicator without consuming the prompt
-                mode_label = "PLAN" if active_mode == "plan" else "BUILD"
-                mode_color = "#4EC9B0" if active_mode == "plan" else COLOR_ACCENT
-                console.print(
-                    f"  [{mode_color}]⟳ Mode beralih ke [{mode_color} bold]{mode_label}[/{mode_color} bold][/{mode_color}]"
-                )
+                event.app.invalidate()  # Refresh layout; border already reads active_mode
             elif b.complete_state:
                 b.complete_next()
             else:
