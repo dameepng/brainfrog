@@ -335,10 +335,10 @@ class Orchestrator:
         scope = self._scope_gate()
 
         if scope.clarify_message:
-            # BUILD mode with an active plan context: we already know what to build.
-            # Skip scope clarification and proceed with full repo tree.
-            if self.cfg.mode == "build" and self.cfg.plan_context:
-                self._log("[system1/jev] scope gate: low confidence but plan_context present — skipping clarification")
+            if self.cfg.mode == "build":
+                # BUILD mode: never block the user with scope clarification.
+                # The REPL user knows their project — use full repo tree and proceed.
+                self._log("[system1/jev] scope gate: low confidence in build mode \u2014 using full repo tree")
                 scope = ScopeDecision(
                     domain=None,
                     change_type=scope.change_type,
@@ -352,7 +352,7 @@ class Orchestrator:
         domain_label = scope.domain.key if scope.domain else "unscoped"
         self._log(f"[system1/jev:{self.s1.name}] scope gate: domain='{domain_label}' change_type='{scope.change_type}'")
 
-        if scope.change_type == "question_only" and self.cfg.mode != "plan" and not (self.cfg.mode == "build" and self.cfg.plan_context):
+        if scope.change_type == "question_only" and self.cfg.mode not in ("plan", "build"):
             # question_only in PLAN mode still goes to plan_and_prd below
             # (so PRD is saved). Only short-circuit to diagnose in BUILD/non-plan.
             tree = scope.focus_tree or _repo_tree(self.cfg.repo_dir)

@@ -858,11 +858,21 @@ def run_interactive(
 
         @kb.add("tab")
         def _tab_handler(event):
-            nonlocal active_mode
+            nonlocal active_mode, active_plan_context
             b = event.current_buffer
             if not b.text.strip():
                 # Toggle between plan and build modes — let PT redraw the border
                 active_mode = "build" if active_mode == "plan" else "plan"
+                # When switching TO build, load the latest plan context (same as /build)
+                if active_mode == "build":
+                    try:
+                        from plans import get_latest_plan, format_plan_handoff
+                        lp = get_latest_plan(repo_dir)
+                        active_plan_context = format_plan_handoff(lp, repo_dir) if lp else None
+                    except Exception:
+                        active_plan_context = None
+                else:
+                    active_plan_context = None
                 event.app.invalidate()  # Refresh layout; border already reads active_mode
             elif b.complete_state:
                 b.complete_next()
