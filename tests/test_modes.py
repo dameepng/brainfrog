@@ -61,7 +61,7 @@ class MockSystem1(SystemOneClient):
     def decide(self, state, questions):
         out = {}
         for k, q in questions.items():
-            if hasattr(q, "criteria") and q.criteria:
+            if isinstance(getattr(q, "criteria", None), dict):
                 # pick first choice
                 choice = list(q.criteria.keys())[0]
                 out[k] = Answer(choice=choice, confidence=0.95)

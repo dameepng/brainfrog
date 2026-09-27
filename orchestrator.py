@@ -841,7 +841,7 @@ class Orchestrator:
 
         # Tiered confidence logging for debugging and threshold tuning
         sensitive_prob = answers["is_sensitive"].noul or 0.0
-        complexity_score = answers["complexity"].score or "unknown"
+        complexity_score = answers["complexity"].score if answers["complexity"].score is not None else "unknown"
         needs_tests_prob = answers["needs_tests"].noul or 0.0
         self._log(
             f"[system1/jev:{self.s1.name}] scope_gate results:\n"
@@ -933,7 +933,12 @@ class Orchestrator:
             tests_ok = (answers["tests_passing"].noul or 0.0) > 0.7
             diff_ok = (answers["diff_complete"].noul or 0.0) > 0.6
             fixable = (answers["failure_fixable"].noul or 0.0) > 0.5
-            retry_score = answers["retry_concern"].score or "within_normal"
+            retry_raw = answers["retry_concern"].score
+            retry_score = retry_raw if retry_raw is not None else "within_normal"
+            retry_exceeded = (
+                (isinstance(retry_raw, (int, float)) and retry_raw >= 1.5)
+                or str(retry_score).lower() in ("exceeded_reasonable_limit", "2", "high")
+            )
 
             self._log(
                 f"[system1/jev:{self.s1.name}] post-test evaluation:\n"
@@ -951,7 +956,7 @@ class Orchestrator:
                     self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
                 return self._finalize_pr(step, retries, output, sensitive=sensitive)
 
-            if fixable and retry_score != "exceeded_reasonable_limit" and retries < self.cfg.max_retries:
+            if fixable and not retry_exceeded and retries < self.cfg.max_retries:
                 # Failure looks specific and fixable, retry is still productive
                 retries += 1
                 self._log(f"[system2/{self.s2_tag}] reviewing failure, attempt {retries}/{self.cfg.max_retries} ...")
@@ -961,7 +966,7 @@ class Orchestrator:
                 new_files.update(fixed)
                 continue
 
-            if retry_score == "exceeded_reasonable_limit" or retries >= self.cfg.max_retries:
+            if retry_exceeded or retries >= self.cfg.max_retries:
                 return StepResult(step, "abandoned", retries, "Jev assessed retry limit exceeded with no progress.")
 
             return StepResult(
@@ -1238,7 +1243,13 @@ class Orchestrator:
 
         ceiling = "low" if sensitive else self.cfg.pr_risk_ceiling
         safety_bar = 0.9 if sensitive else 0.7
-        within_ceiling = RISK_RANK.get(risk.score, 2) <= RISK_RANK.get(ceiling, 0)
+        if isinstance(risk.score, (int, float)):
+            risk_val = int(round(risk.score))
+        else:
+            risk_val = RISK_RANK.get(str(risk.score).lower(), 2)
+        ceiling_val = RISK_RANK.get(str(ceiling).lower(), 0)
+        within_ceiling = risk_val <= ceiling_val
+
         auto_ok = (
             self.cfg.auto_pr
             and not sensitive
@@ -1251,9 +1262,11 @@ class Orchestrator:
             self._open_pr(step, pr_copy)
             detail = f"Auto-opened PR: {pr_copy['title']}"
         else:
+            safe_noul_str = f"{safe.noul:.2f}" if safe.noul is not None else "N/A"
+            safe_conf_str = f"{safe.confidence:.2f}" if safe.confidence is not None else "0.00"
             detail = (
                 f"PR drafted but NOT auto-opened (risk={risk.score}, "
-                f"safe_to_proceed={safe.noul:.2f} conf={safe.confidence:.2f}).\n"
+                f"safe_to_proceed={safe_noul_str} conf={safe_conf_str}).\n"
                 f"Title: {pr_copy['title']}\nBody:\n{pr_copy['body']}"
             )
             self._log("[orchestrator] " + detail)

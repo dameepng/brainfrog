@@ -25,9 +25,16 @@ def _question_to_json(q: Question) -> Dict[str, Any]:
     if isinstance(q, ChoiceQuestion):
         return {"type": "choice", "instructions": q.instructions, "criteria": q.criteria}
     if isinstance(q, ScoreQuestion):
-        return {"type": "score", "instructions": q.instructions, "scale": q.scale}
+        criteria = getattr(q, "criteria", None) or getattr(q, "scale", None)
+        if isinstance(criteria, dict):
+            criteria = list(criteria.values())
+        return {"type": "score", "instructions": q.instructions, "criteria": criteria}
     if isinstance(q, NoulQuestion):
-        return {"type": "noul", "instructions": q.instructions}
+        payload: Dict[str, Any] = {"type": "noul", "instructions": q.instructions}
+        criteria = getattr(q, "criteria", None)
+        if criteria:
+            payload["criteria"] = criteria
+        return payload
     raise TypeError(f"Unknown question type: {q!r}")  # pragma: no cover
 
 
@@ -74,16 +81,25 @@ class TypeSafeSystemOne(SystemOneClient):
             "model": self.model,
             "questions": {k: _question_to_json(q) for k, q in questions.items()},
         }
-        resp = requests.post(
-            self.api_url,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
+        try:
+            resp = requests.post(
+                self.api_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            try:
+                err_detail = resp.json()
+            except Exception:
+                err_detail = resp.text
+            raise RuntimeError(
+                f"TypeSafe/Jev API error ({resp.status_code}): {err_detail}"
+            ) from exc
         data = resp.json()
 
         answers: Dict[str, Answer] = {}

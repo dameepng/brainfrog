@@ -30,16 +30,35 @@ class TestSystem1Jev(unittest.TestCase):
             {"type": "choice", "instructions": "Pick one", "criteria": {"a": "first choice", "b": "second choice"}},
         )
 
-        score = ScoreQuestion(instructions="Rate this", scale="1-5")
+        score = ScoreQuestion(instructions="Rate this", scale=["low", "high"])
         self.assertEqual(
             _question_to_json(score),
-            {"type": "score", "instructions": "Rate this", "scale": "1-5"},
+            {"type": "score", "instructions": "Rate this", "criteria": ["low", "high"]},
+        )
+
+        score_dict = ScoreQuestion(instructions="Rate this", scale={"0": "low", "1": "high"})
+        self.assertEqual(
+            _question_to_json(score_dict),
+            {"type": "score", "instructions": "Rate this", "criteria": ["low", "high"]},
         )
 
         noul = NoulQuestion(instructions="Extract entity")
         self.assertEqual(
             _question_to_json(noul),
             {"type": "noul", "instructions": "Extract entity"},
+        )
+
+        noul_with_criteria = NoulQuestion(
+            instructions="Is urgent?",
+            criteria={"true": "Urgent", "false": "Normal"},
+        )
+        self.assertEqual(
+            _question_to_json(noul_with_criteria),
+            {
+                "type": "noul",
+                "instructions": "Is urgent?",
+                "criteria": {"true": "Urgent", "false": "Normal"},
+            },
         )
 
     @patch.dict("os.environ", {}, clear=True)
@@ -88,7 +107,7 @@ class TestSystem1Jev(unittest.TestCase):
                     "confidence": 0.95,
                 },
                 "risk": {
-                    "score": "low",
+                    "score": 0.15,
                     "confidence": 0.88,
                 },
             }
@@ -100,6 +119,7 @@ class TestSystem1Jev(unittest.TestCase):
         state = {"task": "fix auth bug"}
         questions = {
             "route": ChoiceQuestion(instructions="Route task", criteria={"backend": "Backend", "frontend": "Frontend"}),
+            "risk": ScoreQuestion(instructions="Rate risk", scale=["low", "high"]),
         }
 
         answers = client.decide(state, questions)
@@ -108,7 +128,7 @@ class TestSystem1Jev(unittest.TestCase):
         self.assertEqual(answers["route"].choice, "backend")
         self.assertEqual(answers["route"].confidence, 0.95)
         self.assertIn("risk", answers)
-        self.assertEqual(answers["risk"].score, "low")
+        self.assertEqual(answers["risk"].score, 0.15)
 
         # Verify call arguments
         mock_post.assert_called_once()
@@ -116,6 +136,24 @@ class TestSystem1Jev(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer fake_key_123")
         self.assertEqual(kwargs["json"]["state"], state)
         self.assertIn("route", kwargs["json"]["questions"])
+        self.assertEqual(kwargs["json"]["questions"]["risk"]["criteria"], ["low", "high"])
+
+    @patch("requests.post")
+    def test_decide_http_error_includes_detail(self, mock_post):
+        import requests
+        mock_response = MagicMock()
+        mock_response.status_code = 422
+        mock_response.json.return_value = {"detail": [{"msg": "Field required"}]}
+        mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "422 Client Error", response=mock_response
+        )
+        mock_post.return_value = mock_response
+
+        client = TypeSafeSystemOne(api_key="fake_key_123")
+        with self.assertRaises(RuntimeError) as ctx:
+            client.decide({}, {"q": NoulQuestion(instructions="test")})
+        self.assertIn("TypeSafe/Jev API error (422)", str(ctx.exception))
+        self.assertIn("Field required", str(ctx.exception))
 
 
 if __name__ == "__main__":

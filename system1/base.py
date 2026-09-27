@@ -35,14 +35,20 @@ class ChoiceQuestion:
 class ScoreQuestion:
     """Place the state on an ordered scale (e.g. risk low->high)."""
     instructions: Instruction
-    scale: Union[List[Any], Dict[str, Any]]  # ordered labels or level descriptions
+    scale: Union[List[Any], Dict[str, Any]] = field(default_factory=list)
+    criteria: Optional[Union[List[Any], Dict[str, Any]]] = None
     type: str = field(default="score", init=False)
+
+    def __post_init__(self) -> None:
+        if self.criteria is not None and not self.scale:
+            self.scale = self.criteria
 
 
 @dataclass
 class NoulQuestion:
     """Calibrated probability in [0, 1] that a statement is true."""
     instructions: Instruction
+    criteria: Optional[Dict[str, Any]] = None
     type: str = field(default="noul", init=False)
 
 
@@ -52,12 +58,12 @@ Question = Union[ChoiceQuestion, ScoreQuestion, NoulQuestion]
 @dataclass
 class Answer:
     choice: Optional[str] = None
-    score: Optional[str] = None
+    score: Optional[Union[str, float, int]] = None
     noul: Optional[float] = None
     confidence: float = 0.0
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
-        val = self.choice or self.score
+        val = self.choice if self.choice is not None else self.score
         if val is None and self.noul is not None:
             val = f"{self.noul:.2f}"
         return f"Answer({val}, confidence={self.confidence:.2f})"
