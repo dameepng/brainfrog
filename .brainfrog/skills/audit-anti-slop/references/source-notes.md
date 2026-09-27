@@ -16,6 +16,17 @@
 | Resilience | Does it hold in realistic states? | Narrow viewport, keyboard, loading/error/empty |
 | Language | Does the copy say something concrete? | Audience task and product specifics |
 
+## Iconography and Badge Guidelines
+
+Never strip icons or badges blindly under the guise of "anti-slop". Use this taxonomy to distinguish quality design from generic AI patterns:
+
+| Element | Purposeful Design (DO KEEP & REFINE) | Generic AI Slop (DO AVOID & CLEAN) |
+| --- | --- | --- |
+| **Icons** | Semantic actions (search, close, copy, cart), status states (success check, warning, info), domain-specific icons (tea leaves, clock, flame, location) that aid visual scanning. Ensure icon stroke weights and scale align with adjacent typography. | "Icon wallpaper": placing arbitrary, unrelated Lucide icons (rocket, zap, sparkles, diamond) in colorful glowing squares above every paragraph just to fill empty space. |
+| **Badges / Chips** | Domain metadata: price tags (`Rp 45.000`), status indicators (`Tersedia`, `Musiman`), category tags (`White Tea`, `Tisane`), duration/specs (`45 Menit`, `85°C`), active filter pills, or one focal hero badge. | "Badge fatigue": an identical floating pill badge mechanically stamped above *every single* section title (`[Pill Badge] -> [Heading] -> [Subheading]` repeating across the entire page), or badges carrying empty hype words (`World-Class`, `Revolutionary`, `Next-Gen`). |
+| **Cards & Surfaces** | Clear spatial groups with distinct purpose, generous hierarchy, readable contrast, and tactile surface feel (frosted glass, dark mode depth). | "Card-ception": nesting multiple cards with identical translucent borders and shadows inside each other, creating unnecessary visual noise without grouping real data. |
+| **Visual Aesthetics** | Rich, curated design: modern typography, tailored HSL color harmonies, smooth glassmorphism, responsive balance, and subtle micro-interactions. | Over-purging all visual charm into a sterile, brutalist monochrome wireframe. Anti-slop elevates craft and character; it does not destroy beauty. |
+
 Audit the rendered output first, then inspect source for causes. A design can be simple without being sterile; visual techniques are acceptable when tied to the product and task. If assessing code comments, remove only redundant narration and keep explanations of non-obvious decisions, invariants, and tradeoffs.
 
 ## Skill design constraints from the user

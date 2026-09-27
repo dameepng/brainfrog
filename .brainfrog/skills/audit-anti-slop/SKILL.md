@@ -5,7 +5,7 @@ description: Review or improve AI-generated UI, product copy, and code comments 
 
 # Anti-Slop Audit
 
-Use this as a purpose and quality filter, not a house style. Do not ban a color, font, gradient, card, or phrase solely because it is common. Preserve explicit brand direction and useful conventions. The inspiration and provenance are in [references/source-notes.md](references/source-notes.md); this is an original, compact workflow rather than a reproduction of that project's 38 rules.
+Use this as a purpose and quality filter, not a house style. Do not ban a color, font, gradient, card, icon, badge, or phrase solely because it is common. Preserve explicit brand direction and useful conventions. Icons provide essential scanning landmarks and affordances; badges convey vital metadata. The goal is purpose, restraint, and character — not stripping interfaces down to sterile text wireframes. The inspiration and provenance are in [references/source-notes.md](references/source-notes.md).
 
 ## Prepare
 
@@ -15,11 +15,17 @@ Use this as a purpose and quality filter, not a house style. Do not ban a color,
 
 ## Inspect and improve
 
-1. Check every major visual or verbal choice against its job: hierarchy, orientation, identity, readability, or task completion. Replace choices with no defensible purpose.
-2. Look for generic clusters: decorative gradients and glow without purpose, repeated card grids, template headings, inflated claims, generic enthusiasm, placeholder stats, and comments that merely restate code. A lone pattern is a clue, not a violation.
-3. Check honesty and function: verify metrics/testimonials/security claims, link targets, enabled controls, loading/empty/error states, keyboard flow, contrast, and terminal width or responsive layout as applicable. Remove unsupported claims; fix dead controls or omit them.
-4. Keep character. Removing generic elements is insufficient: connect layout, language, rhythm, and details to this specific product and its user. Do not invent branding or user research.
-5. For a requested audit, report prioritized findings with location, evidence, impact, and proposed fix. For requested implementation, make the fixes and inspect the rendered result. Keep the user's requested workflow moving; do not impose an extra approval gate for routine reversible edits.
+1. **Purpose over decoration**: Check every major visual or verbal choice against its job: hierarchy, orientation, identity, readability, or task completion. Replace choices with no defensible purpose.
+2. **Icons (Legitimate vs. Slop)**:
+   - *Keep & Polish*: Purposeful action icons (navigation, search, cart, close, copy), semantic status indicators (check, alert, info), and domain-specific symbols (e.g. leaf, clock, flame, location) that enhance visual scanning and affordance. Ensure stroke weight and scale match the surrounding typography.
+   - *Avoid*: Icon wallpaper — slapping arbitrary generic icons (rocket, sparkles, zap, shield) inside glowing squares above every bullet point just to fill space without adding semantic meaning.
+3. **Badges & Chips (Metadata vs. Badge Fatigue)**:
+   - *Keep & Polish*: Functional metadata chips (price tags, category pills, availability, duration, ingredients, filter chips) and single well-placed section badges where hierarchy calls for it.
+   - *Avoid*: Repetitive "badge fatigue" — prefixing every single heading with an identical floating pill badge (`[Pill Badge] -> [Title] -> [Subtitle]` repeating down the entire page) or using badges purely for generic hype phrases.
+4. **Identify generic clusters**: Look for decorative gradients/glow without purpose, repeated identical card grids, template headings, inflated claims, generic enthusiasm, placeholder stats, and comments that merely restate code. A lone pattern is a clue, not an automatic violation.
+5. **Check honesty and function**: Verify metrics/testimonials/claims, link targets, enabled controls, loading/empty/error states, keyboard flow, contrast, and terminal width or responsive layout as applicable. Remove unsupported claims; fix dead controls or omit them.
+6. **Keep character and craft**: Removing generic elements is only half the job: elevate the design with intentional typography, bespoke color palettes, tactile surfaces, and meaningful micro-interactions specific to this product and user.
+7. **Report or implement**: For a requested audit, report prioritized findings with location, evidence, impact, and proposed fix. For requested implementation, make the fixes and inspect the rendered result. Keep the user's workflow moving; do not impose extra approval gates for routine reversible edits.
 
 ## Deterministic checks
 
