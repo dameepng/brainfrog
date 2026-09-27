@@ -7,6 +7,11 @@ description: Review or improve AI-generated UI, product copy, and code comments 
 
 Use this as a purpose and quality filter, not a house style. Do not ban a color, font, gradient, card, icon, badge, or phrase solely because it is common. Preserve explicit brand direction and useful conventions. Icons provide essential scanning landmarks and affordances; badges convey vital metadata. The goal is purpose, restraint, and character — not stripping interfaces down to sterile text wireframes. The inspiration and provenance are in [references/source-notes.md](references/source-notes.md).
 
+## Core Directives
+
+1. **Zero Emojis & Emoticons**: Strictly forbid raw unicode emojis (🍃, 🚀, ✨, 🔥, 🫖, 👍, etc.) and text emoticons (`:)`, `XD`, etc.) anywhere in production web interfaces (headings, buttons, brand marks, cards, badges, navigation). Emojis look amateurish and signal generic AI slop.
+2. **Mandatory Open-Source SVG Icons**: Always use vector SVG icons from curated open-source libraries (e.g. Lucide Icons, Heroicons, Feather Icons, Tabler Icons, Radix Icons). Implement them as inline SVG or icon components with appropriate stroke width, sizing, and `aria-hidden="true"` or semantic labels.
+
 ## Prepare
 
 1. Read the user's brief, existing product copy, brand assets, and applicable design guidance. Inspect the actual interface or relevant source; do not infer it from filenames.
@@ -16,9 +21,10 @@ Use this as a purpose and quality filter, not a house style. Do not ban a color,
 ## Inspect and improve
 
 1. **Purpose over decoration**: Check every major visual or verbal choice against its job: hierarchy, orientation, identity, readability, or task completion. Replace choices with no defensible purpose.
-2. **Icons (Legitimate vs. Slop)**:
-   - *Keep & Polish*: Purposeful action icons (navigation, search, cart, close, copy), semantic status indicators (check, alert, info), and domain-specific symbols (e.g. leaf, clock, flame, location) that enhance visual scanning and affordance. Ensure stroke weight and scale match the surrounding typography.
-   - *Avoid*: Icon wallpaper — slapping arbitrary generic icons (rocket, sparkles, zap, shield) inside glowing squares above every bullet point just to fill space without adding semantic meaning.
+2. **Icons vs. Emojis (Zero Emojis, Mandatory Open-Source Icons)**:
+   - *Eliminate all Emojis & Emoticons*: Remove every raw unicode emoji or text emoticon from markup, copy, and CSS pseudo-elements. Replace them with purposeful open-source SVG icons (Lucide, Heroicons, etc.).
+   - *Keep & Polish Vector Icons*: Purposeful action icons (navigation, search, cart, close, copy), semantic status indicators (check, alert, info), and domain-specific symbols (e.g. leaf, clock, flame, location) that enhance visual scanning and affordance. Ensure stroke weight and scale match the surrounding typography.
+   - *Avoid Icon Wallpaper*: Slapping arbitrary generic icons (rocket, sparkles, zap, shield) inside glowing squares above every bullet point just to fill space without adding semantic meaning.
 3. **Badges & Chips (Metadata vs. Badge Fatigue)**:
    - *Keep & Polish*: Functional metadata chips (price tags, category pills, availability, duration, ingredients, filter chips) and single well-placed section badges where hierarchy calls for it.
    - *Avoid*: Repetitive "badge fatigue" — prefixing every single heading with an identical floating pill badge (`[Pill Badge] -> [Title] -> [Subtitle]` repeating down the entire page) or using badges purely for generic hype phrases.
@@ -29,7 +35,7 @@ Use this as a purpose and quality filter, not a house style. Do not ban a color,
 
 ## Deterministic checks
 
-For HTML/UI source files, run `python3 scripts/scan_ui.py PATH [PATH ...]` from this skill directory (or use its absolute path). The script reports candidate placeholder links, copy, and unverified numerical claims with file and line. Treat findings as leads requiring inspection, never as proof of a defect. It performs no modifications and uses no network.
+For HTML/UI source files, run `python3 scripts/scan_ui.py PATH [PATH ...]` from this skill directory (or use its absolute path). The script reports candidate placeholder links, copy, unverified numerical claims, and prohibited emojis/emoticons with file and line. Treat findings as leads requiring inspection, never as proof of a defect. It performs no modifications and uses no network.
 
 Use a renderer/browser or terminal capture to verify actual layout and behavior. Test critical interactions and states appropriate to the change. Do not claim a visual match from source code alone.
 
