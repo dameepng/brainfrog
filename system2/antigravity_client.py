@@ -14,7 +14,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from system2.claude_client import PlanStep, _extract_json, usage_tracker
+from system2.claude_client import PlanStep, usage_tracker
+from system2.json_utils import extract_json, _extract_json, repair_json_content
 
 DEFAULT_ANTIGRAVITY_MODEL = os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
 
@@ -243,7 +244,9 @@ class AntigravitySystem2Client:
             "Respond with ONLY JSON: "
             '{"files": {"path/to/file.py": "<full new file content>"}, "summary": "one line"}. '
             "Return the COMPLETE new content for each file you change, not a diff. "
-            "Only include files you actually changed. No prose outside the JSON."
+            "Only include files you actually changed. No prose outside the JSON. "
+            "IMPORTANT: Output strict, valid JSON. Ensure all quotes and backslashes inside file strings are properly escaped. "
+            "In React/JSX, use single quotes {' '} or &nbsp; for whitespace, never unescaped double quotes."
         )
         all_context = dict(file_contents)
         if pinned_files:
@@ -267,7 +270,9 @@ class AntigravitySystem2Client:
             "Read the failure output and the current file contents, diagnose the "
             "root cause, and fix it. Respond with ONLY JSON: "
             '{"files": {"path": "<full new file content>"}, "diagnosis": "one line"}. '
-            "Return full file content for every file you change. No prose outside the JSON."
+            "Return full file content for every file you change. No prose outside the JSON. "
+            "IMPORTANT: Output strict, valid JSON. Ensure all quotes and backslashes inside file strings are properly escaped. "
+            "In React/JSX, use single quotes {' '} or &nbsp; for whitespace, never unescaped double quotes."
         )
         user = (
             f"Task:\n{task}\n\nStep:\n{step.description}\n\n"

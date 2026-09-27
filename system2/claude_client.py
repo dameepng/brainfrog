@@ -64,79 +64,7 @@ class UsageTracker:
 usage_tracker = UsageTracker()
 
 
-def _extract_json(text: str) -> Dict[str, Any]:
-    """Pull the first valid {...} JSON object out of a model response.
-
-    Handles free-form thought processes, markdown prose preceding JSON,
-    markdown fences (```json ... ```), nested braces, and trailing commas.
-    """
-    decoder = json.JSONDecoder()
-    text = text.strip()
-
-    # 1. Check for markdown fenced json blocks first (e.g. ```json { ... } ```)
-    fence_pattern = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.DOTALL)
-    for match in fence_pattern.finditer(text):
-        content = match.group(1).strip()
-        try:
-            obj, _ = decoder.raw_decode(content)
-            if isinstance(obj, dict):
-                return obj
-        except json.JSONDecodeError:
-            # Try cleaning trailing commas
-            try:
-                cleaned = re.sub(r",\s*([\]\}])", r"\1", content)
-                obj = json.loads(cleaned)
-                if isinstance(obj, dict):
-                    return obj
-            except Exception:
-                pass
-
-    # 2. Iterate through all '{' occurrences and try decoding
-    candidates = []
-    idx = 0
-    while True:
-        pos = text.find("{", idx)
-        if pos == -1:
-            break
-        try:
-            obj, end = decoder.raw_decode(text, pos)
-            if isinstance(obj, dict):
-                candidates.append((pos, end, obj))
-                idx = end
-            else:
-                idx = pos + 1
-        except json.JSONDecodeError:
-            idx = pos + 1
-
-    if candidates:
-        expected_keys = {"files", "steps", "plan", "title", "body", "answer", "tasks"}
-        for _, _, obj in candidates:
-            if any(k in obj for k in expected_keys):
-                return obj
-        candidates.sort(key=lambda c: len(c[2]), reverse=True)
-        return candidates[0][2]
-
-    # 3. Last fallback: try stripped fences as in original implementation
-    if text.startswith("```"):
-        lines = text.splitlines()
-        inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
-        if inner and inner[-1].strip() == "```":
-            inner = inner[:-1]
-        text = "\n".join(inner).strip()
-
-    start = text.find("{")
-    if start == -1:
-        raise ValueError(f"No JSON object found in model output:\n{text[:500]}")
-
-    try:
-        obj, _ = decoder.raw_decode(text, start)
-        return obj
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"JSON parse error at position {exc.pos} in model output.\n"
-            f"Context: ...{text[max(0, exc.pos-80):exc.pos+80]}...\n"
-            f"Full output (first 800 chars):\n{text[:800]}"
-        ) from exc
+from system2.json_utils import extract_json, _extract_json, repair_json_content
 
 
 
@@ -277,7 +205,9 @@ class System2Client:
             "Respond with ONLY JSON: "
             '{"files": {"path/to/file.py": "<full new file content>"}, "summary": "one line"}. '
             "Return the COMPLETE new content for each file you change, not a diff. "
-            "Only include files you actually changed. No prose outside the JSON."
+            "Only include files you actually changed. No prose outside the JSON. "
+            "IMPORTANT: Output strict, valid JSON. Ensure all quotes and backslashes inside file strings are properly escaped. "
+            "In React/JSX, use single quotes {' '} or &nbsp; for whitespace, never unescaped double quotes."
         )
         all_context = dict(file_contents)
         if pinned_files:
@@ -301,7 +231,9 @@ class System2Client:
             "Read the failure output and the current file contents, diagnose the "
             "root cause, and fix it. Respond with ONLY JSON: "
             '{"files": {"path": "<full new file content>"}, "diagnosis": "one line"}. '
-            "Return full file content for every file you change. No prose outside the JSON."
+            "Return full file content for every file you change. No prose outside the JSON. "
+            "IMPORTANT: Output strict, valid JSON. Ensure all quotes and backslashes inside file strings are properly escaped. "
+            "In React/JSX, use single quotes {' '} or &nbsp; for whitespace, never unescaped double quotes."
         )
         user = (
             f"Task:\n{task}\n\nStep:\n{step.description}\n\n"

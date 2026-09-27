@@ -24,7 +24,13 @@ if _PACKAGE_DIR not in sys.path:
 
 from modules import Domain, resolve_focus_tree
 from system1.base import Answer, ChoiceQuestion, NoulQuestion, ScoreQuestion, SystemOneClient
-from system2.claude_client import PlanStep, System2Client
+from system2 import PlanStep, System2Client, extract_json
+from git_guard import (
+    ensure_gitignore_security,
+    scan_staged_changes,
+    scan_dict_files,
+    unstage_staged_changes,
+)
 
 
 @dataclass
@@ -897,27 +903,24 @@ class Orchestrator:
             learned_count = 0
 
             if raw:
-                # Parse JSON response
-                import re as _re
-                json_match = _re.search(r'\{[\s\S]*\}', raw)
-                if json_match:
-                    try:
-                        data = json.loads(json_match.group())
-                        for item in data.get("learnings", []):
-                            rule = item.get("rule", "").strip()
-                            tags = item.get("tags", [])
-                            if rule:
-                                add_learning(
-                                    store,
-                                    rule=rule,
-                                    source="reflection",
-                                    context=f"Task: {task[:100]}",
-                                    tags=tags if tags else None,
-                                    repo_name=self.cfg.repo_dir.name,
-                                )
-                                learned_count += 1
-                    except json.JSONDecodeError:
-                        pass
+                # Parse JSON response with auto-repair
+                try:
+                    data = extract_json(raw)
+                    for item in data.get("learnings", []):
+                        rule = item.get("rule", "").strip()
+                        tags = item.get("tags", [])
+                        if rule:
+                            add_learning(
+                                store,
+                                rule=rule,
+                                source="reflection",
+                                context=f"Task: {task[:100]}",
+                                tags=tags if tags else None,
+                                repo_name=self.cfg.repo_dir.name,
+                            )
+                            learned_count += 1
+                except Exception:
+                    pass
 
             # Fallback: if no structured reflection, store a generic one
             if learned_count == 0 and retries > 0:
@@ -959,8 +962,24 @@ class Orchestrator:
         commit_body = pr_copy.get("body", "").strip()
         commit_msg = f"{commit_title}\n\n{commit_body}" if commit_body else commit_title
 
+        # Protect .gitignore
+        ensure_gitignore_security(self.cfg.repo_dir)
+
         try:
             _run(["git", "add", "-A"], self.cfg.repo_dir)
+
+            # 🛡️ Git Secret Guard — Pre-commit scan
+            scan = scan_staged_changes(self.cfg.repo_dir)
+            if not scan.is_clean:
+                unstage_staged_changes(self.cfg.repo_dir)
+                self._log("[git/security] 🚨 [bold red]COMMIT & PUSH BLOCKED — SECRET LEAK DETECTED[/bold red]")
+                for finding in scan.findings:
+                    loc = f"{finding.file_path}:{finding.line_number}" if finding.line_number else finding.file_path
+                    self._log(f"[git/security]   • [{finding.severity}] {finding.rule} in [bold yellow]{loc}[/bold yellow]")
+                    self._log(f"[git/security]     Snippet: [dim]{finding.redacted_snippet}[/dim]")
+                self._log("[git/security] ❌ Aborted commit and push to prevent security incident.")
+                return StepResult(step, "escalated", retries, f"Security Violation: {scan.summary}")
+
             commit_res = _run(["git", "commit", "-m", commit_msg], self.cfg.repo_dir)
             if commit_res.returncode == 0:
                 self._log(f"[git] 📦 Committed: [bold #E8E8E8]{commit_title}[/bold #E8E8E8]")
@@ -1015,7 +1034,16 @@ class Orchestrator:
             raise PermissionError("Pembuatan pull request dilarang dalam mode Plan.")
         branch = f"{self.cfg.branch_prefix}{step.id}"
         _run(["git", "checkout", "-b", branch], self.cfg.repo_dir)
+        ensure_gitignore_security(self.cfg.repo_dir)
         _run(["git", "add", "-A"], self.cfg.repo_dir)
+
+        # 🛡️ Git Secret Guard
+        scan = scan_staged_changes(self.cfg.repo_dir)
+        if not scan.is_clean:
+            unstage_staged_changes(self.cfg.repo_dir)
+            self._log(f"[git/security] 🚨 PR Creation BLOCKED — secrets detected: {scan.summary}")
+            return
+
         _run(["git", "commit", "-m", pr_copy["title"]], self.cfg.repo_dir)
         push = _run(["git", "push", "-u", "origin", branch], self.cfg.repo_dir)
         if push.returncode != 0:

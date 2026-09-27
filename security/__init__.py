@@ -1,0 +1,56 @@
+"""Security package for BrainFrog — Secrets Protection, Key Management, and Authentication."""
+from __future__ import annotations
+
+from .git_guard import (
+    SecretFinding,
+    ScanResult,
+    scan_staged_changes,
+    scan_dict_files,
+    scan_text_content,
+    scan_file_path,
+    unstage_staged_changes,
+    ensure_gitignore_security,
+    redact,
+    is_safe_value,
+)
+from .auth_manager import (
+    get_gemini_dir,
+    get_vault_dir,
+    decode_jwt_payload,
+    extract_email_from_oauth_file,
+    read_windows_keyring_account,
+    write_windows_keyring_account,
+    sync_windows_keyring_to_vault,
+    get_active_account,
+    save_current_account_to_vault,
+    list_accounts,
+    switch_account,
+    remove_account,
+    login_new_account_flow,
+)
+
+__all__ = [
+    "SecretFinding",
+    "ScanResult",
+    "scan_staged_changes",
+    "scan_dict_files",
+    "scan_text_content",
+    "scan_file_path",
+    "unstage_staged_changes",
+    "ensure_gitignore_security",
+    "redact",
+    "is_safe_value",
+    "get_gemini_dir",
+    "get_vault_dir",
+    "decode_jwt_payload",
+    "extract_email_from_oauth_file",
+    "read_windows_keyring_account",
+    "write_windows_keyring_account",
+    "sync_windows_keyring_to_vault",
+    "get_active_account",
+    "save_current_account_to_vault",
+    "list_accounts",
+    "switch_account",
+    "remove_account",
+    "login_new_account_flow",
+]

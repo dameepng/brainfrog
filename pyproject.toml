@@ -20,5 +20,5 @@ brainfrog = "cli:main"
 bf = "cli:main"
 
 [tool.setuptools]
-py-modules = ["cli", "config", "modules", "orchestrator"]
-packages = ["system1", "system2"]
+py-modules = ["cli", "orchestrator", "config", "modules", "plans", "memory", "skills", "auth_manager", "git_guard"]
+packages = ["core", "security", "system1", "system2", "tests"]

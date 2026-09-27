@@ -6,6 +6,7 @@ from typing import Optional
 from .claude_client import PlanStep, UsageStats, UsageTracker, usage_tracker
 from .claude_client import System2Client as ClaudeSystem2Client
 from .antigravity_client import AntigravitySystem2Client, find_antigravity_bin
+from .json_utils import extract_json, _extract_json, repair_json_content
 
 
 def get_system2_provider(explicit_provider: Optional[str] = None) -> str:
@@ -65,4 +66,7 @@ __all__ = [
     "AntigravitySystem2Client",
     "get_system2_provider",
     "find_antigravity_bin",
+    "extract_json",
+    "_extract_json",
+    "repair_json_content",
 ]
