@@ -1,11 +1,11 @@
-"""BrainFrog CLI — Dual-System Coding Agent (Jev System 1 + Claude System 2).
+"""BrainFrog CLI: Dual-System Coding Agent (Jev System 1 + Claude System 2).
 
 Equipped with 5 Killer Features:
-1. /undo & /diff — Git-native safety net to inspect diffs and revert unwanted AI changes
-2. BRAINFROG.md — Project memory and custom rules injected into Claude's prompt
-3. @file Context Pinning — Mention @filename in prompts to inject direct file context
-4. !command Terminal Passthrough — Execute shell commands inside REPL without leaving
-5. /cost & /stats — Transparent token usage and API cost tracker
+1. /undo & /diff: Git-native safety net to inspect diffs and revert unwanted AI changes
+2. BRAINFROG.md: Project memory and custom rules injected into Claude's prompt
+3. @file Context Pinning: Mention @filename in prompts to inject direct file context
+4. !command Terminal Passthrough: Execute shell commands inside REPL without leaving
+5. /cost & /stats: Transparent token usage and API cost tracker
 """
 from __future__ import annotations
 
