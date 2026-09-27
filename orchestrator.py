@@ -304,37 +304,134 @@ def _format_diff_breakdown(summary: CommitDiffSummary, max_files: int = 10) -> L
     return lines
 
 
-# System 1 gate questions
-NEXT_ACTION_QUESTION = ChoiceQuestion(
-    instructions="What should the orchestrator do next?",
+# ---------------------------------------------------------------------------
+# System 1 gate questions (TypeSafe best practices applied)
+#
+# Design principles from SKILL.md:
+#   1. Decompose into narrow, atomic questions
+#   2. Use structured instructions (dict) with question + focus
+#   3. Use contrastive criteria (what / not_for / examples)
+#   4. Fan-out: ask speculative questions in the same request
+#   5. Compose answers in code with explicit thresholds
+# ---------------------------------------------------------------------------
+
+# --- Scope gate: fan-out questions ---
+CHANGE_TYPE_QUESTION = ChoiceQuestion(
+    instructions={
+        "question": "What kind of request is the user making?",
+        "focus": "Classify the user's intent, not the implementation complexity.",
+    },
     criteria={
-        "open_pr": "All tests passed cleanly and the diff looks complete.",
-        "retry_fix": "Tests failed, but the failure is specific and likely fixable.",
-        "escalate_human": "Tests failed repeatedly or the failure seems fundamentally beyond the model.",
-        "abandon": "The goal appears unreachable or contradictory with the codebase.",
+        "bug_investigation": {
+            "what": "Describes broken behavior, an error message, or a test failure to fix",
+            "not_for": "Feature additions or questions about the codebase",
+            "examples": ["Fix the TypeError in auth.py", "Tests are failing on CI"],
+        },
+        "feature_request": {
+            "what": "Asks for new behavior that doesn't exist yet",
+            "not_for": "Fixing existing broken behavior",
+            "examples": ["Add dark mode support", "Implement user search endpoint"],
+        },
+        "question_only": {
+            "what": "Asks to understand or see something, not asking for code changes",
+            "not_for": "Requests that imply the user wants something built or fixed",
+            "examples": ["How does the auth flow work?", "Show me the database schema"],
+        },
+        "unclear": {
+            "what": "Too vague to classify with confidence",
+            "not_for": "Clear requests in any of the categories above",
+            "examples": ["Help me with this", "Look at the code"],
+        },
     },
 )
 
-RISK_QUESTION = ScoreQuestion(
-    instructions="How risky is this diff to merge to main?",
-    scale={
-        "low": "Small, self-contained change, well-covered by tests.",
-        "medium": "Touches core logic or multiple files, but well-tested.",
-        "high": "Large blast radius, touches auth/billing/migrations, or light tests.",
+SENSITIVE_TOUCH_QUESTION = NoulQuestion(
+    instructions={
+        "question": "Does this task touch authentication, billing, secrets, database migrations, or security-critical code?",
+        "focus": "Evaluate whether the requested change involves sensitive areas that need extra caution.",
     },
+)
+
+COMPLEXITY_QUESTION = ScoreQuestion(
+    instructions={
+        "question": "How complex is this task to implement?",
+        "focus": "Judge the implementation scope, not the domain difficulty.",
+    },
+    scale=[
+        {"what": "Trivial one-liner", "signals": ["Single line change", "Config tweak", "Typo fix"]},
+        {"what": "Small focused change", "signals": ["One or two files", "Clear scope", "Straightforward logic"]},
+        {"what": "Multi-file refactor", "signals": ["Three or more files", "Cross-cutting change", "Needs test updates"]},
+        {"what": "Architectural change", "signals": ["New abstractions", "Interface redesign", "Breaking changes possible"]},
+    ],
+)
+
+NEEDS_TESTS_QUESTION = NoulQuestion(
+    instructions={
+        "question": "Does this task require new or modified test cases?",
+        "focus": "Consider whether the change adds behavior, fixes a bug, or alters interfaces that tests should cover.",
+    },
+)
+
+# --- Post-test evaluation: atomic decomposition ---
+TESTS_PASSING_QUESTION = NoulQuestion(
+    instructions={
+        "question": "Did all test cases in `execution.test_summary` pass without errors?",
+        "focus": "Look at exit codes and error lines, not warnings.",
+    },
+)
+
+DIFF_COMPLETE_QUESTION = NoulQuestion(
+    instructions={
+        "question": "Does the current `diff` fully address the original `task.original_request`?",
+        "focus": "Compare the user's intent with the scope of changes made.",
+    },
+)
+
+FAILURE_FIXABLE_QUESTION = NoulQuestion(
+    instructions={
+        "question": "Is the test failure specific enough that a targeted code fix could resolve it?",
+        "focus": "A fixable failure has a clear error message pointing to a specific line or assertion. An unfixable failure is vague, systemic, or requires architectural rethinking.",
+    },
+)
+
+RETRY_CONCERN_QUESTION = ScoreQuestion(
+    instructions={
+        "question": "How concerning is the retry situation given `execution.retry_count` vs `execution.max_retries`?",
+        "focus": "Judge whether further retries are likely productive.",
+    },
+    scale=[
+        {"what": "Within normal", "signals": ["First or second attempt", "Error is clearly different from previous"]},
+        {"what": "Approaching limit", "signals": ["Close to max retries", "Same error pattern repeating"]},
+        {"what": "Exceeded reasonable limit", "signals": ["At or past max retries", "No progress across attempts"]},
+    ],
+)
+
+# --- PR risk gate: structured score levels ---
+RISK_QUESTION = ScoreQuestion(
+    instructions={
+        "question": "How risky is this diff to merge to main?",
+        "focus": "Evaluate blast radius, test coverage, and sensitivity of touched code.",
+    },
+    scale=[
+        {
+            "what": "Low risk",
+            "signals": ["Small, self-contained change", "Well-covered by tests", "No sensitive areas touched"],
+        },
+        {
+            "what": "Medium risk",
+            "signals": ["Touches core logic or multiple files", "Tests exist but may not cover edge cases"],
+        },
+        {
+            "what": "High risk",
+            "signals": ["Large blast radius", "Touches auth/billing/migrations", "Sparse or no test coverage"],
+        },
+    ],
 )
 
 SAFE_TO_PROCEED_QUESTION = NoulQuestion(
-    instructions="Should this change proceed to an automatic PR without human sign-off?",
-)
-
-CHANGE_TYPE_QUESTION = ChoiceQuestion(
-    instructions="What kind of request is the user making?",
-    criteria={
-        "bug_investigation": "Describes broken behavior, an error message, or a test failure to fix.",
-        "feature_request": "Asks for new behavior that doesn't exist yet.",
-        "question_only": "Asks to understand or be shown something; not clearly asking for a code change.",
-        "unclear": "Too vague to tell what's actually being asked for.",
+    instructions={
+        "question": "Should this change proceed to an automatic PR without human sign-off?",
+        "focus": "Consider the risk level, whether tests passed, and whether the diff touches sensitive areas flagged in `sensitive_domain`.",
     },
 )
 
@@ -709,21 +806,50 @@ class Orchestrator:
         criteria = {key: d.description for key, d in self.cfg.domains.items()}
         criteria["unrelated"] = "Doesn't clearly match any of the other listed areas."
         domain_question = ChoiceQuestion(
-            instructions="Which part of the codebase is this user prompt most likely about?",
+            instructions={
+                "question": "Which part of the codebase is `task.user_prompt` most likely about?",
+                "focus": "Match the user's intent to a domain, not the exact file path.",
+            },
             criteria=criteria,
         )
-        state = {"user_prompt": self.cfg.task, "domain_options": list(criteria.keys())}
-        answers = self.s1.decide(
-            state, {"likely_domain": domain_question, "change_type": CHANGE_TYPE_QUESTION}
-        )
+
+        # Structured state: only relevant context, named fields for path references
+        state = {
+            "task": {
+                "user_prompt": self.cfg.task,
+            },
+            "codebase": {
+                "domain_options": list(criteria.keys()),
+                "domain_count": len(self.cfg.domains),
+            },
+        }
+
+        # Speculative fan-out: ask all scope questions in a single Jev request.
+        # Questions run in parallel; code decides which answers to use.
+        answers = self.s1.decide(state, {
+            "likely_domain": domain_question,
+            "change_type": CHANGE_TYPE_QUESTION,
+            "is_sensitive": SENSITIVE_TOUCH_QUESTION,
+            "complexity": COMPLEXITY_QUESTION,
+            "needs_tests": NEEDS_TESTS_QUESTION,
+        })
+
         domain_answer = answers["likely_domain"]
         change_type = answers["change_type"].choice or "unclear"
         if is_question_task(self.cfg.task, change_type):
             change_type = "question_only"
 
+        # Tiered confidence logging for debugging and threshold tuning
+        sensitive_prob = answers["is_sensitive"].noul or 0.0
+        complexity_score = answers["complexity"].score or "unknown"
+        needs_tests_prob = answers["needs_tests"].noul or 0.0
         self._log(
-            f"[system1/jev:{self.s1.name}] likely_domain = {domain_answer}, "
-            f"change_type = {change_type}"
+            f"[system1/jev:{self.s1.name}] scope_gate results:\n"
+            f"  likely_domain = {domain_answer}\n"
+            f"  change_type   = {change_type} (confidence={answers['change_type'].confidence:.2f})\n"
+            f"  is_sensitive  = {sensitive_prob:.2f}\n"
+            f"  complexity    = {complexity_score} (confidence={answers['complexity'].confidence:.2f})\n"
+            f"  needs_tests   = {needs_tests_prob:.2f}"
         )
 
         threshold = 0.35 if len(self.cfg.domains) == 1 else self.cfg.min_domain_confidence
@@ -776,27 +902,57 @@ class Orchestrator:
             output = (test_proc.stdout or "") + (test_proc.stderr or "")
             self._log(f"[tests] {'PASS' if passed else 'FAIL'} (exit {test_proc.returncode})")
 
+            # Structured state with nested fields for Jev path references
+            diff_stat = _diff_stat(self.cfg.repo_dir)
             state: Dict[str, Any] = {
-                "task": self.cfg.task,
-                "step": step.description,
-                "test_passed": passed,
-                "test_summary": output[-800:],
-                "retry_count": retries,
-                "max_retries": self.cfg.max_retries,
-                **_diff_stat(self.cfg.repo_dir),
+                "task": {
+                    "original_request": self.cfg.task,
+                    "step_description": step.description,
+                },
+                "execution": {
+                    "test_passed": passed,
+                    "test_exit_code": test_proc.returncode,
+                    "test_summary": output[-800:],
+                    "retry_count": retries,
+                    "max_retries": self.cfg.max_retries,
+                },
+                "diff": {
+                    "lines_added": diff_stat.get("lines_added", 0),
+                    "lines_deleted": diff_stat.get("lines_deleted", 0),
+                },
             }
-            answers = self.s1.decide(state, {"next_action": NEXT_ACTION_QUESTION})
-            decision = answers["next_action"]
-            self._log(f"[system1/jev:{self.s1.name}] next_action = {decision}")
 
-            if decision.choice == "open_pr":
+            # Atomic fan-out: 4 narrow questions in 1 Jev request, composed in code
+            answers = self.s1.decide(state, {
+                "tests_passing": TESTS_PASSING_QUESTION,
+                "diff_complete": DIFF_COMPLETE_QUESTION,
+                "failure_fixable": FAILURE_FIXABLE_QUESTION,
+                "retry_concern": RETRY_CONCERN_QUESTION,
+            })
+
+            tests_ok = (answers["tests_passing"].noul or 0.0) > 0.7
+            diff_ok = (answers["diff_complete"].noul or 0.0) > 0.6
+            fixable = (answers["failure_fixable"].noul or 0.0) > 0.5
+            retry_score = answers["retry_concern"].score or "within_normal"
+
+            self._log(
+                f"[system1/jev:{self.s1.name}] post-test evaluation:\n"
+                f"  tests_passing  = {answers['tests_passing'].noul:.2f} (threshold=0.70)\n"
+                f"  diff_complete  = {answers['diff_complete'].noul:.2f} (threshold=0.60)\n"
+                f"  failure_fixable= {answers['failure_fixable'].noul:.2f} (threshold=0.50)\n"
+                f"  retry_concern  = {retry_score} (confidence={answers['retry_concern'].confidence:.2f})"
+            )
+
+            # Code-side composition: explicit rules, not a single model choice
+            if tests_ok and diff_ok:
+                # All tests passed and diff addresses the task
                 visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
-                # Continuous Learning: auto-reflect if task was difficult
                 if retries > 0 or visual_fixed:
                     self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
                 return self._finalize_pr(step, retries, output, sensitive=sensitive)
 
-            if decision.choice == "retry_fix" and retries < self.cfg.max_retries:
+            if fixable and retry_score != "exceeded_reasonable_limit" and retries < self.cfg.max_retries:
+                # Failure looks specific and fixable, retry is still productive
                 retries += 1
                 self._log(f"[system2/{self.s2_tag}] reviewing failure, attempt {retries}/{self.cfg.max_retries} ...")
                 current = _read_files(self.cfg.repo_dir, list(new_files.keys()) or step.files)
@@ -805,8 +961,8 @@ class Orchestrator:
                 new_files.update(fixed)
                 continue
 
-            if decision.choice == "abandon":
-                return StepResult(step, "abandoned", retries, "Jev classified this approach as unrecoverable.")
+            if retry_score == "exceeded_reasonable_limit" or retries >= self.cfg.max_retries:
+                return StepResult(step, "abandoned", retries, "Jev assessed retry limit exceeded with no progress.")
 
             return StepResult(
                 step,

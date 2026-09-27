@@ -1,42 +1,48 @@
-"""System One interface — the Jev-shaped contract.
+"""System One interface: the Jev-shaped contract.
 
-Any backend (a local heuristic mock today, the real TypeSafe Jev API
-tomorrow) implements `SystemOneClient.decide()`. The orchestrator only
-ever talks to this interface, so swapping the backend later is a
-one-line config change, not a rewrite.
+Every System 1 backend implements `SystemOneClient.decide()`.
+The orchestrator only ever talks to this interface.
 
-Mirrors TypeSafe's real /v1/systemone schema:
-  - state: dict of context (NOT free text you want summarized — short,
-    structured facts the decision needs)
+Mirrors TypeSafe's /v1/systemone schema:
+  - state: dict of structured context the decision needs
   - questions: named dict, each one of Choice / Score / Noul
   - answers: same names back, each with a typed value + confidence
+
+Instructions and criteria accept both plain strings and structured
+objects (dicts / lists of dicts) per the official TypeSafe API spec.
+See: https://docs.typesafe.ai/primitives/advanced
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
+
+# TypeSafe API accepts plain strings or structured objects for instructions
+# and criteria. These type aliases capture that flexibility.
+Instruction = Union[str, Dict[str, Any]]
+Criteria = Union[Dict[str, Any], List[Any], str]
 
 
 @dataclass
 class ChoiceQuestion:
     """Pick exactly one option from a fixed set."""
-    instructions: str
-    criteria: Dict[str, str]  # option_key -> human description
+    instructions: Instruction
+    criteria: Dict[str, Any]  # option_key -> description (str or structured dict)
     type: str = field(default="choice", init=False)
 
 
 @dataclass
 class ScoreQuestion:
     """Place the state on an ordered scale (e.g. risk low->high)."""
-    instructions: str
-    scale: List[str]  # ordered labels, low to high
+    instructions: Instruction
+    scale: Union[List[Any], Dict[str, Any]]  # ordered labels or level descriptions
     type: str = field(default="score", init=False)
 
 
 @dataclass
 class NoulQuestion:
     """Calibrated probability in [0, 1] that a statement is true."""
-    instructions: str
+    instructions: Instruction
     type: str = field(default="noul", init=False)
 
 
