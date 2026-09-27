@@ -970,6 +970,12 @@ def run_interactive(
             event.current_buffer.text = "/help"
             event.current_buffer.validate_and_handle()
 
+        @kb.add("c-n")
+        def _new_chat_shortcut(event):
+            """Ctrl+N: Instant new chat session & reset memory context."""
+            event.current_buffer.text = "/new"
+            event.current_buffer.validate_and_handle()
+
         @kb.add("tab")
         def _tab_handler(event):
             nonlocal active_mode, active_plan_context
@@ -1142,7 +1148,7 @@ def run_interactive(
             ]
         else:
             # Standard & Wide (>=60 cols): 2-line status bar with context metrics
-            left_hints = "  tab mode    ctrl+p help    /new reset    /context"
+            left_hints = "  tab mode    ctrl+n new    ctrl+p help    /context"
             right_v = f"v{CLI_VERSION}  "
             gap = max(1, cols - len(left_hints) - len(right_v) - 1)
             line2 = f"{left_hints}{' ' * gap}{right_v}"
@@ -1267,6 +1273,7 @@ def run_interactive(
 
         commands = [
             ("Tab", "Ganti mode sesi Plan / Build (saat input kosong)", "Shortcut"),
+            ("Ctrl+N", "Mulai sesi baru & reset memory context ke 0%", "Shortcut"),
             ("Ctrl+P", "Buka bantuan perintah ini", "Shortcut"),
             ("@filename", "Pin konteks file dengan popup pelengkapan otomatis", "Context"),
             ("!command", "Jalankan perintah shell terminal langsung di sesi REPL", "Shell"),
