@@ -335,7 +335,7 @@ def detect_default_test_cmd(repo_dir: Path) -> str:
 def execute_task(
     task: str,
     repo_dir: Path,
-    backend: str = "auto",
+    backend: str = "jev",
     model: Optional[str] = None,
     claude_model: Optional[str] = None,
     provider: Optional[str] = None,
@@ -564,7 +564,7 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/repo", "Switch target workspace repository"),
     ("/remote", "View or configure Git remote origin repository"),
     ("/test-cmd", "Change test command"),
-    ("/backend", "Switch System 1 backend (mock|typesafe|auto)"),
+    ("/backend", "Switch System 1 backend (jev|typesafe)"),
     ("/skills", "List all available modular skills"),
     ("/skill", "Activate modular skill (e.g. /skill audit-anti-slop)"),
     ("/domains", "List detected domain modules and paths"),
@@ -819,7 +819,7 @@ def select_account_interactive() -> Optional[str]:
 # -------------------------------------------------------------------------
 def run_interactive(
     initial_repo: Path,
-    backend: str = "auto",
+    backend: str = "jev",
     model: Optional[str] = None,
     claude_model: Optional[str] = None,
     provider: Optional[str] = None,
@@ -1295,7 +1295,7 @@ def run_interactive(
             ("/repo <path>", "Pindah direktori repositori target workspace", "Workspace"),
             ("/remote [url]", "Lihat atau atur Git remote repository GitHub", "Workspace"),
             ("/test-cmd <cmd>", "Ganti perintah test runner (mis. pytest, npm test)", "Config"),
-            ("/backend <name>", "Ganti System 1 backend (mock | typesafe | auto)", "System"),
+            ("/backend [name]", "Status backend System 1 (Jev via TypeSafe Cloud API)", "System"),
             ("/domains", "Tampilkan domain modul arsitektur yang terdeteksi", "Architecture"),
             ("/init [stack]", "Auto-generate modules.json (web | node | python)", "Setup"),
             ("/new, /reset", "Mulai sesi baru & reset memory context (0%)", "Session"),
@@ -1684,7 +1684,7 @@ def run_interactive(
                 f"[{COLOR_FG_PRIMARY}]AI Model:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_PRIMARY} bold]{active_model}[/{COLOR_FG_PRIMARY} bold]\n"
                 f"[{COLOR_FG_PRIMARY}]Active Skill:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]{active_skill or 'auto-detect'}[/{COLOR_ACCENT}]\n"
                 f"[{COLOR_FG_PRIMARY}]Visual Engine:[/{COLOR_FG_PRIMARY}] {browser_label}\n"
-                f"[{COLOR_FG_PRIMARY}]System 1 Backend:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_SECONDARY}]{active_backend}[/{COLOR_FG_SECONDARY}]\n"
+                f"[{COLOR_FG_PRIMARY}]System 1 Backend:[/{COLOR_FG_PRIMARY}] [{COLOR_ACCENT}]Jev ({active_backend})[/{COLOR_ACCENT}]\n"
                 f"[{COLOR_FG_PRIMARY}]Test Command:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_MUTED}]{active_test_cmd}[/{COLOR_FG_MUTED}]"
             )
             print_banner_box(status_text, level="info", title="System Status")
@@ -2153,11 +2153,23 @@ def run_interactive(
             continue
         elif lower.startswith("/backend"):
             parts = prompt.split(maxsplit=1)
-            if len(parts) > 1 and parts[1].strip() in ("mock", "typesafe", "auto"):
-                active_backend = parts[1].strip()
-                print_banner_box(f"Backend System 1 diganti ke: [bold {COLOR_ACCENT}]{active_backend}[/bold {COLOR_ACCENT}]", level="success", title="Backend Switch")
+            if len(parts) > 1:
+                arg = parts[1].strip().lower()
+                if arg in ("jev", "typesafe", "auto"):
+                    active_backend = arg
+                    print_banner_box(f"Backend System 1 disetel ke: [bold {COLOR_ACCENT}]Jev ({active_backend})[/bold {COLOR_ACCENT}]", level="success", title="Backend Switch")
+                elif arg == "mock":
+                    print_banner_box("Backend mock telah dihapus. BrainFrog sekarang menggunakan Jev (TypeSafe Cloud API) secara penuh.", level="warning", title="Backend")
+                else:
+                    print_banner_box("Pilihan backend: `jev` atau `typesafe`.", level="warning", title="Backend")
             else:
-                print_banner_box("Format salah. Gunakan: /backend <mock | typesafe | auto>", level="warning", title="Backend")
+                print_banner_box(
+                    f"Backend System 1 aktif: [bold {COLOR_ACCENT}]Jev ({active_backend})[/bold {COLOR_ACCENT}]\n"
+                    "• Engine: TypeSafe System 1 Native API (jev-latest)\n"
+                    "• Status: Terhubung dan aktif sebagai pengambil keputusan cepat.",
+                    level="info",
+                    title="System 1 Jev",
+                )
             continue
         elif lower.startswith("/provider"):
             parts = prompt.split(maxsplit=1)
@@ -2308,7 +2320,7 @@ def main() -> int:
     p.add_argument("--task", dest="flag_task", default=None, help="Alternative flag for task description")
     p.add_argument("-r", "--repo", default=".", help="Path to target git repository (default: current directory)")
     p.add_argument("-t", "--test-cmd", default=None, help="Shell command for running test suite")
-    p.add_argument("-b", "--backend", choices=["mock", "typesafe", "auto"], default="auto")
+    p.add_argument("-b", "--backend", choices=["jev", "typesafe", "auto"], default="jev", help="System 1 decision backend (jev | typesafe)")
     p.add_argument("-m", "--model", "--claude-model", dest="model", default=None, help="Model name (e.g. gemini-3.8-flash-high, claude-sonnet-5)")
     p.add_argument("--provider", choices=["claude", "antigravity", "gemini", "auto"], default=None, help="System 2 AI provider (antigravity: Google Login, claude: Anthropic API)")
     p.add_argument("--skill", default=None, help="Explicitly activate a modular skill (e.g. --skill audit-anti-slop)")

@@ -1,25 +1,23 @@
-"""TypeSafeSystemOne — the real Jev backend.
+"""TypeSafeSystemOne: the real Jev backend.
 
 Wraps TypeSafe's native API: POST https://api.typesafe.ai/v1/systemone
-(Authorization: Bearer $TYPESAFE_API_KEY). Not OpenAI-compatible — no
-/chat/completions, no messages array, no temperature. Prefers the
-official `typesafe-sdk` package if installed; falls back to a plain
-`requests` call against the documented schema so this works even
-before you `pip install typesafe-sdk`.
+(Authorization: Bearer $TYPESAFE_API_KEY or $JEV_API_KEY). Not OpenAI-compatible: no
+/chat/completions, no messages array, no temperature. Uses a clean direct HTTP call
+against the documented schema so this works without any external SDK installation.
 
 Docs: https://docs.typesafe.ai/introduction
-Get a key: https://console.typesafe.ai/keys (early access waitlist)
+Get a key: https://console.typesafe.ai/keys
 """
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import requests
 
 from .base import Answer, ChoiceQuestion, NoulQuestion, Question, ScoreQuestion, SystemOneClient
 
-API_URL = "https://api.typesafe.ai/v1/systemone"
+DEFAULT_API_URL = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
 
 
@@ -34,16 +32,38 @@ def _question_to_json(q: Question) -> Dict[str, Any]:
 
 
 class TypeSafeSystemOne(SystemOneClient):
-    name = "typesafe"
+    """Real System 1 client powered by TypeSafe Jev cloud decision API."""
 
-    def __init__(self, api_key: str | None = None, model: str = DEFAULT_MODEL, timeout: float = 5.0):
-        self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY")
+    name = "jev"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: float = 8.0,
+        api_url: Optional[str] = None,
+    ):
+        self.api_key = (
+            api_key
+            or os.environ.get("TYPESAFE_API_KEY")
+            or os.environ.get("JEV_API_KEY")
+        )
         if not self.api_key:
             raise RuntimeError(
-                "TYPESAFE_API_KEY not set. Get one at https://console.typesafe.ai/keys "
-                "(early access waitlist), or use --backend mock in the meantime."
+                "Jev API key not found. Please set TYPESAFE_API_KEY or JEV_API_KEY in your .env file."
             )
-        self.model = model
+        self.model = (
+            model
+            or os.environ.get("TYPESAFE_MODEL")
+            or os.environ.get("JEV_MODEL")
+            or DEFAULT_MODEL
+        )
+        self.api_url = (
+            api_url
+            or os.environ.get("TYPESAFE_API_URL")
+            or os.environ.get("JEV_API_URL")
+            or DEFAULT_API_URL
+        )
         self.timeout = timeout
 
     def decide(
@@ -55,7 +75,7 @@ class TypeSafeSystemOne(SystemOneClient):
             "questions": {k: _question_to_json(q) for k, q in questions.items()},
         }
         resp = requests.post(
-            API_URL,
+            self.api_url,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -75,3 +95,7 @@ class TypeSafeSystemOne(SystemOneClient):
                 confidence=float(raw.get("confidence", 0.0)),
             )
         return answers
+
+
+# Direct alias for readability
+JevSystemOne = TypeSafeSystemOne

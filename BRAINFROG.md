@@ -768,7 +768,7 @@ Proses yang terhenti di tengah penulisan file akibat crash, kehabisan disk, atau
 Sistem harus tetap dapat beroperasi secara anggun (*graceful degradation*) saat komponen pendukung bermasalah:
 
 1. **Fallback Bertingkat (Graceful Degradation):**
-   - Jika System 1 (Jev API) tidak merespons atau kredensial belum dikonfigurasi, sistem otomatis beralih ke mode heuristik lokal (`--backend mock`) tanpa melempar crash fatal (sebagaimana pola di `config.py`).
+   - Jika System 1 (Jev API) tidak merespons atau kredensial belum dikonfigurasi, sistem memberikan pesan error yang jelas dan actionable agar pengguna memverifikasi TYPESAFE_API_KEY di file .env.
    - Jika Anthropic API terputus di tengah sesi interaktif, simpan input pengguna ke riwayat dan beri tahu pengguna bahwa koneksi terputus, tawarkan opsi mencoba lagi setelah memeriksa jaringan.
 2. **Pencegahan Loop Tak Terbatas (Loop Circuit Breakers):**
    - Setiap loop evaluasi (seperti retry fix kode pada `orchestrator.py`) **wajib dibatasi oleh konstanta maksimum** (misal: `max_retries = 3`).

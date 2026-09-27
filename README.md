@@ -1,4 +1,4 @@
-# BrainFrog (🐸) — Dual-System Coding Agent (Jev + Claude)
+# BrainFrog (🐸) - Dual-System Coding Agent (Jev + Claude)
 
 BrainFrog is an agentic coding loop that automates software engineering workflows: analyzing tasks, planning changes, writing and refactoring code, executing local test suites, self-healing upon failures, and drafting pull requests.
 
@@ -103,8 +103,7 @@ BrainFrog splits decisions into fast, typed gates (System 1) and deep reasoning 
 ├── system1/                 # System 1: Fast, typed, deterministic decision layer
 │   ├── __init__.py
 │   ├── base.py              # Abstract interfaces, questions (Choice/Score/Noul), and Decision contracts
-│   ├── mock_client.py       # Deterministic, local heuristic backend (offline/testing)
-│   └── typesafe_client.py   # Cloud backend calling TypeSafe System 1 API
+│   └── typesafe_client.py   # Cloud backend calling TypeSafe System 1 API (Jev)
 └── system2/                 # System 2: Generative reasoning & code synthesis layer
     ├── __init__.py
     └── claude_client.py     # Claude integration (planning, code generation, fix review, diagnosis, PR)
@@ -116,12 +115,12 @@ BrainFrog splits decisions into fast, typed gates (System 1) and deep reasoning 
 
 | Component | File | Responsibilities |
 | :--- | :--- | :--- |
-| **System 1 Client** | `system1/base.py`, `typesafe_client.py`, `mock_client.py` | • Evaluates structured questions (`ChoiceQuestion`, `ScoreQuestion`, `NoulQuestion`).<br>• High-speed, typed scoring without prompt drift.<br>• Provides heuristic fallback (`mock_client.py`) when offline or lacking API keys. |
+| **System 1 Client** | `system1/base.py`, `typesafe_client.py` | • Evaluates structured questions (`ChoiceQuestion`, `ScoreQuestion`, `NoulQuestion`).<br>• High-speed, typed scoring without prompt drift.<br>• Native cloud integration via TypeSafe Jev API. |
 | **System 2 Client** | `system2/claude_client.py` | • High-level reasoning and multi-step planning (`plan_task`).<br>• Full-file code generation and editing (`write_code`).<br>• Error triage and automated patch generation (`review_and_fix`).<br>• Codebase Q&A without side-effects (`diagnose`).<br>• Pull request summary and body generation (`draft_pr`). |
 | **Orchestrator** | `orchestrator.py` | • Central state machine wiring System 1 decisions and System 2 generations.<br>• Subprocess execution with strict timeouts and process tree termination.<br>• Atomic file writing to prevent corrupted/0-byte files upon interruption.<br>• Self-healing retry loop with circuit breakers.<br>• Git lifecycle management (status check, branch creation, commit, push, PR creation). |
 | **Domain Registry** | `modules.py`, `modules.json` | • Maps codebase directories and files to conceptual domains.<br>• Enforces security boundaries: domains flagged `"sensitive": true` cannot auto-PR.<br>• Scopes context passed to System 2 to reduce token consumption and latency. |
 | **CLI & TUI** | `cli.py` | • Interactive REPL with auto-completion for slash commands and `@file` mentions.<br>• Rich terminal interface compliant with `BRAINFROG.md` TUI design tokens.<br>• Non-interactive single-command runner mode.<br>• Shell passthrough execution (`!cmd`).<br>• Instant safety undo (`/undo`) and diff inspection (`/diff`). |
-| **Configuration** | `config.py` | • Resolves active System 1 backend (`auto`, `typesafe`, `mock`).<br>• Manages environment variables (`ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY`).<br>• Tracks token usage and session cost estimates. |
+| **Configuration** | `core/config.py` | • Resolves active System 1 backend (`jev`, `typesafe`, `auto`).<br>• Manages environment variables (`ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY`, `JEV_API_KEY`).<br>• Tracks token usage and session cost estimates. |
 | **System Memory** | `BRAINFROG.md` | • Authoritative architectural rules, security boundaries, retrieval standards, and UI guidelines governing agent behavior. |
 
 ---
@@ -131,8 +130,8 @@ BrainFrog splits decisions into fast, typed gates (System 1) and deep reasoning 
 ### 1. Prerequisites
 - Python 3.10+
 - Git CLI (and `gh` GitHub CLI if using `--auto-pr`)
-- Anthropic API key (`ANTHROPIC_API_KEY`)
-- TypeSafe API key (`TYPESAFE_API_KEY`, optional — mock backend works out of the box)
+- Anthropic API key (`ANTHROPIC_API_KEY`) or Google Antigravity session
+- TypeSafe API key (`TYPESAFE_API_KEY` or `JEV_API_KEY` for Jev System 1)
 
 ### 2. Installation
 ```bash
@@ -187,33 +186,33 @@ Inside the REPL:
 - Mention files with autocompletion: `@app/api/routes.py`
 - Execute terminal commands directly: `!pytest`
 - Use slash commands:
-  - `/status` — View current repository, test command, and active models
-  - `/diff` — Preview uncommitted git changes
-  - `/undo` — Cleanly revert uncommitted changes made by the agent
-  - `/rules` — Display active system guidelines (`BRAINFROG.md`)
-  - `/stats` / `/cost` — Show token consumption and estimated session cost
-  - `/test-cmd <cmd>` — Switch the active test command dynamically
-  - `/clear` — Clear terminal screen
-  - `/help` — Display command cheat sheet
-  - `/exit` — Exit BrainFrog
+  - `/status`: View current repository, test command, and active models
+  - `/diff`: Preview uncommitted git changes
+  - `/undo`: Cleanly revert uncommitted changes made by the agent
+  - `/rules`: Display active system guidelines (`BRAINFROG.md`)
+  - `/stats` / `/cost`: Show token consumption and estimated session cost
+  - `/test-cmd <cmd>`: Switch the active test command dynamically
+  - `/clear`: Clear terminal screen
+  - `/help`: Display command cheat sheet
+  - `/exit`: Exit BrainFrog
 
 ### Non-Interactive Single Task Mode
 Execute a single instruction directly from the command line:
 
 ```bash
-# Offline dry-run using mock System 1 backend
+# Non-interactive task using real Jev System 1 backend
 python cli.py \
   --repo /path/to/target/repo \
   --task "Fix ZeroDivisionError in calc.py" \
   --test-cmd "pytest -q" \
-  --backend mock
+  --backend jev
 
-# Full automated run with TypeSafe and Auto-PR
+# Full automated run with Jev / TypeSafe and Auto-PR
 python cli.py \
   --repo /path/to/target/repo \
   --task "Implement user logout endpoint" \
   --test-cmd "pytest app/tests/test_auth.py" \
-  --backend typesafe \
+  --backend jev \
   --auto-pr \
   --pr-risk-ceiling medium
 ```

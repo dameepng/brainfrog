@@ -1,22 +1,25 @@
-"""Backend selection: which System 1 (Jev-shaped) client to use.
+"""Backend selection: System 1 (Jev) decision engine.
 
-This is the ONE place backend choice happens. Everything else
-(orchestrator.py) only ever sees the SystemOneClient interface.
+BrainFrog uses the real TypeSafe Jev API as its System 1 decision engine.
 """
 from __future__ import annotations
 
 import os
 
-from system1 import MockSystemOne, SystemOneClient, TypeSafeSystemOne
+from system1 import JevSystemOne, SystemOneClient, TypeSafeSystemOne
 
 
-def get_system1(backend: str) -> SystemOneClient:
-    if backend == "mock":
-        return MockSystemOne()
-    if backend == "typesafe":
-        return TypeSafeSystemOne()  # reads TYPESAFE_API_KEY from env
-    if backend == "auto":
-        if os.environ.get("TYPESAFE_API_KEY"):
-            return TypeSafeSystemOne()
-        return MockSystemOne()
-    raise ValueError(f"Unknown backend: {backend!r} (expected mock | typesafe | auto)")
+def get_system1(backend: str = "jev") -> SystemOneClient:
+    """Return the real System 1 (Jev) client.
+
+    Resolves 'jev', 'typesafe', or 'auto' to TypeSafeSystemOne.
+    """
+    clean = (backend or "jev").lower().strip()
+    if clean in ("jev", "typesafe", "auto"):
+        return TypeSafeSystemOne()
+    if clean == "mock":
+        raise ValueError(
+            "Mock System 1 has been removed. BrainFrog now uses real Jev (TypeSafe cloud API). "
+            "Please ensure TYPESAFE_API_KEY is configured in your .env file."
+        )
+    raise ValueError(f"Unknown backend: {backend!r} (expected jev | typesafe)")
