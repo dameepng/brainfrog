@@ -32,6 +32,10 @@ from orchestrator import (
     _read_files,
     _write_files,
     _repo_tree,
+    _staged_diff_summary,
+    _format_diff_breakdown,
+    CommitDiffSummary,
+    FileChangeStat,
 )
 from plans import (
     MODE_BUILD,
@@ -555,6 +559,61 @@ class TestPlanAndBuildModes(unittest.TestCase):
         self.assertEqual(results[1].step.id, "2")
         self.assertEqual(results[1].step.description, "Create app.js")
         s2.plan_task.assert_not_called()
+
+
+class TestDiffBreakdown(unittest.TestCase):
+    def test_format_diff_breakdown_single_file(self):
+        summary = CommitDiffSummary(
+            total_files=1,
+            total_added=12,
+            total_deleted=4,
+            changes=[FileChangeStat("src/index.ts", 12, 4)],
+        )
+        lines = _format_diff_breakdown(summary)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("src/index.ts", lines[0])
+        self.assertIn("+12", lines[0])
+        self.assertIn("-4", lines[0])
+        self.assertIn("1 file changed", lines[1])
+        self.assertIn("+12", lines[1])
+        self.assertIn("-4", lines[1])
+
+    def test_format_diff_breakdown_multiple_files(self):
+        summary = CommitDiffSummary(
+            total_files=3,
+            total_added=25,
+            total_deleted=5,
+            changes=[
+                FileChangeStat("index.html", 10, 2),
+                FileChangeStat("style.css", 15, 3),
+                FileChangeStat("assets/logo.png", 0, 0, is_binary=True),
+            ],
+        )
+        lines = _format_diff_breakdown(summary)
+        self.assertEqual(len(lines), 4)  # 3 files + 1 summary
+        self.assertIn("index.html", lines[0])
+        self.assertIn("├──", lines[0])
+        self.assertIn("style.css", lines[1])
+        self.assertIn("├──", lines[1])
+        self.assertIn("assets/logo.png", lines[2])
+        self.assertIn("└──", lines[2])
+        self.assertIn("binary", lines[2])
+        self.assertIn("3 files changed", lines[3])
+
+    def test_staged_diff_summary_in_git_repo(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_path = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+
+            f1 = repo_path / "hello.py"
+            f1.write_text("line1\nline2\nline3\n", encoding="utf-8")
+            subprocess.run(["git", "add", "hello.py"], cwd=repo_path, check=True)
+
+            summary = _staged_diff_summary(repo_path)
+            self.assertEqual(summary.total_files, 1)
+            self.assertEqual(summary.total_added, 3)
+            self.assertEqual(summary.total_deleted, 0)
+            self.assertEqual(summary.changes[0].file_path, "hello.py")
 
 
 if __name__ == "__main__":

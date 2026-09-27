@@ -226,6 +226,22 @@ def _write_files(repo_dir: Path, files: Dict[str, str], mode: str = "build") -> 
         f.write_text(content, encoding="utf-8")
 
 
+@dataclass
+class FileChangeStat:
+    file_path: str
+    added: int
+    deleted: int
+    is_binary: bool = False
+
+
+@dataclass
+class CommitDiffSummary:
+    total_files: int
+    total_added: int
+    total_deleted: int
+    changes: List[FileChangeStat]
+
+
 def _diff_stat(repo_dir: Path) -> Dict[str, int]:
     diff = _run(["git", "diff", "--numstat"], repo_dir).stdout
     added, deleted = 0, 0
@@ -235,6 +251,57 @@ def _diff_stat(repo_dir: Path) -> Dict[str, int]:
             added += int(parts[0])
             deleted += int(parts[1])
     return {"lines_added": added, "lines_deleted": deleted}
+
+
+def _staged_diff_summary(repo_dir: Path) -> CommitDiffSummary:
+    """Extract per-file addition/deletion stats from currently staged files."""
+    proc = _run(["git", "diff", "--cached", "--numstat"], repo_dir)
+    changes: List[FileChangeStat] = []
+    tot_added, tot_deleted = 0, 0
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            add_s, del_s, fpath = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            if add_s.isdigit() and del_s.isdigit():
+                a, d = int(add_s), int(del_s)
+                tot_added += a
+                tot_deleted += d
+                changes.append(FileChangeStat(file_path=fpath, added=a, deleted=d, is_binary=False))
+            else:
+                changes.append(FileChangeStat(file_path=fpath, added=0, deleted=0, is_binary=True))
+    return CommitDiffSummary(
+        total_files=len(changes),
+        total_added=tot_added,
+        total_deleted=tot_deleted,
+        changes=changes,
+    )
+
+
+def _format_diff_breakdown(summary: CommitDiffSummary, max_files: int = 10) -> List[str]:
+    """Format structured file tree breakdown with addition/deletion indicators."""
+    if not summary.changes:
+        return []
+    lines = []
+    num_to_show = min(len(summary.changes), max_files)
+    for idx, c in enumerate(summary.changes[:num_to_show]):
+        is_last = (idx == len(summary.changes) - 1)
+        branch = "└──" if is_last else "├──"
+        if c.is_binary:
+            stat_str = "[dim](binary)[/dim]"
+        else:
+            stat_str = f"[green]+{c.added}[/green], [red]-{c.deleted}[/red]"
+        lines.append(f"[git]    {branch} [bold #CCCCCC]{c.file_path}[/bold #CCCCCC] [dim]({stat_str})[/dim]")
+
+    if len(summary.changes) > max_files:
+        remaining = len(summary.changes) - max_files
+        lines.append(f"[git]    └── [dim]... and {remaining} more files[/dim]")
+
+    file_word = "file" if summary.total_files == 1 else "files"
+    lines.append(
+        f"[git]    📊 [bold #00D7D7]{summary.total_files} {file_word} changed[/bold #00D7D7] "
+        f"([green]+{summary.total_added}[/green], [red]-{summary.total_deleted}[/red])"
+    )
+    return lines
 
 
 # System 1 gate questions
@@ -982,9 +1049,14 @@ class Orchestrator:
                 self._log("[git/security] ❌ Aborted commit and push to prevent security incident.")
                 return StepResult(step, "escalated", retries, f"Security Violation: {scan.summary}")
 
+            # Capture staged diff summary before committing
+            diff_summary = _staged_diff_summary(self.cfg.repo_dir)
+
             commit_res = _run(["git", "commit", "-m", commit_msg], self.cfg.repo_dir)
             if commit_res.returncode == 0:
                 self._log(f"[git] 📦 Committed: [bold #E8E8E8]{commit_title}[/bold #E8E8E8]")
+                for breakdown_line in _format_diff_breakdown(diff_summary):
+                    self._log(breakdown_line)
         except Exception as e:
             self._log(f"[git] Commit error: {e}")
 
@@ -1047,7 +1119,12 @@ class Orchestrator:
             self._log(f"[git/security] 🚨 PR Creation BLOCKED — secrets detected: {scan.summary}")
             return
 
-        _run(["git", "commit", "-m", pr_copy["title"]], self.cfg.repo_dir)
+        diff_summary = _staged_diff_summary(self.cfg.repo_dir)
+        commit_res = _run(["git", "commit", "-m", pr_copy["title"]], self.cfg.repo_dir)
+        if commit_res.returncode == 0:
+            self._log(f"[git] 📦 Branch committed: [bold #E8E8E8]{pr_copy['title']}[/bold #E8E8E8]")
+            for breakdown_line in _format_diff_breakdown(diff_summary):
+                self._log(breakdown_line)
         push = _run(["git", "push", "-u", "origin", branch], self.cfg.repo_dir)
         if push.returncode != 0:
             self._log(f"[orchestrator] push failed (no remote configured?): {push.stderr}")
