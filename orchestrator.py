@@ -27,6 +27,7 @@ from system1.base import Answer, ChoiceQuestion, NoulQuestion, ScoreQuestion, Sy
 from system2 import PlanStep, System2Client, extract_json
 from git_guard import (
     ensure_gitignore_security,
+    purge_tracked_sensitive_files,
     scan_staged_changes,
     scan_dict_files,
     unstage_staged_changes,
@@ -962,8 +963,9 @@ class Orchestrator:
         commit_body = pr_copy.get("body", "").strip()
         commit_msg = f"{commit_title}\n\n{commit_body}" if commit_body else commit_title
 
-        # Protect .gitignore
+        # Protect .gitignore & purge tracked sensitive directories/caches
         ensure_gitignore_security(self.cfg.repo_dir)
+        purge_tracked_sensitive_files(self.cfg.repo_dir)
 
         try:
             _run(["git", "add", "-A"], self.cfg.repo_dir)
@@ -1035,6 +1037,7 @@ class Orchestrator:
         branch = f"{self.cfg.branch_prefix}{step.id}"
         _run(["git", "checkout", "-b", branch], self.cfg.repo_dir)
         ensure_gitignore_security(self.cfg.repo_dir)
+        purge_tracked_sensitive_files(self.cfg.repo_dir)
         _run(["git", "add", "-A"], self.cfg.repo_dir)
 
         # 🛡️ Git Secret Guard

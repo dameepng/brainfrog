@@ -7,6 +7,7 @@ from pathlib import Path
 from git_guard import (
     ensure_gitignore_security,
     is_safe_value,
+    purge_tracked_sensitive_files,
     redact,
     scan_file_path,
     scan_staged_changes,
@@ -18,10 +19,12 @@ from git_guard import (
 # from external static analysis scanners (GitGuardian, TruffleHog) on the repo itself
 _DUMMY_HEX_1 = "".join(["a8f5", "b2c9", "d1e4", "f6a7", "b8c9", "d0e1", "f2a3", "b4c5"])
 _DUMMY_HEX_2 = "".join(["0123456789abcdef", "0123456789abcdef"])
+_DUMMY_B64 = "".join(["aZGT", "fZ+5", "4D7c", "UHnw", "5j3Q", "PVgz", "YEY/", "rcv5", "xiU4", "LDlg", "WJs="])
 _DUMMY_ANTHROPIC = "-".join(["sk", "ant", "api03", "".join(["9a8b", "7c6d", "5e4f", "3a2b", "1c0d", "9e8f", "7a6b", "5c4d"])])
 _DUMMY_GITHUB = "gh" + "p_" + "123456789012345678901234567890123456"
 _VAR_ENC = "ENCRYPTION" + "_KEY"
 _VAR_GH = "GITHUB" + "_TOKEN"
+_FIELD_ENC = "encryption" + "Key"
 
 
 class TestGitGuard(unittest.TestCase):
@@ -115,10 +118,52 @@ class TestGitGuard(unittest.TestCase):
             content = gitignore.read_text(encoding="utf-8")
             self.assertIn(".env", content)
             self.assertIn("*.pem", content)
+            self.assertIn(".next/", content)
+            self.assertIn(".brainfrog/scratch/", content)
 
             # Second call should be a no-op
             modified_again = ensure_gitignore_security(repo_path)
             self.assertFalse(modified_again)
+
+    def test_scan_json_quoted_encryption_key(self):
+        json_content = f'{{\n  "node": {{}},\n  "{_FIELD_ENC}": "{_DUMMY_B64}"\n}}'
+        findings = scan_text_content(".next/server/server-reference-manifest.json", json_content)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].rule, "Generic Encryption Key")
+        self.assertNotIn(_DUMMY_B64, findings[0].redacted_snippet)
+
+    def test_scan_file_path_blocks_build_caches(self):
+        self.assertIsNotNone(scan_file_path(".next/server/server-reference-manifest.json"))
+        self.assertIsNotNone(scan_file_path(".brainfrog/scratch/preview.png"))
+        self.assertIsNotNone(scan_file_path("node_modules/package/index.js"))
+
+    def test_purge_tracked_sensitive_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_path = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+
+            # Track a file in .next and .brainfrog/scratch
+            next_dir = repo_path / ".next" / "server"
+            next_dir.mkdir(parents=True, exist_ok=True)
+            dummy_manifest = next_dir / "test.json"
+            dummy_manifest.write_text('{"ok": true}\n', encoding="utf-8")
+
+            subprocess.run(["git", "add", "-A"], cwd=repo_path, check=True, capture_output=True)
+
+            # Verify it is tracked
+            tracked = subprocess.run(["git", "ls-files", ".next"], cwd=repo_path, capture_output=True, text=True)
+            self.assertIn("test.json", tracked.stdout)
+
+            # Purge
+            untracked = purge_tracked_sensitive_files(repo_path)
+            self.assertIn(".next", untracked)
+
+            # File should still exist on disk
+            self.assertTrue(dummy_manifest.exists())
+
+            # But not tracked in git
+            tracked_after = subprocess.run(["git", "ls-files", ".next"], cwd=repo_path, capture_output=True, text=True)
+            self.assertEqual(tracked_after.stdout.strip(), "")
 
 
 if __name__ == "__main__":

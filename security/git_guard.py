@@ -47,16 +47,29 @@ SECRET_PATTERNS: List[Tuple[str, re.Pattern]] = [
         re.compile(r"-----BEGIN PGP PRIVATE KEY BLOCK-----"),
     ),
     # 2. Generic Encryption & Crypto Keys (common GitGuardian trigger)
+    # Supports JSON quotes ("encryptionKey": "..."), JS objects, camelCase, snake_case
     (
         "Generic Encryption Key",
         re.compile(
-            r"""(?i)(?:encryption|crypto|cipher|aes|des)[_-]?(?:key|secret)\s*[:=]\s*['"]([a-zA-Z0-9_\-\+/=]{16,})['"]"""
+            r"""(?i)['"]?(?:encryption|crypto|cipher|aes|des)[_-]?(?:key|secret)['"]?\s*[:=]\s*['"]([a-zA-Z0-9_\-\+/=]{16,})['"]"""
         ),
     ),
     (
         "Secret Key Assignment",
         re.compile(
-            r"""(?i)(?:secret[_-]?key|jwt[_-]?secret|session[_-]?secret|auth[_-]?secret)\s*[:=]\s*['"]([a-zA-Z0-9_\-\+/=]{16,})['"]"""
+            r"""(?i)['"]?(?:secret[_-]?key|jwt[_-]?secret|session[_-]?secret|auth[_-]?secret|app[_-]?secret|api[_-]?secret|signing[_-]?secret|client[_-]?secret)['"]?\s*[:=]\s*['"]([a-zA-Z0-9_\-\+/=]{16,})['"]"""
+        ),
+    ),
+    (
+        "Generic High-Entropy Secret / Token",
+        re.compile(
+            r"""(?i)['"]?(?:access[_-]?token|auth[_-]?token|private[_-]?key|master[_-]?key|signing[_-]?key|secret[_-]?token)['"]?\s*[:=]\s*['"]([a-zA-Z0-9_\-\+/=]{16,})['"]"""
+        ),
+    ),
+    (
+        "Environment Fallback Secret",
+        re.compile(
+            r"""(?i)(?:process\.env\.[A-Z0-9_]+|os\.environ(?:\[.+?\]|\.get\(.+?\)))\s*(?:\|\||\?\?|,)\s*['"]([a-zA-Z0-9_\-\+/=]{16,})['"]"""
         ),
     ),
     # 3. Cloud & AI Provider Keys
@@ -82,7 +95,7 @@ SECRET_PATTERNS: List[Tuple[str, re.Pattern]] = [
     ),
     (
         "AWS Secret Access Key",
-        re.compile(r"""(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*['"]([0-9a-zA-Z/+=]{40})['"]"""),
+        re.compile(r"""(?i)['"]?aws[_-]?secret[_-]?access[_-]?key['"]?\s*[:=]\s*['"]([0-9a-zA-Z/+=]{40})['"]"""),
     ),
     (
         "Slack Token",
@@ -98,7 +111,7 @@ SECRET_PATTERNS: List[Tuple[str, re.Pattern]] = [
     ),
     (
         "Generic High-Entropy API Key",
-        re.compile(r"""(?i)api[_-]?key\s*[:=]\s*['"]([a-zA-Z0-9_\-]{20,})['"]"""),
+        re.compile(r"""(?i)['"]?api[_-]?key['"]?\s*[:=]\s*['"]([a-zA-Z0-9_\-]{20,})['"]"""),
     ),
 ]
 
@@ -108,6 +121,12 @@ SENSITIVE_FILE_PATTERNS: List[re.Pattern] = [
     re.compile(r"\.(pem|key|pkcs12|p12|pfx)$", re.IGNORECASE),
     re.compile(r"(^|[/\\])id_(rsa|ed25519|ecdsa|dsa)$", re.IGNORECASE),
     re.compile(r"(service[-_]?account|client[-_]?secret).*\.json$", re.IGNORECASE),
+    # Build artifacts, caches, and manifests containing generated secrets
+    re.compile(r"(^|[/\\])\.next([/\\]|$)", re.IGNORECASE),
+    re.compile(r"(^|[/\\])node_modules([/\\]|$)", re.IGNORECASE),
+    re.compile(r"(^|[/\\])\.brainfrog[/\\]scratch([/\\]|$)", re.IGNORECASE),
+    re.compile(r"server-reference-manifest\.json$", re.IGNORECASE),
+    re.compile(r"(^|[/\\])(dist|build|out)[/\\]", re.IGNORECASE),
 ]
 
 SAFE_FILE_EXCLUSIONS: List[re.Pattern] = [
@@ -203,9 +222,9 @@ def scan_staged_changes(repo_dir: Path) -> ScanResult:
     """
     findings: List[SecretFinding] = []
 
-    # 1. Check staged file paths
+    # 1. Check staged file paths (excluding deleted files via --diff-filter=AMCR)
     proc_files = subprocess.run(
-        ["git", "diff", "--cached", "--name-only"],
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=AMCR"],
         cwd=repo_dir,
         capture_output=True,
         encoding="utf-8",
@@ -304,9 +323,21 @@ def unstage_staged_changes(repo_dir: Path) -> None:
 
 
 def ensure_gitignore_security(repo_dir: Path) -> bool:
-    """Ensure .env and sensitive file patterns are included in .gitignore."""
+    """Ensure .env, build directories, and sensitive patterns are included in .gitignore."""
     gitignore_path = repo_dir / ".gitignore"
-    required_entries = [".env", ".env.*", "!.env.example", "*.pem", "*.key"]
+    required_entries = [
+        ".env",
+        ".env.*",
+        "!.env.example",
+        "*.pem",
+        "*.key",
+        ".next/",
+        ".brainfrog/scratch/",
+        "node_modules/",
+        "dist/",
+        "build/",
+        "out/",
+    ]
     existing_content = ""
     if gitignore_path.exists():
         try:
@@ -318,10 +349,36 @@ def ensure_gitignore_security(repo_dir: Path) -> bool:
     if not missing:
         return False
 
-    addition = "\n# Security: protect credentials & secrets\n" + "\n".join(missing) + "\n"
+    addition = "\n# Security: protect credentials & secrets & build caches\n" + "\n".join(missing) + "\n"
     try:
         with gitignore_path.open("a", encoding="utf-8") as f:
             f.write(addition)
         return True
     except Exception:
         return False
+
+
+def purge_tracked_sensitive_files(repo_dir: Path) -> List[str]:
+    """Untrack known sensitive or build directories (.next, .brainfrog/scratch, node_modules) if tracked in Git index."""
+    patterns_to_check = [".next", ".brainfrog/scratch", "node_modules"]
+    untracked: List[str] = []
+    for pattern in patterns_to_check:
+        proc = subprocess.run(
+            ["git", "ls-files", pattern],
+            cwd=repo_dir,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if proc.returncode == 0 and proc.stdout and proc.stdout.strip():
+            rm_proc = subprocess.run(
+                ["git", "rm", "-r", "--cached", "--quiet", pattern],
+                cwd=repo_dir,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if rm_proc.returncode == 0:
+                untracked.append(pattern)
+    return untracked
+

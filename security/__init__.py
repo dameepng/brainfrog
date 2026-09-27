@@ -10,6 +10,7 @@ from .git_guard import (
     scan_file_path,
     unstage_staged_changes,
     ensure_gitignore_security,
+    purge_tracked_sensitive_files,
     redact,
     is_safe_value,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "scan_file_path",
     "unstage_staged_changes",
     "ensure_gitignore_security",
+    "purge_tracked_sensitive_files",
     "redact",
     "is_safe_value",
     "get_gemini_dir",
