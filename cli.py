@@ -1764,7 +1764,7 @@ def run_interactive(
             table.add_row("Context Window Limit", f"{ctx['limit']:,} tokens ({ctx['limit_k']})")
             table.add_row("Active Memory Context", f"{ctx['tokens']:,} tokens ({ctx['percent']}%)")
             table.add_row("Context Visual Bar", f"[{ctx['status_color']}]{ctx['bar']}[/{ctx['status_color']}]")
-            table.add_row("Context Health Status", f"[{ctx['status_color']}]{ctx['status_label']}[/{ctx_color if (ctx_color := ctx['status_color']) else COLOR_ACCENT}]")
+            table.add_row("Context Health Status", f"[{ctx['status_color']}]{ctx['status_label']}[/]")
             table.add_row("Cumulative In Tokens", f"{s.input_tokens:,}")
             table.add_row("Cumulative Out Tokens", f"{s.output_tokens:,}")
             table.add_row("Total Session Tokens", f"{s.total_tokens:,}")
