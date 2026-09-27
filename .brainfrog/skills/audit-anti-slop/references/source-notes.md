@@ -16,13 +16,14 @@
 | Resilience | Does it hold in realistic states? | Narrow viewport, keyboard, loading/error/empty |
 | Language | Does the copy say something concrete? | Audience task and product specifics |
 
-## Iconography and Badge Guidelines
+## Iconography, Punctuation, and Badge Guidelines
 
 Never strip icons or badges blindly under the guise of "anti-slop". Use this taxonomy to distinguish quality design from generic AI patterns:
 
 | Element | Purposeful Design (DO KEEP & REFINE) | Generic AI Slop (DO AVOID & CLEAN) |
 | --- | --- | --- |
 | **Emojis & Emoticons** | **Strictly prohibited**: Zero unicode emojis or text emoticons. Always substitute with curated open-source vector SVG icons (Lucide, Heroicons, Feather, Tabler). | Raw unicode emojis (🍃, 🚀, ✨, 🔥, 🫖, 🍂) or emoticons (`:)`, `XD`) embedded in headings, buttons, badges, or brand marks. |
+| **Em Dashes & Punctuation** | **Strictly prohibited**: Zero em dashes (`—` or `&mdash;`). Use natural phrasing, commas, colons, parentheses, or clean sentence stops. | Dramatic AI em dash tic (`—`) used in headings, slogans, or clauses to fake profundity (e.g. "Tea crafted for stillness — born in the heights of Malabar"). |
 | **Icons** | Semantic actions (search, close, copy, cart), status states (success check, warning, info), domain-specific icons (tea leaves, clock, flame, location) that aid visual scanning. Ensure icon stroke weights and scale align with adjacent typography. | "Icon wallpaper": placing arbitrary, unrelated Lucide icons (rocket, zap, sparkles, diamond) in colorful glowing squares above every paragraph just to fill empty space. |
 | **Badges / Chips** | Domain metadata: price tags (`Rp 45.000`), status indicators (`Tersedia`, `Musiman`), category tags (`White Tea`, `Tisane`), duration/specs (`45 Menit`, `85°C`), active filter pills, or one focal hero badge. | "Badge fatigue": an identical floating pill badge mechanically stamped above *every single* section title (`[Pill Badge] -> [Heading] -> [Subheading]` repeating across the entire page), or badges carrying empty hype words (`World-Class`, `Revolutionary`, `Next-Gen`). |
 | **Cards & Surfaces** | Clear spatial groups with distinct purpose, generous hierarchy, readable contrast, and tactile surface feel (frosted glass, dark mode depth). | "Card-ception": nesting multiple cards with identical translucent borders and shadows inside each other, creating unnecessary visual noise without grouping real data. |

@@ -5,12 +5,13 @@ description: Review or improve AI-generated UI, product copy, and code comments 
 
 # Anti-Slop Audit
 
-Use this as a purpose and quality filter, not a house style. Do not ban a color, font, gradient, card, icon, badge, or phrase solely because it is common. Preserve explicit brand direction and useful conventions. Icons provide essential scanning landmarks and affordances; badges convey vital metadata. The goal is purpose, restraint, and character — not stripping interfaces down to sterile text wireframes. The inspiration and provenance are in [references/source-notes.md](references/source-notes.md).
+Use this as a purpose and quality filter, not a house style. Do not ban a color, font, gradient, card, icon, badge, or phrase solely because it is common. Preserve explicit brand direction and useful conventions. Icons provide essential scanning landmarks and affordances; badges convey vital metadata. The goal is purpose, restraint, and character, not stripping interfaces down to sterile text wireframes. The inspiration and provenance are in [references/source-notes.md](references/source-notes.md).
 
 ## Core Directives
 
 1. **Zero Emojis & Emoticons**: Strictly forbid raw unicode emojis (🍃, 🚀, ✨, 🔥, 🫖, 👍, etc.) and text emoticons (`:)`, `XD`, etc.) anywhere in production web interfaces (headings, buttons, brand marks, cards, badges, navigation). Emojis look amateurish and signal generic AI slop.
 2. **Mandatory Open-Source SVG Icons**: Always use vector SVG icons from curated open-source libraries (e.g. Lucide Icons, Heroicons, Feather Icons, Tabler Icons, Radix Icons). Implement them as inline SVG or icon components with appropriate stroke width, sizing, and `aria-hidden="true"` or semantic labels.
+3. **No Em Dashes in Copywriting**: Strictly ban em dashes (`—`, `&mdash;`, `&#8212;`) in copy, titles, descriptions, and UI text. The em dash is a notorious AI copywriting tic that produces melodramatic, formulaic sentences. Replace with natural commas, colons, parentheses, periods, or clean sentence breaks.
 
 ## Prepare
 
@@ -27,15 +28,18 @@ Use this as a purpose and quality filter, not a house style. Do not ban a color,
    - *Avoid Icon Wallpaper*: Slapping arbitrary generic icons (rocket, sparkles, zap, shield) inside glowing squares above every bullet point just to fill space without adding semantic meaning.
 3. **Badges & Chips (Metadata vs. Badge Fatigue)**:
    - *Keep & Polish*: Functional metadata chips (price tags, category pills, availability, duration, ingredients, filter chips) and single well-placed section badges where hierarchy calls for it.
-   - *Avoid*: Repetitive "badge fatigue" — prefixing every single heading with an identical floating pill badge (`[Pill Badge] -> [Title] -> [Subtitle]` repeating down the entire page) or using badges purely for generic hype phrases.
-4. **Identify generic clusters**: Look for decorative gradients/glow without purpose, repeated identical card grids, template headings, inflated claims, generic enthusiasm, placeholder stats, and comments that merely restate code. A lone pattern is a clue, not an automatic violation.
-5. **Check honesty and function**: Verify metrics/testimonials/claims, link targets, enabled controls, loading/empty/error states, keyboard flow, contrast, and terminal width or responsive layout as applicable. Remove unsupported claims; fix dead controls or omit them.
-6. **Keep character and craft**: Removing generic elements is only half the job: elevate the design with intentional typography, bespoke color palettes, tactile surfaces, and meaningful micro-interactions specific to this product and user.
-7. **Report or implement**: For a requested audit, report prioritized findings with location, evidence, impact, and proposed fix. For requested implementation, make the fixes and inspect the rendered result. Keep the user's workflow moving; do not impose extra approval gates for routine reversible edits.
+   - *Avoid*: Repetitive "badge fatigue" by prefixing every single heading with an identical floating pill badge (`[Pill Badge] -> [Title] -> [Subtitle]` repeating down the entire page) or using badges purely for generic hype phrases.
+4. **Copywriting & Typography (Zero Em Dashes, Authentic Voice)**:
+   - *Purge Em Dashes*: Remove every em dash (`—` / `&mdash;`). Rephrase with clean colons, commas, or direct statements.
+   - *Avoid Fluff & Inflated Claims*: Strip hollow marketing tropes ("elevate your experience", "revolutionary", "seamlessly crafted") and replace with concrete facts, specifications, and honest product copy.
+5. **Identify generic clusters**: Look for decorative gradients/glow without purpose, repeated identical card grids, template headings, inflated claims, generic enthusiasm, placeholder stats, and comments that merely restate code. A lone pattern is a clue, not an automatic violation.
+6. **Check honesty and function**: Verify metrics/testimonials/claims, link targets, enabled controls, loading/empty/error states, keyboard flow, contrast, and terminal width or responsive layout as applicable. Remove unsupported claims; fix dead controls or omit them.
+7. **Keep character and craft**: Removing generic elements is only half the job: elevate the design with intentional typography, bespoke color palettes, tactile surfaces, and meaningful micro-interactions specific to this product and user.
+8. **Report or implement**: For a requested audit, report prioritized findings with location, evidence, impact, and proposed fix. For requested implementation, make the fixes and inspect the rendered result. Keep the user's workflow moving; do not impose extra approval gates for routine reversible edits.
 
 ## Deterministic checks
 
-For HTML/UI source files, run `python3 scripts/scan_ui.py PATH [PATH ...]` from this skill directory (or use its absolute path). The script reports candidate placeholder links, copy, unverified numerical claims, and prohibited emojis/emoticons with file and line. Treat findings as leads requiring inspection, never as proof of a defect. It performs no modifications and uses no network.
+For HTML/UI source files, run `python3 scripts/scan_ui.py PATH [PATH ...]` from this skill directory (or use its absolute path). The script reports candidate placeholder links, copy, unverified numerical claims, prohibited emojis, and forbidden em dashes with file and line. Treat findings as leads requiring inspection, never as proof of a defect. It performs no modifications and uses no network.
 
 Use a renderer/browser or terminal capture to verify actual layout and behavior. Test critical interactions and states appropriate to the change. Do not claim a visual match from source code alone.
 

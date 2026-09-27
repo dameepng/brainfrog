@@ -15,6 +15,7 @@ CHECKS = (
     ("placeholder-copy", re.compile(r'\b(?:lorem ipsum|coming soon|insert (?:text|copy) here)\b', re.I)),
     ("potential-unverified-claim", re.compile(r'\b(?:\d+(?:\.\d+)?%|\d+[kKmM]\+?)\s+(?:of\s+)?(?:users|customers|teams|faster|growth|satisfaction)\b', re.I)),
     ("prohibited-emoji-or-emoticon", re.compile(r'[\U00010000-\U0010ffff]|[\u2600-\u27bf]|[\u2300-\u23ff]|(?::\)|:-\)|;\)|:D|<3|\b(?:XD|XP)\b)')),
+    ("prohibited-em-dash", re.compile(r'—|&mdash;|&#8212;')),
 )
 
 
