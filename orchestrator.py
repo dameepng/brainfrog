@@ -382,15 +382,15 @@ TESTS_PASSING_QUESTION = NoulQuestion(
 
 DIFF_COMPLETE_QUESTION = NoulQuestion(
     instructions={
-        "question": "Does the current `diff` fully address the original `task.original_request`?",
-        "focus": "Compare the user's intent with the scope of changes made.",
+        "question": "Does the current `diff` satisfy what is asked in `task.step_description`?",
+        "focus": "Evaluate whether the changes in `diff.files_changed` address this specific step's objective, not the entire multi-step project.",
     },
 )
 
 FAILURE_FIXABLE_QUESTION = NoulQuestion(
     instructions={
         "question": "Is the test failure specific enough that a targeted code fix could resolve it?",
-        "focus": "A fixable failure has a clear error message pointing to a specific line or assertion. An unfixable failure is vague, systemic, or requires architectural rethinking.",
+        "focus": "If `execution.test_passed` is true, answer false. A fixable failure has a clear error message pointing to a specific line or assertion.",
     },
 )
 
@@ -904,10 +904,12 @@ class Orchestrator:
 
             # Structured state with nested fields for Jev path references
             diff_stat = _diff_stat(self.cfg.repo_dir)
+            step_files = list(new_files.keys()) or step.files
             state: Dict[str, Any] = {
                 "task": {
                     "original_request": self.cfg.task,
                     "step_description": step.description,
+                    "step_id": step.id,
                 },
                 "execution": {
                     "test_passed": passed,
@@ -917,6 +919,8 @@ class Orchestrator:
                     "max_retries": self.cfg.max_retries,
                 },
                 "diff": {
+                    "files_changed": step_files,
+                    "files_count": len(step_files),
                     "lines_added": diff_stat.get("lines_added", 0),
                     "lines_deleted": diff_stat.get("lines_deleted", 0),
                 },
@@ -949,19 +953,28 @@ class Orchestrator:
             )
 
             # Code-side composition: explicit rules, not a single model choice
-            if tests_ok and diff_ok:
-                # All tests passed and diff addresses the task
+            # Step completion: tests passed and diff satisfies step requirements
+            # (or clean exit 0 test pass with modified files and non-rejected diff)
+            step_diff_ok = diff_ok or (passed and len(step_files) > 0 and (answers["diff_complete"].noul or 0.0) >= 0.40)
+            if tests_ok and step_diff_ok:
                 visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
                 if retries > 0 or visual_fixed:
                     self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
                 return self._finalize_pr(step, retries, output, sensitive=sensitive)
 
-            if fixable and not retry_exceeded and retries < self.cfg.max_retries:
-                # Failure looks specific and fixable, retry is still productive
+            # Can retry if within retry budget and Jev has not flagged retries as futile
+            can_retry = not retry_exceeded and retries < self.cfg.max_retries
+            if can_retry:
                 retries += 1
-                self._log(f"[system2/{self.s2_tag}] reviewing failure, attempt {retries}/{self.cfg.max_retries} ...")
-                current = _read_files(self.cfg.repo_dir, list(new_files.keys()) or step.files)
-                fixed = self.s2.review_and_fix(effective_task, step, current, output)
+                if tests_ok and not step_diff_ok:
+                    retry_reason = f"diff for step '{step.description}' needs completion"
+                    retry_prompt = f"Tests passed, but changes for step '{step.description}' appear incomplete (score={answers['diff_complete'].noul:.2f}). Touched files: {step_files}."
+                else:
+                    retry_reason = "test failure"
+                    retry_prompt = output
+                self._log(f"[system2/{self.s2_tag}] reviewing {retry_reason}, attempt {retries}/{self.cfg.max_retries} ...")
+                current = _read_files(self.cfg.repo_dir, step_files)
+                fixed = self.s2.review_and_fix(effective_task, step, current, retry_prompt)
                 _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
                 new_files.update(fixed)
                 continue
