@@ -953,9 +953,12 @@ class Orchestrator:
             )
 
             # Code-side composition: explicit rules, not a single model choice
-            # Step completion: tests passed and diff satisfies step requirements
-            # (or clean exit 0 test pass with modified files and non-rejected diff)
-            step_diff_ok = diff_ok or (passed and len(step_files) > 0 and (answers["diff_complete"].noul or 0.0) >= 0.40)
+            diff_score = answers["diff_complete"].noul or 0.0
+
+            # Step completion:
+            # 1. Tests passed and diff is strongly complete (diff_ok > 0.60)
+            # 2. OR tests passed cleanly (exit 0), files were touched, and diff has reasonable step relevance (>= 0.25)
+            step_diff_ok = diff_ok or (passed and len(step_files) > 0 and diff_score >= 0.25)
             if tests_ok and step_diff_ok:
                 visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
                 if retries > 0 or visual_fixed:
@@ -968,7 +971,11 @@ class Orchestrator:
                 retries += 1
                 if tests_ok and not step_diff_ok:
                     retry_reason = f"diff for step '{step.description}' needs completion"
-                    retry_prompt = f"Tests passed, but changes for step '{step.description}' appear incomplete (score={answers['diff_complete'].noul:.2f}). Touched files: {step_files}."
+                    retry_prompt = (
+                        f"Tests passed (exit 0), but changes for step '{step.description}' appear incomplete (score={diff_score:.2f}). "
+                        f"Currently touched files: {step_files}. "
+                        f"Please carefully review ALL requirements in '{step.description}'. If this step asks for any secondary actions, logs, or new files, please create or update them now."
+                    )
                 else:
                     retry_reason = "test failure"
                     retry_prompt = output
@@ -978,6 +985,19 @@ class Orchestrator:
                 _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
                 new_files.update(fixed)
                 continue
+
+            # Safety net: If tests PASSED cleanly (exit 0) and touched files exist,
+            # NEVER abandon a working build even if retries exhausted on diff completeness.
+            # Finalize with a clear notice so the user keeps their working code.
+            if passed and tests_ok and len(step_files) > 0:
+                self._log(
+                    f"[orchestrator] ⚠️ Step '{step.description}' tests passed cleanly but diff completeness "
+                    f"was borderline ({diff_score:.2f}). Finalizing step because the code build is healthy."
+                )
+                visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
+                if retries > 0 or visual_fixed:
+                    self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
+                return self._finalize_pr(step, retries, output, sensitive=sensitive)
 
             if retry_exceeded or retries >= self.cfg.max_retries:
                 return StepResult(step, "abandoned", retries, "Jev assessed retry limit exceeded with no progress.")
