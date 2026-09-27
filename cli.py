@@ -502,17 +502,31 @@ def execute_task(
         console.print()
         console.print(Align.center(summary_table) if cols > 100 else summary_table)
 
-    # Turn token & cost footer (left-aligned with text box)
+    # Turn token & context memory footer (left-aligned with text box)
     task_usage = usage_tracker.reset_task()
     provider_tag = getattr(system2, "provider_name", "claude")
     cost_str = "Google Auth (Active Session)" if provider_tag == "antigravity" else f"Est. Cost: ${task_usage.cost_usd:.4f}"
-    if task_usage.total_tokens > 0:
+    ctx_info = usage_tracker.get_context_info(chosen_model)
+
+    if task_usage.total_tokens > 0 or ctx_info["tokens"] > 0:
         from rich.padding import Padding
         cost_line = f"⚡ Turn tokens: {task_usage.input_tokens:,} in / {task_usage.output_tokens:,} out ({task_usage.total_tokens:,} total)  ·  {cost_str}"
-        token_txt = Text.from_markup(f"[{COLOR_FG_MUTED}]{cost_line}[/{COLOR_FG_MUTED}]")
+        ctx_status_badge = f"[{ctx_info['status_color']}]{ctx_info['bar']}[/{ctx_info['status_color']}] [{ctx_info['status_color']} bold]{ctx_info['percent']}%[/{ctx_info['status_color']} bold] ({ctx_info['tokens_k']}/{ctx_info['limit_k']})"
+        ctx_line = f"🧠 Memory Context: {ctx_status_badge}  ·  [{COLOR_FG_MUTED}]Status:[/{COLOR_FG_MUTED}] [{ctx_info['status_color']}]{ctx_info['status_label']}[/{ctx_info['status_color']}]"
+
+        token_txt = Text.from_markup(f"[{COLOR_FG_MUTED}]{cost_line}[/{COLOR_FG_MUTED}]\n{ctx_line}")
         console.print()
         console.print(Padding(token_txt, (0, right_margin, 0, margin)))
         console.print()
+
+        # Alert recommendation if memory context usage reaches high threshold (>=75%)
+        if ctx_info["percent"] >= 75.0:
+            warn_msg = (
+                f"⚠️  Memory context saat ini mencapai {ctx_info['percent']}% ({ctx_info['tokens']:,} / {ctx_info['limit']:,} token).\n"
+                "Untuk menjaga akurasi jawaban, mencegah kelupaan instruksi, dan mempercepat respon,\n"
+                "disarankan memulai sesi baru dengan mengetik: [bold]/new[/bold] atau [bold]/reset[/bold]"
+            )
+            print_banner_box(warn_msg, level="warning", title="Memory Context Warning (>75%)")
     else:
         console.print()
 
@@ -556,6 +570,10 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/domains", "List detected domain modules and paths"),
     ("/auth", "Manage and switch Google accounts for Antigravity"),
     ("/whoami", "Show active Google account & provider info"),
+    ("/new", "Start new chat session & reset memory context (0%)"),
+    ("/reset", "Reset conversation state and memory context counters"),
+    ("/context", "Display live memory context window metrics & visual bar"),
+    ("/tokens", "View token usage breakdown and context metrics"),
     ("/clear", "Clear terminal screen"),
     ("/exit", "Exit BrainFrog session"),
 ]
@@ -902,6 +920,9 @@ def run_interactive(
             "toolbar-id": f"{COLOR_FG_PRIMARY} bold bg:{COLOR_BG_BASE}",
             "toolbar-dim": f"{COLOR_FG_MUTED} bg:{COLOR_BG_BASE}",
             "toolbar-sep": f"#2a2a2a bg:{COLOR_BG_BASE}",
+            "toolbar-ctx-safe": f"#33D17A bg:{COLOR_BG_BASE}",
+            "toolbar-ctx-warn": f"#F6D32D bold bg:{COLOR_BG_BASE}",
+            "toolbar-ctx-crit": f"#E01E5A bold bg:{COLOR_BG_BASE}",
 
             # Mode indicators & borders
             "mode-plan": "bg:#173b37 #4EC9B0 bold",
@@ -1093,28 +1114,35 @@ def run_interactive(
         repo_max = max(4, cols // 8)
         repo_disp = (repo_dir.name[:repo_max] + "…") if len(repo_dir.name) > repo_max + 1 else repo_dir.name
 
+        # Context usage metrics for status bar
+        ctx = usage_tracker.get_context_info(active_model)
+        ctx_tag = f"ctx: {ctx['tokens_k']}/{ctx['limit_k']} ({ctx['percent']}%)"
+        ctx_style = "class:toolbar-ctx-safe" if ctx["status"] == "safe" else ("class:toolbar-ctx-warn" if ctx["status"] == "warning" else "class:toolbar-ctx-crit")
+
         if cols < 40:
-            # Ultra-narrow: model only
+            # Ultra-narrow: model + context %
             return [
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
-                ("class:toolbar-id", model_disp),
+                ("class:toolbar-id", f"{model_disp} "),
+                (ctx_style, f"({ctx['percent']}%)"),
             ]
         elif cols < 60:
-            # Narrow (<60 cols): 1-line status bar
-            left = f" ● {model_disp} · {repo_disp}"
+            # Narrow (<60 cols): 1-line status bar with model and context tag
+            left_plain = f" ● {model_disp} · [{ctx_tag}]"
             right = f"v{CLI_VERSION} "
-            gap = max(1, cols - len(left) - len(right) - 1)
+            gap = max(1, cols - len(left_plain) - len(right) - 1)
             return [
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
-                ("class:toolbar-id", f"{model_disp} · {repo_disp}"),
+                ("class:toolbar-id", f"{model_disp} · "),
+                (ctx_style, f"[{ctx_tag}]"),
                 ("class:toolbar-sep", " " * gap),
                 ("class:toolbar-dim", right),
             ]
         else:
-            # Standard & Wide (>=60 cols): 2-line status bar
-            left_hints = "  tab mode    ctrl+p help    @ file    /model ai"
+            # Standard & Wide (>=60 cols): 2-line status bar with context metrics
+            left_hints = "  tab mode    ctrl+p help    /new reset    /context"
             right_v = f"v{CLI_VERSION}  "
             gap = max(1, cols - len(left_hints) - len(right_v) - 1)
             line2 = f"{left_hints}{' ' * gap}{right_v}"
@@ -1122,7 +1150,8 @@ def run_interactive(
             return [
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
-                ("class:toolbar-id", f"{model_disp}  ·  {repo_disp}\n"),
+                ("class:toolbar-id", f"{model_disp}  ·  {repo_disp}  ·  "),
+                (ctx_style, f"[{ctx_tag}]\n"),
                 ("class:toolbar-dim", line2),
             ]
 
@@ -1262,6 +1291,8 @@ def run_interactive(
             ("/backend <name>", "Ganti System 1 backend (mock | typesafe | auto)", "System"),
             ("/domains", "Tampilkan domain modul arsitektur yang terdeteksi", "Architecture"),
             ("/init [stack]", "Auto-generate modules.json (web | node | python)", "Setup"),
+            ("/new, /reset", "Mulai sesi baru & reset memory context (0%)", "Session"),
+            ("/context, /tokens", "Lihat meteran memory context window & metrik sesi", "Metrics"),
             ("/clear", "Bersihkan layar terminal dan kembali ke tampilan awal", "Session"),
             ("/exit, /quit", "Keluar dari sesi BrainFrog", "Session"),
         ]
@@ -1345,6 +1376,22 @@ def run_interactive(
             is_first_turn[0] = True
             cols, rows = shutil.get_terminal_size(fallback=(95, 35))
             print_splash(cols, rows)
+            continue
+        elif lower in ("/new", "/reset"):
+            usage_tracker.reset_session()
+            console.clear()
+            is_first_turn[0] = True
+            cols, rows = shutil.get_terminal_size(fallback=(95, 35))
+            print_splash(cols, rows)
+            ctx = usage_tracker.get_context_info(active_model)
+            print_banner_box(
+                "Sesi percakapan baru berhasil dimulai!\n"
+                f"• Memory context di-reset ke 0 token (0.0% dari {ctx['limit_k']}).\n"
+                f"• Model aktif: [bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}] ({active_provider})\n"
+                "• Riwayat context window bersih dan siap menerima instruksi baru.",
+                level="success",
+                title="New Chat Session",
+            )
             continue
         elif lower == "/whoami":
             google_acct = get_active_google_account()
@@ -1705,17 +1752,22 @@ def run_interactive(
             else:
                 print_banner_box("Tidak ada perubahan kode yang terdeteksi (working tree clean).", level="info", title="Git Diff")
             continue
-        elif lower in ("/cost", "/stats", "/tokens"):
+        elif lower in ("/cost", "/stats", "/tokens", "/context", "/memory-context"):
             s = usage_tracker.session
+            ctx = usage_tracker.get_context_info(active_model)
             cols, rows, box_w, margin, pad = get_layout_dims()
-            table = Table(title=" BrainFrog Session Metrics ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, width=box_w)
+            table = Table(title=" BrainFrog Context & Session Metrics ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, width=box_w)
             table.add_column("Metrik", style=COLOR_INFO)
             table.add_column("Nilai", style=f"bold {COLOR_ACCENT}", justify="right")
             table.add_row("Provider", f"{active_provider}")
             table.add_row("Model", f"{active_model}")
-            table.add_row("Input Tokens", f"{s.input_tokens:,}")
-            table.add_row("Output Tokens", f"{s.output_tokens:,}")
-            table.add_row("Total Tokens", f"{s.total_tokens:,}")
+            table.add_row("Context Window Limit", f"{ctx['limit']:,} tokens ({ctx['limit_k']})")
+            table.add_row("Active Memory Context", f"{ctx['tokens']:,} tokens ({ctx['percent']}%)")
+            table.add_row("Context Visual Bar", f"[{ctx['status_color']}]{ctx['bar']}[/{ctx['status_color']}]")
+            table.add_row("Context Health Status", f"[{ctx['status_color']}]{ctx['status_label']}[/{ctx_color if (ctx_color := ctx['status_color']) else COLOR_ACCENT}]")
+            table.add_row("Cumulative In Tokens", f"{s.input_tokens:,}")
+            table.add_row("Cumulative Out Tokens", f"{s.output_tokens:,}")
+            table.add_row("Total Session Tokens", f"{s.total_tokens:,}")
             table.add_row("API Requests", f"{s.requests_count:,}")
             if active_provider == "antigravity":
                 table.add_row("Billing", "Covered by Google Antigravity Auth")
@@ -1724,6 +1776,14 @@ def run_interactive(
             console.print()
             console.print(Align.center(table) if cols > 100 else table)
             console.print()
+
+            if ctx["percent"] >= 75.0:
+                print_banner_box(
+                    f"⚠️  Memory context sudah terisi {ctx['percent']}% ({ctx['tokens']:,} / {ctx['limit']:,} token).\n"
+                    "Disarankan menjalankan `/new` atau `/reset` untuk memulai sesi baru agar jawaban tetap optimal.",
+                    level="warning",
+                    title="Memory Context Warning (>75%)",
+                )
             continue
         elif lower.startswith("/preview") or lower.startswith("/shot"):
             from system2.visual_inspector import (

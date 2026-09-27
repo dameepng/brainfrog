@@ -24,6 +24,55 @@ DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 # Default: 64000 (current Anthropic model ceiling) — effectively no artificial cap.
 MAX_OUTPUT_TOKENS = int(os.environ.get("BRAINFROG_MAX_OUTPUT_TOKENS", "64000"))
 
+# Known model context window limits (in tokens)
+MODEL_CONTEXT_LIMITS: Dict[str, int] = {
+    # Gemini / Antigravity models
+    "gemini-3.8-flash-high": 1_000_000,
+    "gemini-3.8-flash-medium": 1_000_000,
+    "gemini-3.7-flash-high": 1_000_000,
+    "gemini-3.1-pro-high": 2_000_000,
+    "gemini-1.5-pro": 2_000_000,
+    "gemini-1.5-flash": 1_000_000,
+    "gemini-2.0-flash": 1_000_000,
+    "gemini-2.5-flash": 1_000_000,
+    "gemini-2.5-pro": 2_000_000,
+    # Claude models (direct or via Google Auth)
+    "claude-sonnet-4-6": 200_000,
+    "claude-opus-4-6-thinking": 200_000,
+    "claude-sonnet-5": 200_000,
+    "claude-3-5-sonnet-20241022": 200_000,
+    "claude-3-5-haiku-20241022": 200_000,
+    "claude-3-7-sonnet-20250219": 200_000,
+    "claude-3-opus-20240229": 200_000,
+    # Open-weight / OpenAI models
+    "gpt-oss-120b-medium": 128_000,
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "o1": 200_000,
+    "o3-mini": 200_000,
+    "deepseek-chat": 64_000,
+    "deepseek-reasoner": 64_000,
+}
+DEFAULT_CONTEXT_LIMIT = 128_000
+
+
+def get_model_context_limit(model_name: Optional[str] = None) -> int:
+    """Return the maximum context window size in tokens for a given model."""
+    if not model_name:
+        return DEFAULT_CONTEXT_LIMIT
+    m = model_name.lower().strip()
+    if m in MODEL_CONTEXT_LIMITS:
+        return MODEL_CONTEXT_LIMITS[m]
+    if "gemini" in m:
+        return 2_000_000 if "pro" in m else 1_000_000
+    if "claude" in m:
+        return 200_000
+    if "gpt-4" in m or "gpt-o" in m or "o1" in m or "o3" in m:
+        return 128_000
+    if "deepseek" in m:
+        return 64_000
+    return DEFAULT_CONTEXT_LIMIT
+
 
 @dataclass
 class UsageStats:
@@ -45,6 +94,8 @@ class UsageTracker:
     def __init__(self) -> None:
         self.session = UsageStats()
         self.last_task = UsageStats()
+        self.last_context_tokens: int = 0
+        self.max_context_tokens: int = 0
 
     def record(self, inp: int, out: int) -> None:
         self.session.input_tokens += inp
@@ -53,11 +104,60 @@ class UsageTracker:
         self.last_task.input_tokens += inp
         self.last_task.output_tokens += out
         self.last_task.requests_count += 1
+        if inp > 0:
+            self.last_context_tokens = inp
+            self.max_context_tokens = max(self.max_context_tokens, inp)
 
     def reset_task(self) -> UsageStats:
         prev = self.last_task
         self.last_task = UsageStats()
+        self.max_context_tokens = 0
         return prev
+
+    def reset_session(self) -> None:
+        """Reset all metrics for a fresh conversation session."""
+        self.session = UsageStats()
+        self.last_task = UsageStats()
+        self.last_context_tokens = 0
+        self.max_context_tokens = 0
+
+    def get_context_info(self, model_name: Optional[str] = None) -> Dict[str, Any]:
+        """Compute current context window consumption metrics and warning status."""
+        limit = get_model_context_limit(model_name)
+        tokens = self.last_context_tokens or self.session.input_tokens
+        percent = (tokens / limit * 100.0) if limit > 0 else 0.0
+        percent = round(min(percent, 100.0), 1)
+
+        # 16-slot visual progress bar
+        bar_len = 16
+        filled = int(round((percent / 100.0) * bar_len))
+        filled = max(0, min(bar_len, filled))
+        bar = "█" * filled + "░" * (bar_len - filled)
+
+        if percent < 50.0:
+            status = "safe"
+            status_label = "Optimal"
+            status_color = "#33D17A"  # Green
+        elif percent < 75.0:
+            status = "warning"
+            status_label = "Moderate"
+            status_color = "#F6D32D"  # Yellow
+        else:
+            status = "critical"
+            status_label = "Kritis"
+            status_color = "#E01E5A"  # Red
+
+        return {
+            "tokens": tokens,
+            "limit": limit,
+            "percent": percent,
+            "status": status,
+            "status_label": status_label,
+            "status_color": status_color,
+            "bar": bar,
+            "tokens_k": f"{tokens / 1000:.1f}k" if tokens >= 1000 else str(tokens),
+            "limit_k": f"{limit / 1000:.0f}k" if limit >= 1000 else str(limit),
+        }
 
 
 # Global usage tracking singleton

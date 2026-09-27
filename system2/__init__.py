@@ -3,7 +3,14 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from .claude_client import PlanStep, UsageStats, UsageTracker, usage_tracker
+from .claude_client import (
+    MODEL_CONTEXT_LIMITS,
+    PlanStep,
+    UsageStats,
+    UsageTracker,
+    get_model_context_limit,
+    usage_tracker,
+)
 from .claude_client import System2Client as ClaudeSystem2Client
 from .antigravity_client import AntigravitySystem2Client, find_antigravity_bin
 from .json_utils import extract_json, _extract_json, repair_json_content
