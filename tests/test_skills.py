@@ -11,6 +11,7 @@ Also tests:
 - Security validation of skill scripts (Zero-Trust sandbox).
 """
 import sys
+import unittest
 from pathlib import Path
 
 # Ensure UTF-8 on Windows
@@ -30,7 +31,7 @@ from skills import (
 )
 
 def run_tests():
-    repo_dir = Path(__file__).resolve().parent
+    repo_dir = Path(__file__).resolve().parent.parent
 
     print("=== Test 1: Startup Indexing (Name & Description Only) ===")
     skills = index_skills(repo_dir)
@@ -135,5 +136,10 @@ def run_tests():
     print("🎉 ALL 6 SKILL SYSTEM TESTS PASSED SUCCESSFULLY!")
     print("=" * 60)
 
+class TestSkills(unittest.TestCase):
+    def test_skills_suite(self):
+        run_tests()
+
+
 if __name__ == "__main__":
-    run_tests()
+    unittest.main()

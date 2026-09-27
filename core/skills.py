@@ -85,12 +85,14 @@ def index_skills(repo_dir: Path) -> Dict[str, SkillMetadata]:
     """Scan .brainfrog/skills (and ~/.brainfrog/skills) and index ONLY name & description."""
     indexed: Dict[str, SkillMetadata] = {}
 
-    pkg_skills_dir = Path(__file__).resolve().parent / ".brainfrog" / "skills"
+    pkg_skills_dir = Path(__file__).resolve().parent.parent / ".brainfrog" / "skills"
+    alt_pkg_skills_dir = Path(__file__).resolve().parent / ".brainfrog" / "skills"
     search_dirs = [
         repo_dir / ".brainfrog" / "skills",
         repo_dir / ".agents" / "skills",
         repo_dir / "skills",
         pkg_skills_dir,
+        alt_pkg_skills_dir,
         Path.home() / ".brainfrog" / "skills",
         Path.home() / ".agents" / "skills",
         Path.home() / ".gemini" / "antigravity-ide" / "builtin" / "skills",
