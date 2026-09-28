@@ -122,6 +122,8 @@ def capture_screenshot(
         f"--screenshot={str(output_png)}",
         f"--window-size={window_size}",
         "--disable-gpu",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
         "--hide-scrollbars",
         "--no-first-run",
         "--no-default-browser-check",
