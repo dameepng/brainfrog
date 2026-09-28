@@ -147,7 +147,7 @@ def run_frontend_quality_gate(
         except Exception:
             pass
 
-    dev_script_name = "dev" if "dev" in scripts else "start"
+    dev_script_name = "start" if (has_build_script and "start" in scripts) else ("dev" if "dev" in scripts else "start")
 
     log(f"[mcp-verify] 🚀 Starting verification gate for '{cwd_path.name}' (instance: {actual_instance_id})")
     log(f"[mcp-verify] Connecting to MCP server at {args[0]}...")
@@ -261,12 +261,14 @@ def run_frontend_quality_gate(
                         duration_seconds=time.time() - start_time,
                     )
 
-                # Check if dev server printed a specific local URL (e.g. Vite on 5173, Next on 3000)
+                # Check if dev server printed a specific local URL (e.g. Vite on 5173, Next on 3000, 0.0.0.0:8080)
                 if dev_url == DEFAULT_DEV_URL and dev_out:
                     import re
-                    m = re.search(r"https?://(?:localhost|127\.0\.0\.1):\d+", dev_out)
+                    m = re.search(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d+", dev_out)
                     if m:
-                        resolved_nav_url = m.group(0)
+                        detected_url = m.group(0)
+                        # Windows browser navigation to 0.0.0.0 is unreliable; map to localhost
+                        resolved_nav_url = detected_url.replace("0.0.0.0", "localhost")
 
                 # Attempt navigation
                 nav_res = client.call_tool(

@@ -113,7 +113,18 @@ class AntigravitySystem2Client:
                 encoding="utf-8",
                 errors="replace",
             )
-            stdout, stderr = proc.communicate(input=prompt)
+            try:
+                stdout, stderr = proc.communicate(input=prompt, timeout=120.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.communicate(timeout=3.0)
+                except Exception:
+                    pass
+                if attempt < max_attempts - 1:
+                    time.sleep(1.0)
+                    continue
+                raise RuntimeError("Antigravity process timed out after 120s.")
 
             if proc.returncode != 0:
                 err_msg = (stderr.strip() or stdout.strip() or

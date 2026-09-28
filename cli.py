@@ -476,6 +476,8 @@ def execute_task(
             console.print()
         elif r.outcome == "needs_clarification" and r.detail:
             print_banner_box(r.detail, level="warning", title="Scope Clarification")
+        elif r.outcome in ("escalated", "abandoned") and r.detail:
+            print_banner_box(r.detail, level="error", title=f"Step {r.step.id} {r.outcome.upper()}")
 
     # Render Task Summary Table only for multi-step / code planning tasks
     is_question_turn = len(results) == 1 and results[0].outcome in ("diagnosed", "needs_clarification", "planned")

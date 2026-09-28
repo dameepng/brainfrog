@@ -965,9 +965,11 @@ class Orchestrator:
                 if mcp_res is not None and not mcp_res.passed:
                     if retries < self.cfg.max_retries:
                         retries += 1
+                        mcp_ctx = mcp_res.to_agent_context()
                         self._log(f"[system2/{self.s2_tag}] fixing frontend quality gate failures, attempt {retries}/{self.cfg.max_retries} ...")
+                        self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{mcp_ctx}")
                         current = _read_files(self.cfg.repo_dir, step_files)
-                        fixed = self.s2.review_and_fix(effective_task, step, current, mcp_res.to_agent_context())
+                        fixed = self.s2.review_and_fix(effective_task, step, current, mcp_ctx)
                         _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
                         new_files.update(fixed)
                         continue
@@ -1016,9 +1018,11 @@ class Orchestrator:
                 if mcp_res is not None and not mcp_res.passed:
                     if retries < self.cfg.max_retries:
                         retries += 1
+                        mcp_ctx = mcp_res.to_agent_context()
                         self._log(f"[system2/{self.s2_tag}] fixing frontend quality gate failures, attempt {retries}/{self.cfg.max_retries} ...")
+                        self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{mcp_ctx}")
                         current = _read_files(self.cfg.repo_dir, step_files)
-                        fixed = self.s2.review_and_fix(effective_task, step, current, mcp_res.to_agent_context())
+                        fixed = self.s2.review_and_fix(effective_task, step, current, mcp_ctx)
                         _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
                         new_files.update(fixed)
                         continue
