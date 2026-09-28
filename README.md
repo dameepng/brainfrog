@@ -396,3 +396,4 @@ The MCP integration follows a clean two-layer separation:
 **Layer 2: `core/frontend_quality_gate.py`** — Domain-specific verification pipeline. Consumes `McpClient` to execute the 7-step quality gate workflow (build → dev server → navigate → console → network → screenshot → verdict). Returns structured `QualityGateResult` with actionable error context for System 2.
 
 This separation ensures the MCP client can be reused for future MCP server integrations without coupling to frontend verification logic.
+
