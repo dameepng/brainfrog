@@ -243,12 +243,16 @@ def run_frontend_quality_gate(
             nav_ok = False
             last_nav_err = ""
 
-            while time.time() < nav_deadline:
+            while True:
+                remaining = nav_deadline - time.time()
+                if remaining <= 0:
+                    break
+
                 # Check if dev server crashed immediately
                 proc_stat = client.call_tool(
                     "read_process_output",
                     {"instanceId": actual_instance_id, "tailLines": 40},
-                    timeout=5.0,
+                    timeout=min(remaining, 5.0),
                 )
                 stat_data = proc_stat.parsed_json or {}
                 dev_out = stat_data.get("output", "")
@@ -270,18 +274,27 @@ def run_frontend_quality_gate(
                         # Windows browser navigation to 0.0.0.0 is unreliable; map to localhost
                         resolved_nav_url = detected_url.replace("0.0.0.0", "localhost")
 
-                # Attempt navigation
+                # Attempt navigation with timeout clamped to remaining time (max 10s per attempt)
+                remaining = nav_deadline - time.time()
+                if remaining <= 0:
+                    break
+                nav_timeout = min(remaining, 10.0)
                 nav_res = client.call_tool(
                     "navigate",
                     {"instanceId": actual_instance_id, "url": resolved_nav_url},
-                    timeout=15.0,
+                    timeout=nav_timeout,
                 )
                 if not nav_res.is_error:
                     nav_ok = True
                     break
 
                 last_nav_err = nav_res.text or nav_res.error_message or "Connection refused"
-                time.sleep(1.5)
+
+                # Sleep only if there is still time remaining
+                remaining = nav_deadline - time.time()
+                if remaining <= 1.0:
+                    break
+                time.sleep(min(1.5, remaining - 0.5))
 
             if not nav_ok:
                 log(f"[mcp-verify] ❌ Failed to connect to dev server at {resolved_nav_url}: {last_nav_err}")
