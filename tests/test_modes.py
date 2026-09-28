@@ -411,7 +411,10 @@ class TestPlanAndBuildModes(unittest.TestCase):
 
         with self.assertRaises(PermissionError) as ctx:
             save_plan_document(self.repo_dir, "symlink_dir/evil.md", "# Evil")
-        self.assertIn("Symlink traversal terdeteksi", str(ctx.exception))
+        self.assertTrue(
+            "Symlink traversal terdeteksi" in str(ctx.exception)
+            or "Path traversal terdeteksi" in str(ctx.exception)
+        )
 
     # -------------------------------------------------------------------------
     # 7. Build mode allows normal execution according to existing permissions

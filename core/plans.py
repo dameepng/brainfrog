@@ -209,11 +209,21 @@ def save_plan_document(
             f"Ekstensi file rencana tidak valid: '{raw_path.suffix}'. Hanya {allowed_exts} yang diizinkan."
         )
 
+    # Check for symlink traversal before full resolve
+    target_candidate = raw_path if raw_path.is_absolute() else (plans_dir / raw_path)
+    curr = target_candidate
+    while curr != plans_dir and curr != curr.parent:
+        if curr.is_symlink():
+            try:
+                curr.resolve().relative_to(plans_dir)
+            except ValueError:
+                raise PermissionError(
+                    f"Symlink traversal terdeteksi: symlink '{curr}' mengarah ke luar direktori rencana."
+                )
+        curr = curr.parent
+
     # Construct and resolve target path
-    if raw_path.is_absolute():
-        resolved_target = raw_path.resolve()
-    else:
-        resolved_target = (plans_dir / raw_path).resolve()
+    resolved_target = target_candidate.resolve()
 
     # Verify target stays inside plans_dir
     try:
@@ -222,19 +232,6 @@ def save_plan_document(
         raise PermissionError(
             f"Path traversal terdeteksi: path '{filename}' mengarah ke luar direktori rencana ({plans_dir})."
         )
-
-    # Symlink escape verification
-    curr = resolved_target
-    while curr != plans_dir and curr != curr.parent:
-        if curr.is_symlink():
-            real_target = curr.resolve()
-            try:
-                real_target.relative_to(plans_dir)
-            except ValueError:
-                raise PermissionError(
-                    f"Symlink traversal terdeteksi: symlink '{curr}' mengarah ke luar direktori rencana."
-                )
-        curr = curr.parent
 
     # Write plan content
     resolved_target.parent.mkdir(parents=True, exist_ok=True)
