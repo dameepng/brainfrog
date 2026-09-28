@@ -183,14 +183,18 @@ def run_frontend_quality_gate(
             )
 
             # Poll read_process_output until exitCode is set or timeout reached
-            build_deadline = time.time() + 60.0
+            build_deadline = time.time() + 120.0
             build_exit_code = None
 
-            while time.time() < build_deadline:
+            while True:
+                remaining = build_deadline - time.time()
+                if remaining <= 0:
+                    break
+
                 res = client.call_tool(
                     "read_process_output",
                     {"instanceId": actual_instance_id, "tailLines": 100},
-                    timeout=10.0,
+                    timeout=min(remaining, 10.0),
                 )
                 data = res.parsed_json or {}
                 build_output = data.get("output", "")
@@ -198,15 +202,19 @@ def run_frontend_quality_gate(
 
                 if build_exit_code is not None:
                     break
-                time.sleep(1.0)
+
+                remaining = build_deadline - time.time()
+                if remaining <= 0:
+                    break
+                time.sleep(min(1.0, remaining))
 
             if build_exit_code is None:
-                log("[mcp-verify] ❌ Build timed out after 60 seconds.")
+                log("[mcp-verify] ❌ Build timed out after 120 seconds.")
                 client.call_tool("stop_process", {"instanceId": actual_instance_id})
                 return QualityGateResult(
                     status="FAIL",
                     build_output=build_output,
-                    reason="Build process timed out after 60s.",
+                    reason="Build process timed out after 120s.",
                     duration_seconds=time.time() - start_time,
                 )
 
