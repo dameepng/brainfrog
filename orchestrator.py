@@ -8,6 +8,7 @@ Now enhanced with:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1091,7 +1092,7 @@ class Orchestrator:
                 return None
 
             step_idx = getattr(step, "id", getattr(step, "order", 1))
-            instance_id = f"bf-step-{step_idx}-{int(time.time())}"
+            instance_id = f"bf-step-{step_idx}-{os.getpid()}-{int(time.time())}"
 
             self._log(f"[mcp-verify] 🌐 Running browser quality gate for step '{step.description}' ...")
             gate_res = run_frontend_quality_gate(

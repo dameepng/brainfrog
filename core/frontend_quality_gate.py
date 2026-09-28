@@ -122,7 +122,7 @@ def run_frontend_quality_gate(
                 pass
 
     cwd_path = Path(project_cwd).resolve()
-    actual_instance_id = instance_id or f"bf-gate-{int(start_time)}"
+    actual_instance_id = instance_id or f"bf-gate-{os.getpid()}-{int(start_time)}"
     args = mcp_args or [DEFAULT_MCP_SERVER_PATH]
 
     # Pre-flight check: verify server script exists
