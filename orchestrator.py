@@ -11,6 +11,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -960,6 +961,23 @@ class Orchestrator:
             # 2. OR tests passed cleanly (exit 0), files were touched, and diff has reasonable step relevance (>= 0.25)
             step_diff_ok = diff_ok or (passed and len(step_files) > 0 and diff_score >= 0.25)
             if tests_ok and step_diff_ok:
+                mcp_res = self._run_frontend_quality_gate(step, effective_task, new_files)
+                if mcp_res is not None and not mcp_res.passed:
+                    if retries < self.cfg.max_retries:
+                        retries += 1
+                        self._log(f"[system2/{self.s2_tag}] fixing frontend quality gate failures, attempt {retries}/{self.cfg.max_retries} ...")
+                        current = _read_files(self.cfg.repo_dir, step_files)
+                        fixed = self.s2.review_and_fix(effective_task, step, current, mcp_res.to_agent_context())
+                        _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
+                        new_files.update(fixed)
+                        continue
+                    return StepResult(
+                        step,
+                        "escalated",
+                        retries,
+                        f"Stopped for human review after {retries} retr(ies). Frontend quality gate failure:\n{mcp_res.to_agent_context()[:1500]}",
+                    )
+
                 visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
                 if retries > 0 or visual_fixed:
                     self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
@@ -994,6 +1012,23 @@ class Orchestrator:
                     f"[orchestrator] ⚠️ Step '{step.description}' tests passed cleanly but diff completeness "
                     f"was borderline ({diff_score:.2f}). Finalizing step because the code build is healthy."
                 )
+                mcp_res = self._run_frontend_quality_gate(step, effective_task, new_files)
+                if mcp_res is not None and not mcp_res.passed:
+                    if retries < self.cfg.max_retries:
+                        retries += 1
+                        self._log(f"[system2/{self.s2_tag}] fixing frontend quality gate failures, attempt {retries}/{self.cfg.max_retries} ...")
+                        current = _read_files(self.cfg.repo_dir, step_files)
+                        fixed = self.s2.review_and_fix(effective_task, step, current, mcp_res.to_agent_context())
+                        _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
+                        new_files.update(fixed)
+                        continue
+                    return StepResult(
+                        step,
+                        "escalated",
+                        retries,
+                        f"Stopped for human review after {retries} retr(ies). Frontend quality gate failure:\n{mcp_res.to_agent_context()[:1500]}",
+                    )
+
                 visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
                 if retries > 0 or visual_fixed:
                     self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
@@ -1008,6 +1043,82 @@ class Orchestrator:
                 retries,
                 f"Stopped for human review after {retries} retr(ies). Last test output:\n{output[-1500:]}",
             )
+
+    def _run_frontend_quality_gate(
+        self,
+        step: PlanStep,
+        effective_task: str,
+        new_files: Dict[str, str],
+    ) -> Optional[Any]:
+        """Browser verification gate backed by brainfrog-verify-mcp.
+
+        Runs npm run build, starts dev server, navigates to dev URL,
+        and verifies 0 console errors and 0 failed network requests.
+        """
+        try:
+            from system2.visual_inspector import is_frontend_change
+            from core.frontend_quality_gate import (
+                DEFAULT_MCP_SERVER_PATH,
+                DEFAULT_DEV_URL,
+                run_frontend_quality_gate,
+            )
+
+            # Check if this step touches frontend or repo has web configuration
+            all_touched = list(new_files.keys()) or step.files
+            try:
+                diff_names = _run(["git", "diff", "--name-only"], self.cfg.repo_dir).stdout.split()
+                all_touched = list(set(all_touched + diff_names))
+            except Exception:
+                pass
+
+            has_pkg_json = (self.cfg.repo_dir / "package.json").exists()
+            has_index_html = (
+                (self.cfg.repo_dir / "index.html").exists()
+                or (self.cfg.repo_dir / "public" / "index.html").exists()
+                or (self.cfg.repo_dir / "src" / "index.html").exists()
+            )
+            is_fe = is_frontend_change(all_touched)
+
+            if not (has_pkg_json or has_index_html or is_fe):
+                return None
+
+            mcp_script = Path(DEFAULT_MCP_SERVER_PATH)
+            if not mcp_script.exists():
+                return None
+
+            step_idx = getattr(step, "id", getattr(step, "order", 1))
+            instance_id = f"bf-step-{step_idx}-{int(time.time())}"
+
+            self._log(f"[mcp-verify] 🌐 Running browser quality gate for step '{step.description}' ...")
+            gate_res = run_frontend_quality_gate(
+                project_cwd=self.cfg.repo_dir,
+                dev_url=DEFAULT_DEV_URL,
+                instance_id=instance_id,
+                mcp_args=[str(mcp_script)],
+                timeout_seconds=120.0,
+                log_callback=lambda msg: self._log(msg),
+            )
+
+            # Save verified screenshot to scratch directory for inspectability
+            if gate_res.screenshot_base64:
+                try:
+                    import base64
+                    scratch_dir = self.cfg.repo_dir / ".brainfrog" / "scratch"
+                    scratch_dir.mkdir(parents=True, exist_ok=True)
+                    shot_path = scratch_dir / "mcp_verified.png"
+                    shot_path.write_bytes(base64.b64decode(gate_res.screenshot_base64))
+                    try:
+                        rel_shot = shot_path.relative_to(self.cfg.repo_dir)
+                    except Exception:
+                        rel_shot = shot_path
+                    self._log(f"[mcp-verify] 📸 Viewport screenshot saved: {rel_shot}")
+                except Exception as e:
+                    self._log(f"[mcp-verify] ⚠️ Could not save screenshot file ({e})")
+
+            return gate_res
+        except Exception as e:
+            self._log(f"[mcp-verify] ⚠️ MCP quality gate encountered unexpected error ({e}), skipping.")
+            return None
 
     def _run_visual_quality_gate(
         self,
