@@ -984,7 +984,7 @@ class Orchestrator:
                 visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
                 if retries > 0 or visual_fixed:
                     self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
-                return self._finalize_pr(step, retries, output, sensitive=sensitive)
+                return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res)
 
             # Can retry if within retry budget and Jev has not flagged retries as futile
             can_retry = not retry_exceeded and retries < self.cfg.max_retries
@@ -1037,7 +1037,7 @@ class Orchestrator:
                 visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
                 if retries > 0 or visual_fixed:
                     self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
-                return self._finalize_pr(step, retries, output, sensitive=sensitive)
+                return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res)
 
             if retry_exceeded or retries >= self.cfg.max_retries:
                 return StepResult(step, "abandoned", retries, "Jev assessed retry limit exceeded with no progress.")
@@ -1084,7 +1084,11 @@ class Orchestrator:
             )
             is_fe = is_frontend_change(all_touched)
 
-            if not (has_pkg_json or has_index_html or is_fe):
+            # Deterministic gate: must touch frontend files AND project must have web environment
+            if not is_fe:
+                return None
+
+            if not (has_pkg_json or has_index_html):
                 return None
 
             mcp_script = Path(DEFAULT_MCP_SERVER_PATH)
@@ -1104,7 +1108,7 @@ class Orchestrator:
                 log_callback=lambda msg: self._log(msg),
             )
 
-            # Save verified screenshot to scratch directory for inspectability
+            # Save verified screenshots to scratch directory for inspectability
             if gate_res.screenshot_base64:
                 try:
                     import base64
@@ -1112,6 +1116,9 @@ class Orchestrator:
                     scratch_dir.mkdir(parents=True, exist_ok=True)
                     shot_path = scratch_dir / "mcp_verified.png"
                     shot_path.write_bytes(base64.b64decode(gate_res.screenshot_base64))
+                    if gate_res.screenshot_mobile_base64:
+                        mob_path = scratch_dir / "mcp_verified_mobile.png"
+                        mob_path.write_bytes(base64.b64decode(gate_res.screenshot_mobile_base64))
                     try:
                         rel_shot = shot_path.relative_to(self.cfg.repo_dir)
                     except Exception:
@@ -1317,7 +1324,14 @@ class Orchestrator:
         except Exception as e:
             self._log(f"[memory] ⚠️ Auto-reflection failed ({e}), continuing without saving")
 
-    def _finalize_pr(self, step: PlanStep, retries: int, test_output: str, sensitive: bool = False) -> StepResult:
+    def _finalize_pr(
+        self,
+        step: PlanStep,
+        retries: int,
+        test_output: str,
+        sensitive: bool = False,
+        gate_result: Optional[Any] = None,
+    ) -> StepResult:
         if self.cfg.mode == "plan":
             raise PermissionError("Pembuatan commit atau pull request dilarang dalam mode Plan.")
         stat = _diff_stat(self.cfg.repo_dir)
@@ -1408,9 +1422,20 @@ class Orchestrator:
         )
 
         if auto_ok:
-            self._open_pr(step, pr_copy)
+            self._open_pr(step, pr_copy, gate_result=gate_result)
             detail = f"Auto-opened PR: {pr_copy['title']}"
         else:
+            from core.pr_proof import attach_pr_proof_to_body
+            branch = f"{self.cfg.branch_prefix}{step.id}"
+            new_body, proof_attached = attach_pr_proof_to_body(
+                pr_body=pr_copy.get("body", ""),
+                repo_dir=self.cfg.repo_dir,
+                branch=branch,
+                gate_result=gate_result,
+            )
+            if proof_attached:
+                pr_copy["body"] = new_body
+                self._log(f"[pr-proof] 📸 Quality gate proof screenshots attached to drafted PR for {branch}")
             safe_noul_str = f"{safe.noul:.2f}" if safe.noul is not None else "N/A"
             safe_conf_str = f"{safe.confidence:.2f}" if safe.confidence is not None else "0.00"
             detail = (
@@ -1421,11 +1446,31 @@ class Orchestrator:
             self._log("[orchestrator] " + detail)
         return StepResult(step, "opened_pr" if auto_ok else "drafted_pr", retries, detail)
 
-    def _open_pr(self, step: PlanStep, pr_copy: Dict[str, str]) -> None:
+    def _open_pr(
+        self,
+        step: PlanStep,
+        pr_copy: Dict[str, str],
+        gate_result: Optional[Any] = None,
+    ) -> None:
         if self.cfg.mode == "plan":
             raise PermissionError("Pembuatan pull request dilarang dalam mode Plan.")
         branch = f"{self.cfg.branch_prefix}{step.id}"
         _run(["git", "checkout", "-b", branch], self.cfg.repo_dir)
+
+        # Check frontend changes and conditionally attach PR Proof screenshots
+        from core.pr_proof import attach_pr_proof_to_body, update_github_pr_body
+        new_body, proof_attached = attach_pr_proof_to_body(
+            pr_body=pr_copy.get("body", ""),
+            repo_dir=self.cfg.repo_dir,
+            branch=branch,
+            gate_result=gate_result,
+        )
+        if proof_attached:
+            pr_copy["body"] = new_body
+            self._log(f"[pr-proof] 📸 Quality gate proof screenshots attached to PR body for {branch}")
+        else:
+            self._log(f"[pr-proof] ℹ️ Skipping PR proof: no frontend changes detected in PR.")
+
         ensure_gitignore_security(self.cfg.repo_dir)
         purge_tracked_sensitive_files(self.cfg.repo_dir)
         _run(["git", "add", "-A"], self.cfg.repo_dir)
@@ -1455,3 +1500,5 @@ class Orchestrator:
             self._log(f"[orchestrator] branch pushed, but `gh pr create` failed (is gh installed & authed?): {gh.stderr}")
         else:
             self._log(f"[orchestrator] PR opened: {gh.stdout.strip()}")
+            if proof_attached:
+                update_github_pr_body(self.cfg.repo_dir, branch, pr_copy["body"])

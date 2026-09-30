@@ -70,17 +70,7 @@ def find_html_entrypoint(repo_dir: Path) -> Optional[Path]:
     return None
 
 
-def is_frontend_change(files: Iterable[str]) -> bool:
-    """Check if any of the touched files affect frontend UI/UX."""
-    frontend_exts = {".html", ".htm", ".css", ".scss", ".sass", ".less", ".jsx", ".tsx", ".vue", ".svelte"}
-    for f in files:
-        ext = Path(f).suffix.lower()
-        if ext in frontend_exts:
-            return True
-        name = Path(f).name.lower()
-        if "style" in name or "ui" in name or "view" in name or "component" in name:
-            return True
-    return False
+from core.frontend_quality_gate import is_frontend_change
 
 
 def capture_screenshot(

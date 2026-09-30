@@ -18,7 +18,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from core.mcp_client import McpClient
 
@@ -27,6 +27,66 @@ DEFAULT_MCP_SERVER_PATH = os.environ.get(
     r"C:\dame-project\tools\brainfrog-verify-mcp\dist\index.js",
 )
 DEFAULT_DEV_URL = os.environ.get("BRAINFROG_DEV_URL", "http://localhost:3000")
+
+FRONTEND_EXTENSIONS = {
+    ".html", ".htm",
+    ".css", ".scss", ".sass", ".less",
+    ".jsx", ".tsx",
+    ".vue", ".svelte",
+}
+
+IGNORED_DIRECTORIES = {
+    "node_modules", ".git", "dist", "build", ".next", "out",
+    "coverage", ".brainfrog", "docs", "documentation", ".github",
+    "vendor", "__pycache__", ".venv", "venv",
+}
+
+NON_FRONTEND_EXTENSIONS = {
+    ".md", ".markdown", ".rst", ".txt", ".json", ".lock",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".py", ".go", ".rs", ".java", ".c", ".cpp", ".rb", ".php", ".sh",
+}
+
+FRONTEND_DIRECTORIES = {
+    "src", "components", "pages", "app", "views", "ui", "styles", "public", "frontend"
+}
+
+
+def is_frontend_change(files: Iterable[str]) -> bool:
+    """Check if any of the touched files affect frontend UI/UX.
+
+    Returns False for backend-only, config, documentation, and non-visual files,
+    as well as files inside ignored directories (e.g. node_modules, docs, .github).
+    """
+    for f in files:
+        if not f or not str(f).strip():
+            continue
+        p = Path(f)
+        parts = [part.lower() for part in p.parts]
+
+        # Ignore non-source or excluded directories
+        if any(ign in parts for ign in IGNORED_DIRECTORIES):
+            continue
+
+        ext = p.suffix.lower()
+
+        # Explicit non-frontend / documentation / backend extensions
+        if ext in NON_FRONTEND_EXTENSIONS:
+            continue
+
+        # Direct frontend extensions (.tsx, .jsx, .css, .html, .vue, .svelte, etc.)
+        if ext in FRONTEND_EXTENSIONS:
+            return True
+
+        # JS/TS logic files: check if they are located within frontend directories
+        if ext in {".js", ".ts", ".mjs"}:
+            backend_dirs = {"backend", "server", "api", "services"}
+            has_fe_dir = any(d in parts for d in FRONTEND_DIRECTORIES)
+            has_be_dir = any(d in parts for d in backend_dirs)
+            if has_fe_dir and not has_be_dir:
+                return True
+
+    return False
 
 
 @dataclass
@@ -38,8 +98,16 @@ class QualityGateResult:
     console_errors: List[Any] = field(default_factory=list)
     failed_requests: List[Any] = field(default_factory=list)
     screenshot_base64: Optional[str] = None
+    screenshot_desktop_base64: Optional[str] = None
+    screenshot_mobile_base64: Optional[str] = None
     reason: str = ""
     duration_seconds: float = 0.0
+
+    def __post_init__(self):
+        if self.screenshot_desktop_base64 and not self.screenshot_base64:
+            self.screenshot_base64 = self.screenshot_desktop_base64
+        elif self.screenshot_base64 and not self.screenshot_desktop_base64:
+            self.screenshot_desktop_base64 = self.screenshot_base64
 
     @property
     def passed(self) -> bool:
@@ -97,6 +165,7 @@ def run_frontend_quality_gate(
     mcp_args: Optional[List[str]] = None,
     timeout_seconds: float = 120.0,
     log_callback: Optional[Callable[[str], None]] = None,
+    capture_mobile: bool = False,
 ) -> QualityGateResult:
     """Run full browser verification via MCP server against target frontend project.
 
@@ -375,7 +444,7 @@ def run_frontend_quality_gate(
         failed_requests: List[Any] = raw_net if isinstance(raw_net, list) else []
 
         # -------------------------------------------------------------
-        # Step 4: Capture full-page screenshot
+        # Step 4: Capture desktop and optionally mobile screenshots
         # -------------------------------------------------------------
         log("[mcp-verify] Capturing full-page viewport screenshot...")
         shot_res = client.call_tool(
@@ -383,7 +452,22 @@ def run_frontend_quality_gate(
             {"instanceId": actual_instance_id, "fullPage": True},
             timeout=15.0,
         )
-        screenshot_base64 = shot_res.image_base64
+        screenshot_desktop_base64 = shot_res.image_base64
+        screenshot_base64 = screenshot_desktop_base64
+
+        screenshot_mobile_base64 = None
+        if capture_mobile:
+            log("[mcp-verify] Capturing mobile viewport screenshot (390x844)...")
+            try:
+                shot_mob = client.call_tool(
+                    "screenshot",
+                    {"instanceId": actual_instance_id, "fullPage": True, "width": 390, "height": 844},
+                    timeout=15.0,
+                )
+                if shot_mob and not shot_mob.is_error:
+                    screenshot_mobile_base64 = shot_mob.image_base64
+            except Exception as e:
+                log(f"[mcp-verify] ℹ️ Mobile viewport capture notice: {e}")
 
         # -------------------------------------------------------------
         # Step 5: Determine overall gate verdict
@@ -406,6 +490,8 @@ def run_frontend_quality_gate(
                 console_errors=console_errors,
                 failed_requests=failed_requests,
                 screenshot_base64=screenshot_base64,
+                screenshot_desktop_base64=screenshot_desktop_base64,
+                screenshot_mobile_base64=screenshot_mobile_base64,
                 reason=f"Runtime inspection detected {issue_summary}.",
                 duration_seconds=time.time() - start_time,
             )
@@ -417,6 +503,8 @@ def run_frontend_quality_gate(
             console_errors=[],
             failed_requests=[],
             screenshot_base64=screenshot_base64,
+            screenshot_desktop_base64=screenshot_desktop_base64,
+            screenshot_mobile_base64=screenshot_mobile_base64,
             reason="Build passed cleanly, dev server running, 0 console errors, 0 network failures.",
             duration_seconds=time.time() - start_time,
         )

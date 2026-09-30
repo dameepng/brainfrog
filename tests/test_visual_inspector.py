@@ -51,6 +51,15 @@ class TestVisualInspector(unittest.TestCase):
         # Backend only
         self.assertFalse(is_frontend_change(["main.py", "server.go", "cargo.toml"]))
         self.assertFalse(is_frontend_change(["orchestrator.py", "config.py"]))
+        self.assertFalse(is_frontend_change(["docs/frontend-migration-plan.md"]))
+        self.assertFalse(is_frontend_change(["node_modules/pkg/Button.tsx"]))
+        self.assertFalse(is_frontend_change(["backend/views.py"]))
+        self.assertFalse(is_frontend_change(["README.md"]))
+
+        # Mixed and edge cases
+        self.assertTrue(is_frontend_change(["src/App.tsx", "backend/api.py"]))
+        self.assertTrue(is_frontend_change(["new_components/Navbar.tsx"]))
+        self.assertTrue(is_frontend_change(["assets/custom.css"]))
 
     def test_get_image_base64(self):
         with tempfile.TemporaryDirectory() as tmp:
