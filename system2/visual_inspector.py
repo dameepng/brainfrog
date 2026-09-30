@@ -99,10 +99,9 @@ def capture_screenshot(
     output_png = Path(output_png).resolve()
     output_png.parent.mkdir(parents=True, exist_ok=True)
 
-    # Convert local path to file:// URL
+    # Convert local path to file:// URL using cross-platform standard as_uri()
     if isinstance(target, Path) or (isinstance(target, str) and not target.startswith(("http://", "https://", "file://"))):
-        resolved_path = Path(target).resolve()
-        target_url = f"file:///{resolved_path.as_posix()}"
+        target_url = Path(target).resolve().as_uri()
     else:
         target_url = str(target)
 
