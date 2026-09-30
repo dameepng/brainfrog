@@ -11,6 +11,7 @@ Consumes the generic McpClient (Layer 1) to execute an automated 7-step quality 
 7. Capture full-page screenshot (base64)
 8. Always clean up processes and browser context in finally block (zero zombies)
 """
+# Quality Gate is strictly skipped if no frontend files are touched in the PR.
 from __future__ import annotations
 
 import json
