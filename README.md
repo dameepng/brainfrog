@@ -136,21 +136,35 @@ bf --repo /path/to/your/project
 ```
 
 Perintah cepat di dalam REPL:
-- `@path/file.py` — *Autocomplete* dan penyisipan konteks file ke prompt
-- `!command` — Eksekusi perintah terminal langsung (misal: `!pytest`)
-- `/diff` — Tinjau perubahan git yang belum di-commit
-- `/undo` — Revert perubahan file yang baru saja dibuat agent secara bersih
+- `@path/file.py` — *Autocomplete* file repositori saat mengetik `@` untuk menyertakan path file ke prompt
+- `!command` — Eksekusi perintah shell langsung (misal: `!pytest`, `!git status`)
+- `/mode [plan|build]` — Beralih mode sesi antara **Plan** (eksplorasi *read-only* & penyusunan rencana) dan **Build** (eksekusi kode)
+- `/diff` — Tinjau *diff* perubahan git terkini
+- `/undo` — Batalkan perubahan *uncommitted* atau *commit* terakhir secara bersih via Git
+- `/status` — Tampilkan status repositori, branch, provider, model aktif, dan perintah tes
+- `/provider` — Beralih provider AI System 2 (`antigravity` atau `claude`)
+- `/model` / `/models` — Pilih atau ganti model AI aktif
+- `/preview [target]` — Ambil dan inspeksi tangkapan layar headless dari UI HTML/web
 - `/rules` — Tampilkan pedoman aktif dari `BRAINFROG.md`
-- `/stats` — Tinjau konsumsi token dan estimasi biaya sesi
+- `/learn <rule>` — Ajarkan aturan/preferensi baru ke memory bank BrainFrog
+- `/memory` — Tampilkan daftar seluruh aturan yang telah dipelajari
+- `/stats` / `/cost` — Tinjau konsumsi token dan estimasi biaya sesi
 
 #### Mode Non-Interaktif (Single Task)
 ```bash
-# Memperbaiki bug secara langsung dengan pengujian otomatis
+# Menjalankan tugas menggunakan Google Antigravity (Google Auth Login — gratis)
 brainfrog \
   --repo /path/to/your/project \
   --task "Fix ZeroDivisionError in math_utils.py" \
   --test-cmd "pytest -q" \
-  --backend antigravity
+  --provider antigravity
+
+# Menjalankan tugas menggunakan Anthropic Claude API
+brainfrog \
+  --repo /path/to/your/project \
+  --task "Implement user logout endpoint" \
+  --test-cmd "pytest app/tests/test_auth.py" \
+  --provider claude
 
 # Perubahan frontend dengan auto-PR dan verifikasi visual
 brainfrog \
@@ -214,4 +228,4 @@ Kontribusi dari komunitas sangat disambut. Ikuti alur kerja standar berikut:
 
 ## 📄 License
 
-*Status Lisensi:* Repositori ini sedang dalam tahap finalisasi pemilihan lisensi open-source resmi (seperti lisensi MIT). Detail hak cipta dan lisensi lengkap akan segera diperbarui.
+Proyek ini dilisensikan di bawah [MIT License](LICENSE).

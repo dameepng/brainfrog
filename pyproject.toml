@@ -7,6 +7,7 @@ name = "brainfrog"
 version = "0.1.0"
 description = "BrainFrog — Dual-System Coding Agent (Jev System 1 + Claude System 2)"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.9"
 dependencies = [
     "anthropic>=0.40.0",
