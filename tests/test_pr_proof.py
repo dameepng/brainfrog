@@ -12,7 +12,7 @@ from core.pr_proof import (
     format_pr_proof_markdown,
     get_github_repo_info,
     get_pr_changed_files,
-    save_pr_proof_screenshots,
+    publish_proof_to_assets_branch,
 )
 from orchestrator import Orchestrator, RunConfig, StepResult
 from system2 import PlanStep
@@ -72,11 +72,17 @@ class TestPrProofGeneration(unittest.TestCase):
     """Test PR proof screenshot generation, Markdown formatting, and body updates."""
 
     def test_format_pr_proof_markdown(self):
-        md = format_pr_proof_markdown("dameepng", "brainfrog", "feat/test-ui")
+        md = format_pr_proof_markdown(
+            owner="dameepng",
+            repo="brainfrog",
+            commit_sha="a1b2c3d4e5f678901234567890abcdef12345678",
+            desktop_rel="pr-8/123456789/desktop.png",
+            mobile_rel="pr-8/123456789/mobile.png",
+        )
         self.assertIn("## 📸 Proof", md)
         self.assertIn("| Desktop | Mobile |", md)
-        self.assertIn("https://raw.githubusercontent.com/dameepng/brainfrog/feat/test-ui/docs/pr-proof/feat/test-ui/desktop.png", md)
-        self.assertIn("https://raw.githubusercontent.com/dameepng/brainfrog/feat/test-ui/docs/pr-proof/feat/test-ui/mobile.png", md)
+        self.assertIn("https://raw.githubusercontent.com/dameepng/brainfrog/a1b2c3d4e5f678901234567890abcdef12345678/pr-8/123456789/desktop.png", md)
+        self.assertIn("https://raw.githubusercontent.com/dameepng/brainfrog/a1b2c3d4e5f678901234567890abcdef12345678/pr-8/123456789/mobile.png", md)
 
     def test_attach_pr_proof_skips_when_no_frontend_change(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -92,12 +98,17 @@ class TestPrProofGeneration(unittest.TestCase):
             self.assertEqual(new_body, body)
             self.assertNotIn("## 📸 Proof", new_body)
 
-    def test_attach_pr_proof_generates_proof_when_frontend_change(self):
+    @patch("core.pr_proof.publish_proof_to_assets_branch")
+    def test_attach_pr_proof_generates_proof_when_frontend_change(self, mock_publish):
+        mock_publish.return_value = (
+            "a1b2c3d4e5f678901234567890abcdef12345678",
+            "feat-hero-banner/1700000000/desktop.png",
+            "feat-hero-banner/1700000000/mobile.png",
+        )
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_path = Path(tmp_dir)
             body = "Updated landing page hero banner"
 
-            # Create dummy gate result with desktop and mobile base64
             dummy_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
             gate_res = QualityGateResult(
                 status="PASS",
@@ -118,13 +129,9 @@ class TestPrProofGeneration(unittest.TestCase):
             self.assertIn("## 📸 Proof", new_body)
             self.assertIn("| Desktop | Mobile |", new_body)
             self.assertIn("https://raw.githubusercontent.com/", new_body)
-            self.assertIn("/docs/pr-proof/feat/hero-banner/desktop.png", new_body)
-            self.assertIn("/docs/pr-proof/feat/hero-banner/mobile.png", new_body)
-
-            # Verify files were saved to disk
-            proof_dir = repo_path / "docs" / "pr-proof" / "feat/hero-banner"
-            self.assertTrue((proof_dir / "desktop.png").exists())
-            self.assertTrue((proof_dir / "mobile.png").exists())
+            self.assertIn("/a1b2c3d4e5f678901234567890abcdef12345678/feat-hero-banner/1700000000/desktop.png", new_body)
+            self.assertIn("/a1b2c3d4e5f678901234567890abcdef12345678/feat-hero-banner/1700000000/mobile.png", new_body)
+            mock_publish.assert_called_once()
 
 
 class TestOrchestratorProofIntegration(unittest.TestCase):
@@ -148,8 +155,8 @@ class TestOrchestratorProofIntegration(unittest.TestCase):
             res = orch._run_frontend_quality_gate(step, "Fix add function in calc.py", {"calc.py": "def add..."})
             self.assertIsNone(res)
 
-    @patch("core.pr_proof.commit_and_push_pr_proof")
-    def test_open_pr_skips_proof_for_backend_only(self, mock_push):
+    @patch("core.pr_proof.publish_proof_to_assets_branch")
+    def test_open_pr_skips_proof_for_backend_only(self, mock_publish):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_path = Path(tmp_dir)
             cfg = RunConfig(
@@ -175,7 +182,7 @@ class TestOrchestratorProofIntegration(unittest.TestCase):
 
                     # Proof section must NOT be present
                     self.assertNotIn("## 📸 Proof", pr_copy["body"])
-                    mock_push.assert_not_called()
+                    mock_publish.assert_not_called()
 
 
 if __name__ == "__main__":
