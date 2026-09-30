@@ -16,6 +16,11 @@ dependencies = [
     "prompt-toolkit>=3.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pillow>=10.0.0",
+]
+
 [project.scripts]
 brainfrog = "cli:main"
 bf = "cli:main"
