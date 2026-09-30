@@ -177,6 +177,125 @@ def _run(cmd: List[str], cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
+def clean_git_remote_url(raw: str) -> str:
+    """Extract and sanitize a clean Git remote URL or path from input.
+
+    Handles cases where the user pasted a full command:
+    - `git remote add origin https://github.com/user/repo.git`
+    - `git remote set-url origin git@github.com:user/repo.git`
+    - `"git remote add origin https://..."`
+    """
+    if not raw:
+        return ""
+    text = raw.strip().strip("'\"`")
+    if not text:
+        return ""
+
+    tokens = text.split()
+    # 1. Search for a token with a network protocol or git SSH syntax
+    for token in tokens:
+        clean_token = token.strip("'\"`")
+        if clean_token.startswith(("http://", "https://", "git@", "ssh://", "ftp://", "file://")):
+            return clean_token
+
+    # 2. If command was prefixed with "git remote add/set-url <name> <url/path>"
+    if len(tokens) >= 4 and tokens[0] == "git" and tokens[1] == "remote":
+        return tokens[-1].strip("'\"`")
+
+    # 3. Otherwise return the cleaned string
+    return text
+
+
+def get_git_remote_url(repo_dir: Path, remote_name: str = "origin") -> str:
+    """Return the configured fetch/push URL for git remote, or empty string if not set."""
+    try:
+        proc = subprocess.run(
+            ["git", "remote", "get-url", remote_name],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def configure_git_remote(
+    repo_dir: Path,
+    remote_url: str,
+    remote_name: str = "origin",
+) -> Tuple[bool, str]:
+    """Configure or update a git remote for repo_dir.
+
+    Always executes commands as separate argument lists (never a single shell string)
+    to prevent escaping/parsing issues. Checks if remote exists first, using `set-url`
+    if already present, or `add` if missing (with fallback).
+
+    Returns:
+        (success: bool, clean_url: str)
+    """
+    clean_url = clean_git_remote_url(remote_url)
+    if not clean_url:
+        return False, ""
+
+    try:
+        # Check existing remotes
+        chk = subprocess.run(
+            ["git", "remote"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        existing_remotes = chk.stdout.split() if chk.returncode == 0 else []
+
+        if remote_name in existing_remotes:
+            # Remote already exists: use set-url
+            res = subprocess.run(
+                ["git", "remote", "set-url", remote_name, clean_url],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                return True, clean_url
+            # Fallback to add if set-url somehow failed
+            res_add = subprocess.run(
+                ["git", "remote", "add", remote_name, clean_url],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return res_add.returncode == 0, clean_url
+        else:
+            # Remote does not exist: use add
+            res = subprocess.run(
+                ["git", "remote", "add", remote_name, clean_url],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                return True, clean_url
+            # Fallback to set-url if remote actually existed (e.g. race condition)
+            res_set = subprocess.run(
+                ["git", "remote", "set-url", remote_name, clean_url],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return res_set.returncode == 0, clean_url
+    except Exception:
+        return False, clean_url
+
+
 def _repo_tree(repo_dir: Path, max_files: int = 200) -> str:
     files = []
     for p in sorted(repo_dir.rglob("*")):
@@ -1388,6 +1507,12 @@ class Orchestrator:
         try:
             remotes = _run(["git", "remote"], self.cfg.repo_dir).stdout.split()
             if "origin" in remotes:
+                # Sanitize and auto-repair corrupted remote URL in git config if needed
+                cur_url = get_git_remote_url(self.cfg.repo_dir, "origin")
+                cleaned_url = clean_git_remote_url(cur_url)
+                if cleaned_url and cleaned_url != cur_url:
+                    configure_git_remote(self.cfg.repo_dir, cleaned_url, "origin")
+
                 cur_branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], self.cfg.repo_dir).stdout.strip()
                 if cur_branch and cur_branch != "HEAD":
                     self._log(f"[git] 🚀 Pushing changes to origin/{cur_branch} ...")
@@ -1488,6 +1613,13 @@ class Orchestrator:
             self._log(f"[git] 📦 Branch committed: [bold #E8E8E8]{pr_copy['title']}[/bold #E8E8E8]")
             for breakdown_line in _format_diff_breakdown(diff_summary):
                 self._log(breakdown_line)
+
+        # Sanitize and auto-repair corrupted remote URL in git config if needed
+        cur_url = get_git_remote_url(self.cfg.repo_dir, "origin")
+        cleaned_url = clean_git_remote_url(cur_url)
+        if cleaned_url and cleaned_url != cur_url:
+            configure_git_remote(self.cfg.repo_dir, cleaned_url, "origin")
+
         push = _run(["git", "push", "-u", "origin", branch], self.cfg.repo_dir)
         if push.returncode != 0:
             self._log(f"[orchestrator] push failed (no remote configured?): {push.stderr}")

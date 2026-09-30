@@ -233,21 +233,11 @@ def get_git_branch(repo_dir: Path) -> str:
     return "none"
 
 
-def get_git_remote_url(repo_dir: Path, remote_name: str = "origin") -> str:
-    """Return the fetch/push URL for git remote or empty string."""
-    try:
-        proc = subprocess.run(
-            ["git", "remote", "get-url", remote_name],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            return proc.stdout.strip()
-    except Exception:
-        pass
-    return ""
+from orchestrator import (
+    clean_git_remote_url,
+    get_git_remote_url,
+    configure_git_remote,
+)
 
 
 def ensure_git_remote(repo_dir: Path) -> None:
@@ -264,9 +254,12 @@ def ensure_git_remote(repo_dir: Path) -> None:
         except Exception:
             return
 
-    # 2. Check if remote origin already exists
-    current_url = get_git_remote_url(repo_dir, "origin")
-    if current_url:
+    # 2. Check if remote origin already exists; auto-repair if corrupted
+    current_raw = get_git_remote_url(repo_dir, "origin")
+    if current_raw:
+        cleaned = clean_git_remote_url(current_raw)
+        if cleaned and cleaned != current_raw:
+            configure_git_remote(repo_dir, cleaned, "origin")
         return
 
     # 3. Prompt user for remote URL
@@ -287,22 +280,20 @@ def ensure_git_remote(repo_dir: Path) -> None:
 
     if entered:
         try:
-            check_proc = subprocess.run(["git", "remote"], cwd=repo_dir, capture_output=True, text=True)
-            if "origin" in check_proc.stdout.split():
-                subprocess.run(["git", "remote", "set-url", "origin", entered], cwd=repo_dir, capture_output=True, text=True)
+            ok, clean_url = configure_git_remote(repo_dir, entered, "origin")
+            if ok:
+                branch = get_git_branch(repo_dir)
+                if branch in ("none", "master", ""):
+                    subprocess.run(["git", "branch", "-M", "main"], cwd=repo_dir, capture_output=True, text=True)
+
+                print_banner_box(
+                    f"Remote origin berhasil dikonfigurasi ke:\n[bold {COLOR_ACCENT}]{clean_url}[/bold {COLOR_ACCENT}]\n"
+                    "Semua perubahan kode sukses akan otomatis di-commit rapi & di-push ke GitHub.",
+                    level="success",
+                    title="Git Remote Connected",
+                )
             else:
-                subprocess.run(["git", "remote", "add", "origin", entered], cwd=repo_dir, capture_output=True, text=True)
-
-            branch = get_git_branch(repo_dir)
-            if branch in ("none", "master", ""):
-                subprocess.run(["git", "branch", "-M", "main"], cwd=repo_dir, capture_output=True, text=True)
-
-            print_banner_box(
-                f"Remote origin berhasil dikonfigurasi ke:\n[bold {COLOR_ACCENT}]{entered}[/bold {COLOR_ACCENT}]\n"
-                "Semua perubahan kode sukses akan otomatis di-commit rapi & di-push ke GitHub.",
-                level="success",
-                title="Git Remote Connected",
-            )
+                print_banner_box(f"Gagal menambahkan git remote: URL '{entered}' tidak valid.", level="error", title="Git Error")
         except Exception as e:
             print_banner_box(f"Gagal menambahkan git remote: {e}", level="error", title="Git Error")
     else:
@@ -1695,22 +1686,16 @@ def run_interactive(
             parts = prompt.split(maxsplit=1)
             if len(parts) > 1:
                 raw_url = parts[1].strip()
-                new_url = raw_url
-                for w in raw_url.split():
-                    if w.startswith("http://") or w.startswith("https://") or w.startswith("git@"):
-                        new_url = w
-                        break
                 try:
-                    check_proc = subprocess.run(["git", "remote"], cwd=repo_dir, capture_output=True, text=True)
-                    if "origin" in check_proc.stdout.split():
-                        subprocess.run(["git", "remote", "set-url", "origin", new_url], cwd=repo_dir, capture_output=True, text=True)
+                    ok, clean_url = configure_git_remote(repo_dir, raw_url, "origin")
+                    if ok:
+                        print_banner_box(
+                            f"Git remote origin berhasil dikonfigurasi ke:\n[bold {COLOR_ACCENT}]{clean_url}[/bold {COLOR_ACCENT}]",
+                            level="success",
+                            title="Git Remote",
+                        )
                     else:
-                        subprocess.run(["git", "remote", "add", "origin", new_url], cwd=repo_dir, capture_output=True, text=True)
-                    print_banner_box(
-                        f"Git remote origin berhasil dikonfigurasi ke:\n[bold {COLOR_ACCENT}]{new_url}[/bold {COLOR_ACCENT}]",
-                        level="success",
-                        title="Git Remote",
-                    )
+                        print_banner_box(f"Gagal mengatur remote: URL '{raw_url}' tidak valid", level="error", title="Git Error")
                 except Exception as e:
                     print_banner_box(f"Gagal mengatur remote: {e}", level="error", title="Git Error")
             else:
