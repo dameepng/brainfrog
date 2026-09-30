@@ -41,10 +41,10 @@ def get_pr_changed_files(repo_dir: Path | str, base: str = "origin/main") -> Lis
         except Exception:
             pass
 
-    # 2. Status porcelain for staged, modified, and newly added/untracked files
+    # 2. Status porcelain for staged, modified, and newly added/untracked files (-uall expands untracked folders)
     try:
         res = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "-uall"],
             cwd=str(repo),
             capture_output=True,
             text=True,
@@ -56,7 +56,13 @@ def get_pr_changed_files(repo_dir: Path | str, base: str = "origin/main") -> Lis
                     fpath = line[3:].strip()
                     if " -> " in fpath:
                         fpath = fpath.split(" -> ")[1].strip()
-                    files.add(fpath.replace("\\", "/"))
+                    full = repo / fpath
+                    if full.is_dir():
+                        for child in full.rglob("*"):
+                            if child.is_file():
+                                files.add(str(child.relative_to(repo)).replace("\\", "/"))
+                    else:
+                        files.add(fpath.replace("\\", "/"))
     except Exception:
         pass
 
