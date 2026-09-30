@@ -113,10 +113,17 @@ def capture_screenshot(
         "--disable-gpu",
         "--no-sandbox",
         "--disable-dev-shm-usage",
+        "--disable-background-networking",
+        "--disable-default-apps",
+        "--disable-extensions",
+        "--disable-sync",
+        "--disable-translate",
+        "--metrics-recording-only",
+        "--mute-audio",
+        "--safebrowsing-disable-auto-update",
         "--hide-scrollbars",
         "--no-first-run",
         "--no-default-browser-check",
-        "--virtual-time-budget=2000",  # Allow 2s for CSS transitions/animations to settle
         target_url,
     ]
 

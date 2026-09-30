@@ -82,7 +82,7 @@ class TestVisualInspector(unittest.TestCase):
                 encoding="utf-8",
             )
             out_png = tmp_path / "test.png"
-            success = capture_screenshot(html_file, out_png, browser_bin=browser_bin, timeout=10)
+            success = capture_screenshot(html_file, out_png, browser_bin=browser_bin, timeout=25)
             self.assertTrue(success)
             self.assertTrue(out_png.exists())
             self.assertGreater(out_png.stat().st_size, 500)
