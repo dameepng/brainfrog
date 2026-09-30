@@ -21,43 +21,43 @@ Use this as a purpose and quality filter, not a house style. Do not ban a color,
 
 ## Anti-Slop UI/UX Rules
 
-Rules ini WAJIB diikuti setiap kali membangun atau mereview UI, supaya hasil tidak terasa generic/"AI slop" meskipun secara visual sudah "oke".
+These rules MUST be followed whenever building or reviewing UI, ensuring results never feel generic or like "AI slop" even if visually passable.
 
 ### 1. Layout & Spacing
-- Semua spacing (padding, margin, gap) HARUS kelipatan 8px (atau 4px untuk detail kecil): terapkan 8pt Grid System. Jangan pakai angka spacing sembarangan.
-- Container width konsisten di semua section (satu max-width value, misal `max-w-7xl`): jangan section satu full-width, section lain constrained, sehingga alignment kiri-kanan antar section jadi tidak sejajar.
-- Jarak antar section pakai skala tetap (misal py-16 di mobile, py-24 di desktop) untuk semua section, bukan nilai acak per section.
-- Hero section dan konten utama lain harus "fold-safe": constraint tinggi supaya elemen penting (headline, CTA, visual utama) muat dalam viewport pertama tanpa scroll berlebih. Hitung `min-height` dari `100vh - tinggi navbar`, bukan `100vh` polos ditambah spacing berlebih. Hindari padding-top/margin-top berlebihan antara navbar dan hero (excess top spacing) yang mendorong konten ke bawah fold.
-- Jaga vertical rhythm: konsistensi jarak antar elemen secara vertikal di seluruh halaman, bukan cuma per section.
+- All spacing (padding, margin, gap) MUST be multiples of 8px (or 4px for fine detail): enforce an 8pt Grid System. Never use arbitrary spacing values.
+- Consistent container widths across all sections (single max-width value, e.g. `max-w-7xl`): avoid alternating between full-width and constrained sections that disrupt lateral alignment.
+- Inter-section spacing must follow a fixed scale (e.g. `py-16` on mobile, `py-24` on desktop) for all sections, never arbitrary values per section.
+- Hero sections and primary content must remain "fold-safe": constrain heights so vital elements (headline, CTA, primary visual) fit comfortably in the initial viewport without unnecessary scrolling. Calculate `min-height` as `100vh - navbar height`, rather than unconstrained `100vh` plus excessive margins. Avoid disproportionate top padding between navbar and hero that pushes content below the fold.
+- Maintain vertical rhythm: keep distance between elements consistent vertically across the entire page, not merely within individual sections.
 
 ### 2. Visual Hierarchy
-- Ukuran, weight, dan warna teks harus jelas membedakan level pentingnya: headline > sub-headline > body > caption. Jangan biarkan semua teks "kelihatan sama pentingnya" (flat hierarchy).
-- Tiap section idealnya hanya punya SATU CTA primer dengan visual weight paling menonjol; CTA sekunder harus jelas lebih rendah kontrasnya.
-- Susun elemen penting (logo, CTA utama) mengikuti pola scan natural mata (F-pattern/Z-pattern), bukan diletakkan asal.
+- Text sizing, weight, and color must clearly delineate hierarchy: headline > sub-headline > body > caption. Never allow all text to appear equally prominent (flat hierarchy).
+- Each section should ideally contain only ONE primary CTA with prominent visual weight; secondary CTAs must feature lower visual contrast.
+- Position key elements (branding, primary CTA) along natural scanning paths (F-pattern or Z-pattern), rather than placing them arbitrarily.
 
 ### 3. Interaction & Feedback
-- Elemen yang bisa diklik harus punya affordance jelas: cursor pointer, hover state yang terlihat (bukan cuma opacity/warna berubah samar).
-- Setiap komponen interaktif WAJIB mencakup state: default, hover, active/pressed, focus-visible (untuk keyboard navigation), disabled, dan loading (jika relevan): jangan cuma implementasi default + hover.
-- Touch target minimal 44x44px (mobile) untuk semua elemen tap: cek ini khusus di breakpoint mobile, jangan hanya test di desktop.
-- Tampilkan skeleton/shimmer loader saat data atau gambar masih dimuat; jangan biarkan layout kosong lalu tiba-tiba "pop" saat asset selesai load (ini juga menyebabkan Cumulative Layout Shift/CLS yang buruk).
+- Clickable elements must have explicit affordances: pointer cursor, distinct hover states (beyond subtle opacity shifts).
+- Every interactive component MUST support full state variants: default, hover, active/pressed, focus-visible (for keyboard navigation), disabled, and loading (where applicable). Never settle for just default and hover.
+- Touch targets must be at least 44×44px on mobile for all tap targets: verify this across mobile viewport breakpoints, not just on desktop.
+- Display skeleton/shimmer loaders while data or assets load; never leave blank containers that pop abruptly upon load completion (which degrades Cumulative Layout Shift / CLS).
 
 ### 4. Typography
-- Body text: lebar baris (measure) idealnya 45-75 karakter per baris; gunakan `max-width` pada paragraf, jangan biarkan full-width tanpa batas.
-- Line-height body text sekitar 1.5-1.6x font-size; heading lebih rapat (1.1-1.3x): jangan andalkan default browser begitu saja.
-- Gunakan type scale dengan rasio konsisten (misal modular scale 1.25) untuk semua ukuran heading, bukan angka random tiap level.
+- Body text line length (measure) should ideally span 45–75 characters per line; set `max-width` on paragraphs rather than letting text stretch unconstrained.
+- Body text line-height should measure approximately 1.5–1.6× font size; headings should remain tighter (1.1–1.3×): never rely blindly on browser defaults.
+- Apply a type scale with consistent ratios (e.g. modular scale 1.25) across all heading levels, avoiding arbitrary sizes per level.
 
 ### 5. Consistency & Alignment
-- Semua card/button/elemen sejenis pakai token border-radius dan shadow yang SAMA dari satu sumber (design token/Tailwind config): jangan berbeda-beda nilai antar komponen serupa, ini paling mudah membuat UI terlihat "AI-generated".
-- Perhatikan optical alignment untuk kombinasi icon+text (icon-text alignment): kadang perlu micro-adjustment manual, tidak cukup mengandalkan `items-center` saja.
+- All cards, buttons, and matching UI primitives must share IDENTICAL border-radius and shadow tokens from a single source (design tokens or Tailwind configuration): inconsistent corner rounding and elevations immediately signal AI-generated slop.
+- Ensure optical alignment for icon-and-text pairings: manual micro-adjustments are often required beyond basic flexbox `items-center`.
 
 ### 6. Accessibility
-- Kontras warna teks terhadap background minimal WCAG AA: 4.5:1 untuk body text, 3:1 untuk large text/heading. PERHATIKAN KHUSUS untuk elemen di atas glassmorphism/glass effect: teks di atas background transparan sangat rentan gagal kontras, selalu test dengan color contrast checker.
-- Jangan pernah set `outline: none` pada elemen focusable tanpa menggantinya dengan custom focus ring yang jelas terlihat (focus-visible).
-- Semua animasi/motion harus menghormati `prefers-reduced-motion`: matikan atau kurangi animasi non-esensial jika user mengaktifkan setting ini di OS.
+- Text color contrast against background must satisfy at least WCAG AA: 4.5:1 for body text, 3:1 for large text/headings. PAY SPECIAL ATTENTION to elements layered over glassmorphism or translucent surfaces: text over transparent backgrounds frequently fails contrast standards; always verify with a color contrast analyzer.
+- Never set `outline: none` on focusable elements without providing a clearly visible replacement focus ring (`:focus-visible`).
+- All animations and motion must respect `prefers-reduced-motion`: disable or soften non-essential motion when requested by user OS preferences.
 
-### 7. Performance sebagai Bagian dari UX
-- Set `width`/`height` atau `aspect-ratio` eksplisit pada semua gambar dan media untuk mencegah Cumulative Layout Shift (CLS) saat asset selesai dimuat.
-- Elemen terbesar di viewport pertama (biasanya hero image/headline) harus diprioritaskan loading-nya (LCP-safe), jangan sampai ke-block oleh asset lain yang tidak kritis (font besar, script berat, 3D/animasi tambahan).
+### 7. Performance as a Core Dimension of UX
+- Set explicit `width`/`height` or `aspect-ratio` on all images and media assets to prevent Cumulative Layout Shift (CLS) when assets finish rendering.
+- Prioritize loading for the largest element in the initial viewport (typically hero imagery or headlines, LCP-safe); ensure it is not blocked by non-critical assets (oversized webfonts, heavy third-party bundles, or background 3D/canvas animations).
 
 ## Inspect and improve
 

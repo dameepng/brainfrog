@@ -1,175 +1,175 @@
 # BrainFrog CLI 🐸
 
-> CLI agentic coding dengan hybrid System 1 (Jev / keputusan terstruktur cepat) + System 2 (LLM generatif), dilengkapi verifikasi browser otomatis sebelum kode dianggap selesai.
+> Agentic coding CLI powered by a hybrid System 1 (Jev / fast structured decisions) + System 2 (Generative LLM), equipped with automated browser verification before code is considered complete.
 
 ---
 
-## ✨ Apa yang Membuat BrainFrog Berbeda
+## ✨ What Makes BrainFrog Different
 
-BrainFrog bukan sekadar pembungkus LLM untuk menghasilkan kode di terminal. Sistem ini dibangun dengan pengawasan ketat dan otomasi verifikasi end-to-end:
+BrainFrog is not just an LLM wrapper that blindly spits out code in your terminal. It is built with rigorous oversight and end-to-end automated verification:
 
-- **Verifikasi Browser Otomatis (MCP Quality Gate)** — Untuk setiap perubahan kode frontend, BrainFrog secara otomatis mengompilasi proyek (`npm run build`), menjalankan dev server, membuka browser Chromium nyata via Model Context Protocol (MCP), memeriksa console error, mendeteksi failed network requests (404/500), serta mengambil screenshot halaman sebelum pekerjaan dinyatakan selesai.
-- **Hybrid Decision-Making (Dual-System)** — Mengadopsi arsitektur kognitif: **System 1 (Jev / TypeSafe)** bertindak sebagai gatekeeper cepat bertipe deterministik untuk klasifikasi domain, penentuan cabang kegagalan, dan penilaian risiko diff; **System 2 (Generative Brain)** bertugas menangani penalaran mendalam, dekomposisi rencana, dan sintesis kode.
-- **PR Proof Abadi (Immutable Screenshot Storage)** — Screenshot visual desktop dan mobile otomatis tersemat di body Pull Request untuk setiap perubahan frontend. Screenshot disimpan di orphan branch terpisah (`pr-proof-assets`) menggunakan exact commit SHA — tautan gambar terjamin abadi (`200 OK`) dan tidak akan rusak meski branch PR dihapus setelah merge.
-- **Infrastruktur Hardened & Proteksi Ketat** — Dilengkapi branch protection wajib di `main`, pipeline CI (`lint-typecheck-test`) dengan GitHub Actions yang di-pin ke exact commit SHA (kebal supply-chain attack), pencegahan kebocoran secret (GitGuardian + Git Guard internal), serta pembersihan otomatis PR pengujian yang basi (`stale.yml`) tanpa mengganggu PR kerja aktif.
+- **Automated Browser Verification (MCP Quality Gate)** — For every frontend change, BrainFrog automatically builds the project (`npm run build`), launches a local dev server, opens a real Chromium browser via Model Context Protocol (MCP), inspects console errors, detects failed network requests (404/500), and captures page screenshots before work is declared complete.
+- **Hybrid Decision-Making (Dual-System)** — Adopts a cognitive dual-process architecture: **System 1 (Jev / TypeSafe)** serves as a fast, deterministically typed gatekeeper for domain routing, failure branch triage, and diff risk assessment; **System 2 (Generative Brain)** handles deep reasoning, plan decomposition, and code synthesis.
+- **Permanent PR Proofs (Immutable Screenshot Storage)** — Desktop and mobile visual screenshots are automatically embedded in the Pull Request body for every frontend modification. Screenshots are stored on a dedicated orphan branch (`pr-proof-assets`) linked by exact commit SHA — ensuring image links remain permanently accessible (`200 OK`) and never break even after PR branches are deleted upon merge.
+- **Hardened Infrastructure & Strict Protection** — Enforces mandatory branch protection on `main`, automated CI pipelines (`lint-typecheck-test`) pinned to exact 40-character commit SHAs (immune to supply-chain attacks), secret leak prevention (GitGuardian + internal Git Guard), and automated cleanup of ephemeral verification PRs (`stale.yml`) without disrupting active work.
 
 ---
 
-## 🏗️ Arsitektur
+## 🏗️ Architecture
 
 ```
-                                  [Prompt Pengguna]
-                                          │
-                                          ▼
-                            ┌───────────────────────────┐
-                            │   System 1: Scope Gate    │
-                            │  (Domain Routing & Tipe)  │
-                            └───────────────────────────┘
-                                          │
-                  ┌───────────────────────┴───────────────────────┐
-                  ▼                                               ▼
-         [Pertanyaan Saja]                               [Modifikasi Kode]
-    System 2 mendiagnosis &                             System 2 membuat rencana
-    menjawab pertanyaan user.                           eksekusi multi-langkah.
-    (Tanpa modifikasi file)                                       │
-                                                                  ▼
-                                                    ┌───────────────────────────┐
-                                              ┌───► │ Langkah N: Sintesis Kode  │
-                                              │     └───────────────────────────┘
-                                              │                   │
-                                              │                   ▼
-                                              │     ┌───────────────────────────┐
-                                              │     │ Eksekusi Unit Test Lokal  │
-                                              │     └───────────────────────────┘
-                                              │                   │
-                                              │                   ▼
-                                              │     ┌───────────────────────────┐
-                                              │     │  Frontend Quality Gate    │
-                                              │     │  (MCP Browser Verify)     │
-                                              │     └───────────────────────────┘
-                                              │                   │
-                                              │                   ▼
-                                              │     ┌───────────────────────────┐
-                                              │     │    System 1: Loop Gate    │
-                                              │     │  (Evaluasi Hasil & Next)  │
-                                              │     └───────────────────────────┘
-                                              │       ├── open_pr ──► [Auto-Attach PR Proof]
-                                              └── retry_fix          ├── escalate_human
-                                                                     └── abandon
+                                  [User Prompt]
+                                        │
+                                        ▼
+                          ┌───────────────────────────┐
+                          │   System 1: Scope Gate    │
+                          │ (Domain Routing & Typing) │
+                          └───────────────────────────┘
+                                        │
+                ┌───────────────────────┴───────────────────────┐
+                ▼                                               ▼
+         [Question Only]                                [Code Mutation]
+    System 2 diagnoses &                           System 2 formulates a
+    answers the user prompt.                       multi-step execution plan.
+    (No file modifications)                                     │
+                                                                ▼
+                                                  ┌───────────────────────────┐
+                                            ┌───► │ Step N: Code Synthesis    │
+                                            │     └───────────────────────────┘
+                                            │                   │
+                                            │                   ▼
+                                            │     ┌───────────────────────────┐
+                                            │     │ Run Local Unit Tests      │
+                                            │     └───────────────────────────┘
+                                            │                   │
+                                            │                   ▼
+                                            │     ┌───────────────────────────┐
+                                            │     │  Frontend Quality Gate    │
+                                            │     │  (MCP Browser Verify)     │
+                                            │     └───────────────────────────┘
+                                            │                   │
+                                            │                   ▼
+                                            │     ┌───────────────────────────┐
+                                            │     │    System 1: Loop Gate    │
+                                            │     │  (Evaluate & Next Step)   │
+                                            │     └───────────────────────────┘
+                                            │       ├── open_pr ──► [Auto-Attach PR Proof]
+                                            └── retry_fix          ├── escalate_human
+                                                                   └── abandon
 ```
 
-### Komponen Utama
+### Core Components
 
-| Komponen | Lokasi File | Peran & Tanggung Jawab |
+| Component | File Path | Role & Responsibilities |
 | :--- | :--- | :--- |
-| **Orchestrator** | [`orchestrator.py`](orchestrator.py) | *State machine* sentral: orkestrasi siklus eksekusi, eksekusi *subprocess* dengan *process tree termination*, penulisan file atomik, *self-healing retry loop*, dan pelaporan. |
-| **Frontend Quality Gate** | [`core/frontend_quality_gate.py`](core/frontend_quality_gate.py) | Pipeline verifikasi browser 7 langkah (build → dev server → navigate → console → network → screenshot → verdict) melalui server MCP. |
-| **PR Proof Generator** | [`core/pr_proof.py`](core/pr_proof.py) | Otomasi tangkapan layar desktop & mobile yang diunggah ke orphan branch `pr-proof-assets` via isolated worktree dan diformat menggunakan commit SHA permanen. |
-| **MCP Client (Layer 1)** | [`core/mcp_client.py`](core/mcp_client.py) | Klien generic stdio JSON-RPC 2.0 untuk komunikasi dengan server MCP, menangani handshake, manajemen proses, dan pemanggilan tool. |
-| **System 1 (Jev)** | [`system1/`](system1/) | Lapisan keputusan terstruktur bertipe (`ChoiceQuestion`, `ScoreQuestion`, `NoulQuestion`) via TypeSafe Jev API tanpa risiko *prompt drift*. |
-| **System 2 (Generative)** | [`system2/`](system2/) | Mesin penalaran generatif. Mendukung **Google Antigravity** (`agy` CLI dengan Google Auth session gratis) dan **Anthropic Claude** (Claude Sonnet / Opus via API Key). |
-| **Security & Git Guard** | [`security/`](security/) | Pemindaian perubahan *staged* untuk mencegah kebocoran file sensitif (`.env`, token, private keys) dan rotasi auth key. |
-| **Stale PR Lifecycle** | [`.github/workflows/stale.yml`](.github/workflows/stale.yml) & [`.github/scripts/protect_active_prs.py`](.github/scripts/protect_active_prs.py) | Pembersihan otomatis PR verifikasi sesaat dengan proteksi otomatis label `keep-open` pada PR kerja aktif. |
+| **Orchestrator** | [`orchestrator.py`](orchestrator.py) | Central state machine: orchestrates execution cycles, manages subprocesses with process-tree termination, atomic file writing, self-healing retry loops, and reporting. |
+| **Frontend Quality Gate** | [`core/frontend_quality_gate.py`](core/frontend_quality_gate.py) | 7-step automated browser verification pipeline (build → dev server → navigate → console → network → screenshot → verdict) executed via MCP servers. |
+| **PR Proof Generator** | [`core/pr_proof.py`](core/pr_proof.py) | Automated desktop & mobile screenshots uploaded to the orphan branch `pr-proof-assets` using isolated worktrees and formatted with permanent commit SHAs. |
+| **MCP Client (Layer 1)** | [`core/mcp_client.py`](core/mcp_client.py) | Generic stdio JSON-RPC 2.0 client for communicating with MCP servers; manages handshakes, process lifecycles, and tool invocations. |
+| **System 1 (Jev)** | [`system1/`](system1/) | Strongly typed, structured decision layer (`ChoiceQuestion`, `ScoreQuestion`, `NoulQuestion`) powered by the TypeSafe Jev API with zero risk of prompt drift. |
+| **System 2 (Generative)** | [`system2/`](system2/) | Generative reasoning engine. Supports **Google Antigravity** (`agy` CLI with free Google Auth sessions) and **Anthropic Claude** (Claude Sonnet / Opus via API Key). |
+| **Security & Git Guard** | [`security/`](security/) | Pre-stage scanning engine preventing accidental leaks of sensitive files (`.env`, tokens, private keys) along with auth key rotation utilities. |
+| **Stale PR Lifecycle** | [`.github/workflows/stale.yml`](.github/workflows/stale.yml) & [`.github/scripts/protect_active_prs.py`](.github/scripts/protect_active_prs.py) | Automated cleanup of ephemeral testing PRs with automated `keep-open` label protection for active development PRs. |
 
 ---
 
-## 🚀 Instalasi & Cara Pakai
+## 🚀 Installation & Getting Started
 
-### 1. Prasyarat
+### 1. Prerequisites
 
-- **Python 3.10+** (disarankan Python 3.11 atau lebih baru)
-- **Node.js 18+** (diperlukan jika menggunakan server verifikasi browser MCP)
-- **Git CLI** dan **GitHub CLI (`gh`)** (diperlukan untuk pembuatan PR otomatis)
-- Salah satu dari provider System 2 berikut:
-  - **Google Antigravity (`agy` CLI)** dengan sesi login Google Account aktif (*tidak memerlukan API key*), atau
+- **Python 3.10+** (Python 3.11 or newer recommended)
+- **Node.js 18+** (required when utilizing the MCP browser verification server)
+- **Git CLI** and **GitHub CLI (`gh`)** (required for automated PR creation and repository management)
+- One of the following System 2 providers:
+  - **Google Antigravity (`agy` CLI)** with an active Google Account login session (*no API key required*), or
   - **Anthropic API Key** (`ANTHROPIC_API_KEY`)
-- **TypeSafe / Jev API Key** (`TYPESAFE_API_KEY`) untuk System 1
+- **TypeSafe / Jev API Key** (`TYPESAFE_API_KEY`) for System 1
 
-### 2. Pemasangan
+### 2. Setup
 
 ```bash
-# Clone repositori
+# Clone the repository
 git clone https://github.com/dameepng/brainfrog.git
 cd brainfrog
 
-# Buat virtual environment
+# Create a virtual environment
 python -m venv .venv
-source .venv/bin/activate  # Di Windows: .venv\Scripts\activate
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install dependensi
+# Install dependencies
 pip install -r requirements.txt
 pip install -e .
 
-# Siapkan konfigurasi environment
+# Prepare environment configuration
 cp .env.example .env
 ```
 
-### 3. Konfigurasi Variabel Lingkungan (`.env`)
+### 3. Environment Configuration (`.env`)
 
-Sesuaikan variabel di dalam file `.env`:
+Configure the variables inside `.env`:
 
 ```ini
 # --- System 2 Provider ---
-# Pilihan: antigravity (Google Auth) atau claude (Anthropic API Key)
+# Options: antigravity (Google Auth) or claude (Anthropic API Key)
 SYSTEM2_PROVIDER=antigravity
 ANTIGRAVITY_MODEL=gemini-3.8-flash-high
 
-# Jika menggunakan Claude:
+# If using Claude:
 # ANTHROPIC_API_KEY=your_anthropic_api_key_here
 # ANTHROPIC_MODEL=claude-sonnet-5
 
 # --- System 1 Provider (Jev / TypeSafe) ---
 TYPESAFE_API_KEY=your_typesafe_api_key_here
 
-# --- Quality Gate & Browser Verification (Opsional) ---
+# --- Quality Gate & Browser Verification (Optional) ---
 # BRAINFROG_VERIFY_MCP_PATH=/path/to/brainfrog-verify-mcp/dist/index.js
 # BRAINFROG_DEV_URL=http://localhost:3000
 ```
 
-### 4. Menjalankan BrainFrog
+### 4. Running BrainFrog
 
-#### Mode Interaktif (REPL) — Disarankan
+#### Interactive REPL Mode — Recommended
 ```bash
 brainfrog --repo /path/to/your/project
-# atau alias singkat
+# or using the shorthand alias
 bf --repo /path/to/your/project
 ```
 
-Perintah cepat di dalam REPL:
-- `@path/file.py` — *Autocomplete* file repositori saat mengetik `@` untuk menyertakan path file ke prompt
-- `!command` — Eksekusi perintah shell langsung (misal: `!pytest`, `!git status`)
-- `/mode [plan|build]` — Beralih mode sesi antara **Plan** (eksplorasi *read-only* & penyusunan rencana) dan **Build** (eksekusi kode)
-- `/diff` — Tinjau *diff* perubahan git terkini
-- `/undo` — Batalkan perubahan *uncommitted* atau *commit* terakhir secara bersih via Git
-- `/status` — Tampilkan status repositori, branch, provider, model aktif, dan perintah tes
-- `/provider` — Beralih provider AI System 2 (`antigravity` atau `claude`)
-- `/model` / `/models` — Pilih atau ganti model AI aktif
-- `/preview [target]` — Ambil dan inspeksi tangkapan layar headless dari UI HTML/web
-- `/rules` — Tampilkan pedoman aktif dari `BRAINFROG.md`
-- `/learn <rule>` — Ajarkan aturan/preferensi baru ke memory bank BrainFrog
-- `/memory` — Tampilkan daftar seluruh aturan yang telah dipelajari
-- `/stats` / `/cost` — Tinjau konsumsi token dan estimasi biaya sesi
+Quick in-REPL commands:
+- `@path/file.py` — Autocomplete repository files by typing `@` to pin file paths directly into the prompt
+- `!command` — Execute shell commands directly (e.g., `!pytest`, `!git status`)
+- `/mode [plan|build]` — Switch session mode between **Plan** (read-only exploration & plan drafting) and **Build** (code execution)
+- `/diff` — Review current Git diff changes
+- `/undo` — Cleanly revert uncommitted changes or the latest commit via Git
+- `/status` — View current repository status, branch, provider, active model, and test command
+- `/provider` — Switch System 2 AI provider (`antigravity` or `claude`)
+- `/model` / `/models` — Select or switch active AI models
+- `/preview [target]` — Capture and inspect headless visual screenshots of HTML/web UI
+- `/rules` — Display active project guidelines loaded from `BRAINFROG.md`
+- `/learn <rule>` — Teach a new rule or preference to the BrainFrog memory bank
+- `/memory` — Display all learned rules currently persisted in memory
+- `/stats` / `/cost` — Review token consumption and estimated session costs
 
-#### Mode Non-Interaktif (Single Task)
+#### Non-Interactive Mode (Single Task)
 ```bash
-# Menjalankan tugas menggunakan Google Antigravity (Google Auth Login — gratis)
+# Execute a task using Google Antigravity (Google Auth Login — free tier)
 brainfrog \
   --repo /path/to/your/project \
   --task "Fix ZeroDivisionError in math_utils.py" \
   --test-cmd "pytest -q" \
   --provider antigravity
 
-# Menjalankan tugas menggunakan Anthropic Claude API
+# Execute a task using Anthropic Claude API
 brainfrog \
   --repo /path/to/your/project \
   --task "Implement user logout endpoint" \
   --test-cmd "pytest app/tests/test_auth.py" \
   --provider claude
 
-# Perubahan frontend dengan auto-PR dan verifikasi visual
+# Frontend task with auto-PR and visual browser verification
 brainfrog \
   --repo /path/to/your/project \
-  --task "Tambahkan dark mode toggle pada halaman landing" \
+  --task "Add dark mode toggle to the landing page" \
   --test-cmd "npm test" \
   --auto-pr
 ```
@@ -178,54 +178,54 @@ brainfrog \
 
 ## 🔒 Quality & Security
 
-Repositori ini menerapkan standar rekayasa software teruji untuk menjamin keandalan dan keamanan:
+This repository enforces industry-grade software engineering standards to guarantee reliability and security:
 
 1. **Strict Pull Request Workflow & Branch Protection**:
-   - Branch `main` dilindungi secara ketat. Push langsung ditolak (`GH006`).
-   - Aturan `enforce_admins: true` aktif — admin sekalipun wajib melalui mekanisme Pull Request.
+   - The `main` branch is strictly protected. Direct pushes are rejected (`GH006`).
+   - `enforce_admins: true` is active — administrators are also required to go through the Pull Request review process.
 2. **Automated CI Validation (`lint-typecheck-test`)**:
-   - Setiap PR wajib melewati validasi kompilasi sintaksis (`compileall`), audit modul keamanan (`Git Guard`), dan eksekusi test suite unit tanpa toleransi error.
-3. **Pencegahan Kebocoran Secret**:
-   - Pemindaian pre-commit/pre-stage internal melalui `security/git_guard.py`.
-   - Pemindaian otomatis berkelanjutan oleh GitHub GitGuardian Security Checks pada setiap PR.
+   - Every PR must pass syntax compilation checks (`compileall`), security module auditing (`Git Guard`), and full unit test execution with zero error tolerance.
+3. **Secret Leak Prevention**:
+   - Pre-commit and pre-stage scanning via `security/git_guard.py`.
+   - Continuous automated scanning by GitHub GitGuardian Security Checks on every PR.
 4. **Supply Chain Defense (Pinned Action SHAs)**:
-   - Seluruh GitHub Actions di-pin ke exact 40-karakter commit SHA (bukan mutable semantic tag) untuk mencegah eksploitasi dependensi CI pihak ketiga.
-5. **Penyimpanan Bukti Visual yang Kebal Deletion**:
-   - Branch `pr-proof-assets` diatur terpisah sebagai *orphan branch append-only*. Screenshot di-link menggunakan commit SHA permanen, menjamin URL bukti tidak pernah 404 saat branch fitur dihapus.
+   - All GitHub Actions workflows are pinned to exact 40-character commit SHAs (rather than mutable semantic tags) to eliminate risks of third-party CI dependency compromises.
+5. **Deletion-Proof Visual Evidence Storage**:
+   - The `pr-proof-assets` branch is isolated as an append-only orphan branch. Screenshots are permanently referenced by commit SHA, guaranteeing evidence URLs never 404 when feature branches are deleted.
 6. **Automated Stale PR Management**:
-   - Workflow pembersih otomatis menutup PR testing/verifikasi sesaat yang tidak aktif, dengan perlindungan otomatis (`keep-open`) untuk PR pekerjaan nyata.
+   - Automated cleanup workflows close inactive testing and verification PRs, while safeguarding legitimate work PRs via automated `keep-open` labels.
 
 ---
 
-## 🤝 Panduan Kontribusi
+## 🤝 Contributing
 
-Kontribusi dari komunitas sangat disambut. Ikuti alur kerja standar berikut:
+Community contributions are warmly welcome. Please follow our standard development workflow:
 
 1. **Fork & Clone**:
    ```bash
    git clone https://github.com/<username>/brainfrog.git
    cd brainfrog
    ```
-2. **Setup Lingkungan Pengembangan**:
+2. **Setup Development Environment**:
    ```bash
    python -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    pip install -e .
    ```
-3. **Menjalankan Pengujian Lokal**:
-   Pastikan seluruh test suite lolos sebelum mengajukan perubahan:
+3. **Run Local Tests**:
+   Ensure all tests pass cleanly before submitting any changes:
    ```bash
    python -m unittest discover -s tests
    ```
-4. **Konvensi Branch & Pengajuan PR**:
-   - Buat branch fitur dari `main` dengan awalan deskriptif: `feat/nama-fitur`, `fix/nama-bug`, atau `docs/perubahan`.
-   - *Catatan:* Hindari menggunakan awalan `test/` untuk branch kerja aktif, karena awalan tersebut dialokasikan untuk siklus pembersihan PR verifikasi otomatis.
-   - Ajukan Pull Request ke branch `main`. Pastikan seluruh status check CI berhasil.
-   - **Penting:** Jangan pernah menghapus atau mengubah history pada branch `pr-proof-assets` karena branch tersebut digunakan untuk menyimpan aset pembuktian abadi.
+4. **Branch Conventions & Submitting a PR**:
+   - Create a feature branch off `main` with a descriptive prefix: `feat/feature-name`, `fix/bug-name`, or `docs/changes`.
+   - *Note:* Avoid using the `test/` prefix for active development branches, as that prefix is designated for automated PR testing and cleanup lifecycles.
+   - Open a Pull Request targeting `main`. Verify that all CI status checks pass.
+   - **Important:** Never alter or delete history on the `pr-proof-assets` branch, as it stores permanent proof assets.
 
 ---
 
 ## 📄 License
 
-Proyek ini dilisensikan di bawah [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE).
