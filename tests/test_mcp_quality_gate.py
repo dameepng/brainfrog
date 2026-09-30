@@ -60,6 +60,20 @@ class TestFrontendQualityGate(unittest.TestCase):
         self.assertIn("Cannot read properties of undefined", ctx)
         self.assertIn("404", ctx)
 
+    def test_quality_gate_result_feedback_missing_module(self):
+        res = QualityGateResult(
+            status="FAIL",
+            build_output="Error: Cannot find module '@radix-ui/react-slot'\nRequire stack:\n- src/components/ui/button.tsx",
+            reason="npm run build failed with exit code 1",
+        )
+        self.assertFalse(res.passed)
+        ctx = res.to_agent_context()
+
+        self.assertIn("[CRITICAL DEPENDENCY RULE]", ctx)
+        self.assertIn("MISSING DEPENDENCY", ctx)
+        self.assertIn("npm install", ctx)
+        self.assertIn("whack-a-mole", ctx)
+
     def test_quality_gate_preflight_missing_script(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             res = run_frontend_quality_gate(

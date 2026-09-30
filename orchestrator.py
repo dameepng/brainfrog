@@ -15,7 +15,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Ensure the package root (directory of this file) is always on sys.path so
 # that `skills.py` and other sibling modules are importable regardless of the
@@ -24,10 +24,10 @@ _PACKAGE_DIR = str(Path(__file__).resolve().parent)
 if _PACKAGE_DIR not in sys.path:
     sys.path.insert(0, _PACKAGE_DIR)
 
-from modules import Domain, resolve_focus_tree
+from core.modules import Domain, resolve_focus_tree
 from system1.base import Answer, ChoiceQuestion, NoulQuestion, ScoreQuestion, SystemOneClient
-from system2 import PlanStep, System2Client, extract_json
-from git_guard import (
+from system2 import PlanStep, System2Client, System2ClientType, extract_json
+from security.git_guard import (
     ensure_gitignore_security,
     purge_tracked_sensitive_files,
     scan_staged_changes,
@@ -108,12 +108,12 @@ def get_guideline_files(repo_dir: Path) -> List[Path]:
             except Exception:
                 pass
 
-    # 4. If repo_dir does NOT have its own BRAINFROG.md, include the bundled core BRAINFROG.md
-    if "brainfrog.md" not in seen_names:
-        pkg_brainfrog = Path(__file__).resolve().parent / "BRAINFROG.md"
-        if pkg_brainfrog.exists() and pkg_brainfrog.is_file():
-            found.append(pkg_brainfrog)
-            seen_names.add("brainfrog.md")
+    # 4. Bundled core BRAINFROG.md (global system memory & engineering rules)
+    # Always include the core rules so global directives (such as frontend build & dependency rules)
+    # are reliably injected into System 2 across all workspaces, even if the workspace has its own guidelines.
+    pkg_brainfrog = Path(__file__).resolve().parent / "BRAINFROG.md"
+    if pkg_brainfrog.exists() and pkg_brainfrog.is_file() and pkg_brainfrog not in found:
+        found.append(pkg_brainfrog)
 
     return found
 
@@ -124,12 +124,18 @@ def load_project_guidelines(repo_dir: Path) -> str:
     if not files:
         return ""
 
+    pkg_brainfrog = Path(__file__).resolve().parent / "BRAINFROG.md"
     sections = []
     for f in files:
         try:
             content = f.read_text(encoding="utf-8", errors="replace").strip()
             if content:
-                label = f"Project Design Specification: {f.name}" if "design" in f.name.lower() or "style" in f.name.lower() else f"System Memory & Guidelines: {f.name}"
+                if f.resolve() == pkg_brainfrog.resolve() and f != (repo_dir / "BRAINFROG.md"):
+                    label = f"Core System Guidelines: {f.name}"
+                elif "design" in f.name.lower() or "style" in f.name.lower():
+                    label = f"Project Design Specification: {f.name}"
+                else:
+                    label = f"System Memory & Guidelines: {f.name}"
                 sections.append(f"### [{label}]\n{content}")
         except Exception:
             pass
@@ -580,7 +586,7 @@ class Orchestrator:
     def __init__(
         self,
         system1: SystemOneClient,
-        system2: System2Client,
+        system2: Union[System2ClientType, Any],
         config: RunConfig,
         log_fn: Optional[Any] = None,
     ):
@@ -593,7 +599,7 @@ class Orchestrator:
         self.guidelines = load_project_guidelines(self.cfg.repo_dir)
 
         # Index available modular skills (metadata only: name & description)
-        from skills import index_skills, select_skill, load_skill_content  # noqa: PLC0415
+        from core.skills import index_skills, select_skill, load_skill_content  # noqa: PLC0415
         self.available_skills = index_skills(self.cfg.repo_dir)
         self.active_skill, clean_task = select_skill(
             self.cfg.task,
@@ -611,17 +617,17 @@ class Orchestrator:
             self.s2.guidelines = base_rules
 
         # Continuous Learning: inject relevant learnings into System 2 context
-        from memory import (
+        from core.memory import (
             load_workspace_memory,
             load_global_memory,
             get_relevant_learnings,
             format_learnings_for_prompt,
+            MemoryStore,
         )
         ws_mem = load_workspace_memory(self.cfg.repo_dir)
         gl_mem = load_global_memory()
         all_learnings = ws_mem.learnings + gl_mem.learnings
         if all_learnings:
-            from memory import MemoryStore
             combined = MemoryStore(learnings=all_learnings)
             relevant = get_relevant_learnings(combined, task=self.cfg.task)
             memory_block = format_learnings_for_prompt(relevant)
@@ -744,7 +750,7 @@ class Orchestrator:
             )
 
             # Generate filename & save plan doc into .brainfrog/plans/
-            from plans import save_plan_document, compute_file_hash
+            from core.plans import save_plan_document, compute_file_hash
             from datetime import datetime
 
             title = plan_data.get("title", "Rencana Implementasi")
@@ -839,7 +845,7 @@ class Orchestrator:
         # BUILD mode: planning with plan_context handoff
         latest_plan = None
         if self.cfg.mode == "build":
-            from plans import get_latest_plan, format_plan_handoff
+            from core.plans import get_latest_plan, format_plan_handoff
             latest_plan = get_latest_plan(self.cfg.repo_dir)
             if not self.cfg.plan_context and latest_plan:
                 self.cfg.plan_context = format_plan_handoff(latest_plan, self.cfg.repo_dir)
@@ -996,7 +1002,18 @@ class Orchestrator:
             )
             return ScopeDecision(domain=None, change_type=change_type, focus_tree="", clarify_message=msg)
 
-        domain = self.cfg.domains[domain_answer.choice]
+        chosen_domain = self.cfg.domains.get(domain_answer.choice or "")
+        if not chosen_domain:
+            options = ", ".join(self.cfg.domains.keys())
+            msg = (
+                f"I'm not confident enough about which part of the codebase this is about "
+                f"(best guess: '{domain_answer.choice}', confidence {domain_answer.confidence:.2f}). "
+                f"Could you say which area this touches? Known areas: {options}. "
+                f"Or just add more detail to the request."
+            )
+            return ScopeDecision(domain=None, change_type=change_type, focus_tree="", clarify_message=msg)
+
+        domain = chosen_domain
         focus_tree = resolve_focus_tree(self.cfg.repo_dir, domain)
         if not focus_tree.strip():
             focus_tree = _repo_tree(self.cfg.repo_dir)
@@ -1382,7 +1399,7 @@ class Orchestrator:
         Stores extracted learnings in workspace memory for future context injection.
         """
         try:
-            from memory import (
+            from core.memory import (
                 generate_reflection_prompt,
                 load_workspace_memory,
                 save_workspace_memory,
@@ -1532,10 +1549,10 @@ class Orchestrator:
         ceiling = "low" if sensitive else self.cfg.pr_risk_ceiling
         safety_bar = 0.9 if sensitive else 0.7
         if isinstance(risk.score, (int, float)):
-            risk_val = int(round(risk.score))
+            risk_val = round(risk.score)
         else:
             risk_val = RISK_RANK.get(str(risk.score).lower(), 2)
-        ceiling_val = RISK_RANK.get(str(ceiling).lower(), 0)
+        ceiling_val = RISK_RANK.get(ceiling.lower(), 0)
         within_ceiling = risk_val <= ceiling_val
 
         auto_ok = (

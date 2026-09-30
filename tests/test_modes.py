@@ -618,6 +618,26 @@ class TestDiffBreakdown(unittest.TestCase):
             self.assertEqual(summary.total_deleted, 0)
             self.assertEqual(summary.changes[0].file_path, "hello.py")
 
+    def test_global_guidelines_always_injected_with_frontend_rules(self):
+        from orchestrator import get_guideline_files, load_project_guidelines
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_path = Path(tmp_dir)
+            # Create a custom workspace BRAINFROG.md
+            (repo_path / "BRAINFROG.md").write_text("# Workspace Local Rules\n- Theme: Dark", encoding="utf-8")
+
+            files = get_guideline_files(repo_path)
+            file_names = [f.name.lower() for f in files]
+            # Core BRAINFROG.md must be included alongside workspace BRAINFROG.md
+            self.assertIn("brainfrog.md", file_names)
+
+            guidelines = load_project_guidelines(repo_path)
+            # Both workspace rules and core frontend build rules must be present
+            self.assertIn("Workspace Local Rules", guidelines)
+            self.assertIn("Frontend Engineering & Dependency Management", guidelines)
+            self.assertIn("npx shadcn@latest add", guidelines)
+            self.assertIn("Cannot find module", guidelines)
+            self.assertIn("audited N packages", guidelines)
+
 
 if __name__ == "__main__":
     unittest.main()
