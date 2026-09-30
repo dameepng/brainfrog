@@ -16,7 +16,7 @@ jobs:
     permissions:
       pull-requests: write
       issues: write
-      contents: read
+      contents: write
 
     steps:
       - name: Harden Runner
@@ -41,9 +41,8 @@ jobs:
           only-pr-labels: ""
           exempt-pr-labels: "keep-open,work-in-progress"
 
-          # TEMPORARY TEST VALUES: 0 days to trigger immediate evaluation during testing
-          days-before-pr-stale: 0
-          days-before-pr-close: 0
+          days-before-pr-stale: 2
+          days-before-pr-close: 5
           days-before-issue-stale: -1
           days-before-issue-close: -1
 
