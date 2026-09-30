@@ -1,399 +1,217 @@
-# BrainFrog (🐸) — Dual-System Agentic Coding CLI
+# BrainFrog CLI 🐸
 
-BrainFrog is an agentic coding loop that automates software engineering workflows: analyzing tasks, planning changes, writing and refactoring code, executing local test suites, self-healing upon failures, **verifying frontend output in a real browser**, and drafting pull requests — all from the terminal.
+> CLI agentic coding dengan hybrid System 1 (Jev / keputusan terstruktur cepat) + System 2 (LLM generatif), dilengkapi verifikasi browser otomatis sebelum kode dianggap selesai.
 
-## Architecture Overview
+---
 
-The system is built on a **dual-system paradigm** inspired by human cognitive architecture:
+## ✨ Apa yang Membuat BrainFrog Berbeda
 
-- **System 1 (Jev / TypeSafe)** — Fast, typed, deterministic gatekeeper. Handles domain routing, test outcome branching, diff risk classification, and loop control decisions via structured scoring questions. Cloud-hosted via TypeSafe API.
-- **System 2 (Generative Brain)** — Deep reasoning engine for open-ended tasks: task decomposition, code synthesis, failure diagnostics, visual inspection, and PR narrative drafting. Supports **two providers**:
-  - **Google Antigravity** (`agy` CLI) — Uses your Google Account login session directly, no API key required. Supports Gemini models (`gemini-3.8-flash-high`, `gemini-3.1-pro-high`, `claude-sonnet-4-6`, etc.).
-  - **Anthropic Claude** — Direct API integration with `ANTHROPIC_API_KEY`.
+BrainFrog bukan sekadar pembungkus LLM untuk menghasilkan kode di terminal. Sistem ini dibangun dengan pengawasan ketat dan otomasi verifikasi end-to-end:
+
+- **Verifikasi Browser Otomatis (MCP Quality Gate)** — Untuk setiap perubahan kode frontend, BrainFrog secara otomatis mengompilasi proyek (`npm run build`), menjalankan dev server, membuka browser Chromium nyata via Model Context Protocol (MCP), memeriksa console error, mendeteksi failed network requests (404/500), serta mengambil screenshot halaman sebelum pekerjaan dinyatakan selesai.
+- **Hybrid Decision-Making (Dual-System)** — Mengadopsi arsitektur kognitif: **System 1 (Jev / TypeSafe)** bertindak sebagai gatekeeper cepat bertipe deterministik untuk klasifikasi domain, penentuan cabang kegagalan, dan penilaian risiko diff; **System 2 (Generative Brain)** bertugas menangani penalaran mendalam, dekomposisi rencana, dan sintesis kode.
+- **PR Proof Abadi (Immutable Screenshot Storage)** — Screenshot visual desktop dan mobile otomatis tersemat di body Pull Request untuk setiap perubahan frontend. Screenshot disimpan di orphan branch terpisah (`pr-proof-assets`) menggunakan exact commit SHA — tautan gambar terjamin abadi (`200 OK`) dan tidak akan rusak meski branch PR dihapus setelah merge.
+- **Infrastruktur Hardened & Proteksi Ketat** — Dilengkapi branch protection wajib di `main`, pipeline CI (`lint-typecheck-test`) dengan GitHub Actions yang di-pin ke exact commit SHA (kebal supply-chain attack), pencegahan kebocoran secret (GitGuardian + Git Guard internal), serta pembersihan otomatis PR pengujian yang basi (`stale.yml`) tanpa mengganggu PR kerja aktif.
+
+---
+
+## 🏗️ Arsitektur
 
 ```
-                                  [User Task Input]
+                                  [Prompt Pengguna]
                                           │
                                           ▼
                             ┌───────────────────────────┐
                             │   System 1: Scope Gate    │
-                            │  likely_domain, type      │
+                            │  (Domain Routing & Tipe)  │
                             └───────────────────────────┘
                                           │
                   ┌───────────────────────┴───────────────────────┐
                   ▼                                               ▼
-         [question_only]                                  [code_modification]
-     System 2 reads domain files,                       System 2 generates
-     diagnoses & answers user.                          multi-step execution plan.
-     (No code modified, no PR)                                    │
+         [Pertanyaan Saja]                               [Modifikasi Kode]
+    System 2 mendiagnosis &                             System 2 membuat rencana
+    menjawab pertanyaan user.                           eksekusi multi-langkah.
+    (Tanpa modifikasi file)                                       │
                                                                   ▼
                                                     ┌───────────────────────────┐
-                                              ┌───► │  Step N: Write / Edit Code│
+                                              ┌───► │ Langkah N: Sintesis Kode  │
                                               │     └───────────────────────────┘
                                               │                   │
                                               │                   ▼
                                               │     ┌───────────────────────────┐
-                                              │     │ Execute Local Test Suite  │
+                                              │     │ Eksekusi Unit Test Lokal  │
                                               │     └───────────────────────────┘
                                               │                   │
                                               │                   ▼
                                               │     ┌───────────────────────────┐
                                               │     │  Frontend Quality Gate    │
-                                              │     │  (MCP browser verify)     │
+                                              │     │  (MCP Browser Verify)     │
                                               │     └───────────────────────────┘
                                               │                   │
                                               │                   ▼
                                               │     ┌───────────────────────────┐
-                                              │     │   System 1: Loop Gate     │
-                                              │     │  next_action evaluation   │
+                                              │     │    System 1: Loop Gate    │
+                                              │     │  (Evaluasi Hasil & Next)  │
                                               │     └───────────────────────────┘
-                                              │       ├── open_pr ──► (Proceed to PR)
+                                              │       ├── open_pr ──► [Auto-Attach PR Proof]
                                               └── retry_fix          ├── escalate_human
                                                                      └── abandon
 ```
 
-### Execution Lifecycle
+### Komponen Utama
 
-1. **Scope Gate** — System 1 categorizes the task into a codebase domain (from `modules.json`) and determines `change_type` (`feature_request`, `bug_investigation`, `question_only`, `unclear`). Low-confidence results halt and request clarification.
-2. **Task Planning** — System 2 decomposes the goal into atomic, sequential implementation steps with file-level targeting.
-3. **Execution & Self-Healing Loop** — For each step:
-   - System 2 generates code changes (complete file replacements).
-   - The configured test command runs via a bounded subprocess with full process-tree termination.
-   - **Frontend Quality Gate** — If the step touches frontend files and a web project is detected (`package.json` / `index.html`), BrainFrog automatically:
-     - Runs `npm run build` to verify compilation
-     - Starts the dev server and polls until responsive
-     - Opens a real Chromium browser via MCP, navigates to the app
-     - Captures console errors, failed network requests, and a full-page screenshot
-     - Feeds any errors back to System 2 for automated fixing
-   - System 1 evaluates outcomes and decides `next_action` (`open_pr`, `retry_fix`, `escalate_human`, `abandon`).
-4. **PR Drafting & Risk Gate** — System 2 produces PR title/description; System 1 scores `diff_risk` and `safe_to_proceed`. If `--auto-pr` is enabled and criteria are met, BrainFrog branches, commits, pushes, and creates a GitHub PR automatically.
-
----
-
-## Directory Structure
-
-```
-.
-├── cli.py                       # Terminal entrypoint, interactive REPL, TUI & slash commands
-├── orchestrator.py              # State machine: System 1 ↔ System 2, tests, git, quality gates
-├── BRAINFROG.md                 # Persistent system guidelines & architectural rules
-├── DESIGN.md                    # TUI visual design specification (tokens, colors, layout)
-├── pyproject.toml               # Packaging, dependencies, and entry points
-├── requirements.txt             # Python package dependencies
-├── .env.example                 # Environment variable template
-│
-├── core/                        # Core engine modules
-│   ├── __init__.py              # Package exports
-│   ├── config.py                # System 1 backend resolution & env config
-│   ├── modules.py               # Domain registry, tech stack detection, auto-discovery
-│   ├── plans.py                 # Plan documents, mode management (build/plan), staleness checks
-│   ├── memory.py                # Workspace & global learning persistence
-│   ├── skills.py                # Skill indexing, selection, script execution
-│   ├── mcp_client.py            # [Layer 1] Generic stdio MCP JSON-RPC 2.0 client
-│   └── frontend_quality_gate.py # [Layer 2] Browser verification pipeline via MCP
-│
-├── system1/                     # System 1: Fast typed decision layer
-│   ├── base.py                  # Abstract interfaces & decision contracts (Choice/Score/Noul)
-│   └── typesafe_client.py       # Cloud backend calling TypeSafe Jev API
-│
-├── system2/                     # System 2: Generative reasoning layer
-│   ├── __init__.py              # Provider auto-detection & System2Client factory
-│   ├── claude_client.py         # Anthropic Claude integration (plan, write, fix, diagnose, PR)
-│   ├── antigravity_client.py    # Google Antigravity integration (agy CLI, Google Auth session)
-│   ├── json_utils.py            # Robust JSON extraction & repair from LLM output
-│   └── visual_inspector.py      # Headless screenshot capture & multimodal visual critique
-│
-├── security/                    # Security subsystem
-│   ├── auth_manager.py          # API key management, rotation, and validation
-│   └── git_guard.py             # Sensitive file scanning, .gitignore enforcement
-│
-├── tests/                       # Test suite
-│   ├── test_mcp_quality_gate.py # MCP client & quality gate unit tests
-│   ├── test_modes.py            # Build/plan mode tests
-│   ├── test_system1_jev.py      # System 1 Jev integration tests
-│   ├── test_system2_providers.py# System 2 provider tests
-│   ├── test_visual_inspector.py # Visual inspector tests
-│   ├── test_git_guard.py        # Security guard tests
-│   ├── test_memory.py           # Memory persistence tests
-│   ├── test_skills.py           # Skill system tests
-│   └── ...
-│
-└── modules.example.json         # Example domain registry template
-```
-
----
-
-## Component Responsibilities
-
-| Component | Files | Responsibilities |
+| Komponen | Lokasi File | Peran & Tanggung Jawab |
 | :--- | :--- | :--- |
-| **System 1 Client** | `system1/base.py`, `typesafe_client.py` | Structured questions (`ChoiceQuestion`, `ScoreQuestion`, `NoulQuestion`); high-speed typed scoring without prompt drift; TypeSafe Jev API integration. |
-| **System 2 Client** | `system2/claude_client.py`, `antigravity_client.py` | Multi-step planning, full-file code generation, error triage, codebase Q&A, PR drafting. **Antigravity** provider uses `agy` CLI with Google Auth (no API key). **Claude** provider uses Anthropic API directly. |
-| **Orchestrator** | `orchestrator.py` | Central state machine; subprocess execution with strict timeouts and process tree termination; atomic file writing; self-healing retry loop with circuit breakers; git lifecycle; frontend quality gate trigger; visual inspection gate. |
-| **MCP Client** | `core/mcp_client.py` | Generic stdio-based MCP JSON-RPC 2.0 transport: process lifecycle, handshake, `tools/list`, `tools/call` with timeout & response normalization (text & image blocks). Domain-agnostic — reusable for any MCP server. |
-| **Frontend Quality Gate** | `core/frontend_quality_gate.py` | 7-step browser verification via `brainfrog-verify-mcp`: build → dev server → navigate → console errors → network errors → screenshot → verdict. Fully automated cleanup (zero zombie processes). |
-| **Visual Inspector** | `system2/visual_inspector.py` | Headless Chrome/Edge screenshot capture of rendered HTML; multimodal visual critique via System 2; anti-slop detection (padding, overlap, unstyled elements). |
-| **Domain Registry** | `core/modules.py`, `modules.json` | Tech stack auto-detection; preset module generation; path matching; sensitivity flags (sensitive domains block auto-PR). |
-| **Planning Engine** | `core/plans.py` | Plan document persistence; build/plan mode switching; file hash staleness detection; safe readonly command validation. |
-| **Memory** | `core/memory.py` | Workspace and global learning persistence; contextual retrieval for past fixes and decisions. |
-| **Skills** | `core/skills.py` | Skill indexing, selection, content loading; script validation and sandboxed execution. |
-| **Security** | `security/auth_manager.py`, `security/git_guard.py` | API key management/rotation; `.gitignore` enforcement; staged file scanning for secret leaks. |
-| **CLI & TUI** | `cli.py` | Interactive REPL with auto-completion; rich terminal interface; slash commands; shell passthrough (`!cmd`); instant undo (`/undo`) and diff (`/diff`). |
+| **Orchestrator** | [`orchestrator.py`](orchestrator.py) | *State machine* sentral: orkestrasi siklus eksekusi, eksekusi *subprocess* dengan *process tree termination*, penulisan file atomik, *self-healing retry loop*, dan pelaporan. |
+| **Frontend Quality Gate** | [`core/frontend_quality_gate.py`](core/frontend_quality_gate.py) | Pipeline verifikasi browser 7 langkah (build → dev server → navigate → console → network → screenshot → verdict) melalui server MCP. |
+| **PR Proof Generator** | [`core/pr_proof.py`](core/pr_proof.py) | Otomasi tangkapan layar desktop & mobile yang diunggah ke orphan branch `pr-proof-assets` via isolated worktree dan diformat menggunakan commit SHA permanen. |
+| **MCP Client (Layer 1)** | [`core/mcp_client.py`](core/mcp_client.py) | Klien generic stdio JSON-RPC 2.0 untuk komunikasi dengan server MCP, menangani handshake, manajemen proses, dan pemanggilan tool. |
+| **System 1 (Jev)** | [`system1/`](system1/) | Lapisan keputusan terstruktur bertipe (`ChoiceQuestion`, `ScoreQuestion`, `NoulQuestion`) via TypeSafe Jev API tanpa risiko *prompt drift*. |
+| **System 2 (Generative)** | [`system2/`](system2/) | Mesin penalaran generatif. Mendukung **Google Antigravity** (`agy` CLI dengan Google Auth session gratis) dan **Anthropic Claude** (Claude Sonnet / Opus via API Key). |
+| **Security & Git Guard** | [`security/`](security/) | Pemindaian perubahan *staged* untuk mencegah kebocoran file sensitif (`.env`, token, private keys) dan rotasi auth key. |
+| **Stale PR Lifecycle** | [`.github/workflows/stale.yml`](.github/workflows/stale.yml) & [`.github/scripts/protect_active_prs.py`](.github/scripts/protect_active_prs.py) | Pembersihan otomatis PR verifikasi sesaat dengan proteksi otomatis label `keep-open` pada PR kerja aktif. |
 
 ---
 
-## Setup & Installation
+## 🚀 Instalasi & Cara Pakai
 
-### 1. Prerequisites
+### 1. Prasyarat
 
-- **Python 3.10+**
-- **Node.js 18+** (required for MCP verification server)
-- **Git CLI** (and `gh` GitHub CLI if using `--auto-pr`)
-- **One of the following System 2 providers:**
-  - Google Antigravity (`agy` CLI) with active Google Account login — **no API key needed**
-  - Anthropic API key (`ANTHROPIC_API_KEY`)
-- **TypeSafe API key** (`TYPESAFE_API_KEY` or `JEV_API_KEY` for System 1)
+- **Python 3.10+** (disarankan Python 3.11 atau lebih baru)
+- **Node.js 18+** (diperlukan jika menggunakan server verifikasi browser MCP)
+- **Git CLI** dan **GitHub CLI (`gh`)** (diperlukan untuk pembuatan PR otomatis)
+- Salah satu dari provider System 2 berikut:
+  - **Google Antigravity (`agy` CLI)** dengan sesi login Google Account aktif (*tidak memerlukan API key*), atau
+  - **Anthropic API Key** (`ANTHROPIC_API_KEY`)
+- **TypeSafe / Jev API Key** (`TYPESAFE_API_KEY`) untuk System 1
 
-### 2. Installation
+### 2. Pemasangan
 
 ```bash
-# Clone and prepare virtual environment
-git clone <repo-url> brainfrog
+# Clone repositori
+git clone https://github.com/dameepng/brainfrog.git
 cd brainfrog
+
+# Buat virtual environment
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate  # Di Windows: .venv\Scripts\activate
 
-# Install dependencies
+# Install dependensi
 pip install -r requirements.txt
+pip install -e .
 
-# Configure environment
+# Siapkan konfigurasi environment
 cp .env.example .env
-# Edit .env — see Environment Variables below
 ```
 
-### 3. MCP Verification Server (Optional but Recommended)
+### 3. Konfigurasi Variabel Lingkungan (`.env`)
 
-The Frontend Quality Gate requires the `brainfrog-verify-mcp` server:
+Sesuaikan variabel di dalam file `.env`:
 
+```ini
+# --- System 2 Provider ---
+# Pilihan: antigravity (Google Auth) atau claude (Anthropic API Key)
+SYSTEM2_PROVIDER=antigravity
+ANTIGRAVITY_MODEL=gemini-3.8-flash-high
+
+# Jika menggunakan Claude:
+# ANTHROPIC_API_KEY=your_anthropic_api_key_here
+# ANTHROPIC_MODEL=claude-sonnet-5
+
+# --- System 1 Provider (Jev / TypeSafe) ---
+TYPESAFE_API_KEY=your_typesafe_api_key_here
+
+# --- Quality Gate & Browser Verification (Opsional) ---
+# BRAINFROG_VERIFY_MCP_PATH=/path/to/brainfrog-verify-mcp/dist/index.js
+# BRAINFROG_DEV_URL=http://localhost:3000
+```
+
+### 4. Menjalankan BrainFrog
+
+#### Mode Interaktif (REPL) — Disarankan
 ```bash
-# Build the MCP verification server (one-time)
-cd ../brainfrog-verify-mcp
-npm install
-npm run build
-
-# The server entry point is at dist/index.js
-# BrainFrog locates it automatically via BRAINFROG_VERIFY_MCP_PATH
+brainfrog --repo /path/to/your/project
+# atau alias singkat
+bf --repo /path/to/your/project
 ```
 
-### 4. Domain Configuration (`modules.json`)
+Perintah cepat di dalam REPL:
+- `@path/file.py` — *Autocomplete* dan penyisipan konteks file ke prompt
+- `!command` — Eksekusi perintah terminal langsung (misal: `!pytest`)
+- `/diff` — Tinjau perubahan git yang belum di-commit
+- `/undo` — Revert perubahan file yang baru saja dibuat agent secara bersih
+- `/rules` — Tampilkan pedoman aktif dari `BRAINFROG.md`
+- `/stats` — Tinjau konsumsi token dan estimasi biaya sesi
 
-Configure your codebase domains by copying `modules.example.json` into your target repository as `modules.json`:
-
-```json
-{
-  "auth": {
-    "description": "Authentication, session management, OAuth, JWT, permissions.",
-    "paths": ["app/auth/", "app/middleware/session.py"],
-    "sensitive": true
-  },
-  "billing": {
-    "description": "Stripe integrations, subscription tiers, invoicing, webhooks.",
-    "paths": ["app/billing/", "app/models/invoice.py"],
-    "sensitive": true
-  },
-  "api": {
-    "description": "Public REST endpoints, request validators, response serializers.",
-    "paths": ["app/api/", "app/schemas/"],
-    "sensitive": false
-  }
-}
-```
-
-> **Note:** Domains marked `"sensitive": true` will never auto-open a PR. BrainFrog can also auto-discover modules from your project structure.
-
----
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-| :--- | :---: | :--- | :--- |
-| `SYSTEM2_PROVIDER` | No | auto-detected | `antigravity` (Google Auth) or `claude` (Anthropic API) |
-| `ANTIGRAVITY_MODEL` | No | `gemini-3.8-flash-high` | Model for Antigravity provider |
-| `ANTIGRAVITY_BIN` | No | auto-detected | Path to `agy.exe` if not in `~/.gemini/bin` or `PATH` |
-| `ANTHROPIC_API_KEY` | If Claude | — | Anthropic API key (only if `SYSTEM2_PROVIDER=claude`) |
-| `ANTHROPIC_MODEL` | No | `claude-sonnet-5` | Claude model override |
-| `TYPESAFE_API_KEY` | Yes | — | TypeSafe / Jev System 1 API key |
-| `JEV_API_KEY` | Alt | — | Alternative key name for System 1 |
-| `BRAINFROG_VERIFY_MCP_PATH` | No | `C:\dame-project\tools\brainfrog-verify-mcp\dist\index.js` | Path to MCP verification server entry point |
-| `BRAINFROG_DEV_URL` | No | `http://localhost:3000` | Default dev server URL for browser verification |
-| `BRAINFROG_BROWSER_BIN` | No | auto-detected | Path to Chrome/Edge for visual inspection |
-| `BRAINFROG_MAX_OUTPUT_TOKENS` | No | `64000` | Max output tokens for code generation |
-
----
-
-## Usage
-
-### Interactive REPL Mode (Recommended)
-
+#### Mode Non-Interaktif (Single Task)
 ```bash
-brainfrog --repo /path/to/target/repo
-# or
-bf --repo /path/to/target/repo
-```
-
-Inside the REPL:
-- Type your prompt directly: `Add healthcheck endpoint at /api/health`
-- Mention files with autocompletion: `@app/api/routes.py`
-- Execute terminal commands: `!pytest`
-- Slash commands:
-
-| Command | Description |
-| :--- | :--- |
-| `/status` | View current repository, test command, and active models |
-| `/diff` | Preview uncommitted git changes |
-| `/undo` | Cleanly revert uncommitted changes made by the agent |
-| `/rules` | Display active system guidelines (`BRAINFROG.md`) |
-| `/stats` / `/cost` | Show token consumption and estimated session cost |
-| `/test-cmd <cmd>` | Switch the active test command dynamically |
-| `/clear` | Clear terminal screen |
-| `/help` | Display command cheat sheet |
-| `/exit` | Exit BrainFrog |
-
-### Non-Interactive Single Task Mode
-
-```bash
-# Using Antigravity (Google Auth — no API key)
+# Memperbaiki bug secara langsung dengan pengujian otomatis
 brainfrog \
-  --repo /path/to/target/repo \
-  --task "Fix ZeroDivisionError in calc.py" \
+  --repo /path/to/your/project \
+  --task "Fix ZeroDivisionError in math_utils.py" \
   --test-cmd "pytest -q" \
   --backend antigravity
 
-# Using Claude (Anthropic API)
+# Perubahan frontend dengan auto-PR dan verifikasi visual
 brainfrog \
-  --repo /path/to/target/repo \
-  --task "Implement user logout endpoint" \
-  --test-cmd "pytest app/tests/test_auth.py" \
-  --backend claude
-
-# Full automated run with Auto-PR
-brainfrog \
-  --repo /path/to/target/repo \
-  --task "Add dark mode toggle to settings page" \
+  --repo /path/to/your/project \
+  --task "Tambahkan dark mode toggle pada halaman landing" \
   --test-cmd "npm test" \
-  --auto-pr \
-  --pr-risk-ceiling medium
+  --auto-pr
 ```
 
 ---
 
-## Frontend Quality Gate (MCP Browser Verification)
+## 🔒 Quality & Security
 
-BrainFrog includes an automated browser verification pipeline that runs **after every frontend code change**. This is powered by a dedicated MCP server (`brainfrog-verify-mcp`) that provides real Chromium browser control:
+Repositori ini menerapkan standar rekayasa software teruji untuk menjamin keandalan dan keamanan:
 
-### How It Works
-
-```
-  [Code Change Detected]
-          │
-          ▼
-  ┌─────────────────────┐
-  │  npm run build      │  ← Compilation check (120s timeout)
-  └─────────────────────┘
-          │ exit code 0
-          ▼
-  ┌─────────────────────┐
-  │  npm run dev/start  │  ← Start dev server
-  └─────────────────────┘
-          │ poll until responsive (30s)
-          ▼
-  ┌─────────────────────┐
-  │  Browser Navigate   │  ← Real Chromium via MCP
-  └─────────────────────┘
-          │
-     ┌────┴────┐
-     ▼         ▼
-  Console   Network     ← Capture errors & failed requests
-  Errors    Logs
-     │         │
-     └────┬────┘
-          ▼
-  ┌─────────────────────┐
-  │  Screenshot         │  ← Full-page viewport capture
-  └─────────────────────┘
-          │
-          ▼
-  ┌─────────────────────┐
-  │  PASS / FAIL        │  ← 0 errors = PASS
-  └─────────────────────┘
-```
-
-### Key Features
-
-- **Automatic URL detection** — Parses dev server output to detect the actual listening URL (supports Vite, Next.js, CRA, etc.)
-- **Poll-based readiness** — No static `sleep()`. Polls the dev server with retry logic until it actually responds.
-- **Build timeout** — 120-second deadline for `npm run build` with explicit process termination on timeout.
-- **Navigation timeout** — 30-second deadline for dev server readiness.
-- **Zero zombie processes** — Guaranteed cleanup in `finally` block: stops background processes, closes browser instances, and disconnects MCP client.
-- **Concurrency-safe** — Uses `os.getpid() + timestamp` for unique `instanceId` generation, enabling safe parallel execution across multiple BrainFrog processes.
-
-### MCP Server Tools
-
-The verification server exposes these tools via stdio MCP protocol:
-
-| Tool | Description |
-| :--- | :--- |
-| `navigate` | Navigate browser to URL |
-| `screenshot` | Capture viewport/full-page screenshot |
-| `click` | Click element on page |
-| `type` | Type text into input element |
-| `evaluate` | Execute JavaScript in browser context |
-| `accessibility_snapshot` | Get accessibility tree snapshot |
-| `get_console_logs` | Retrieve browser console logs (filterable) |
-| `get_network_logs` | Retrieve network request logs (filterable) |
-| `throttle_network` | Simulate network conditions |
-| `throttle_cpu` | Simulate CPU throttling |
-| `start_process` | Start a background process (build/dev server) |
-| `read_process_output` | Read stdout/stderr from running process |
-| `stop_process` | Terminate background process |
-| `close_instance` | Close browser instance and cleanup |
+1. **Strict Pull Request Workflow & Branch Protection**:
+   - Branch `main` dilindungi secara ketat. Push langsung ditolak (`GH006`).
+   - Aturan `enforce_admins: true` aktif — admin sekalipun wajib melalui mekanisme Pull Request.
+2. **Automated CI Validation (`lint-typecheck-test`)**:
+   - Setiap PR wajib melewati validasi kompilasi sintaksis (`compileall`), audit modul keamanan (`Git Guard`), dan eksekusi test suite unit tanpa toleransi error.
+3. **Pencegahan Kebocoran Secret**:
+   - Pemindaian pre-commit/pre-stage internal melalui `security/git_guard.py`.
+   - Pemindaian otomatis berkelanjutan oleh GitHub GitGuardian Security Checks pada setiap PR.
+4. **Supply Chain Defense (Pinned Action SHAs)**:
+   - Seluruh GitHub Actions di-pin ke exact 40-karakter commit SHA (bukan mutable semantic tag) untuk mencegah eksploitasi dependensi CI pihak ketiga.
+5. **Penyimpanan Bukti Visual yang Kebal Deletion**:
+   - Branch `pr-proof-assets` diatur terpisah sebagai *orphan branch append-only*. Screenshot di-link menggunakan commit SHA permanen, menjamin URL bukti tidak pernah 404 saat branch fitur dihapus.
+6. **Automated Stale PR Management**:
+   - Workflow pembersih otomatis menutup PR testing/verifikasi sesaat yang tidak aktif, dengan perlindungan otomatis (`keep-open`) untuk PR pekerjaan nyata.
 
 ---
 
-## Reliability, Safety & Idempotency
+## 🤝 Panduan Kontribusi
 
-- **Atomic File Writing** — File updates are staged and replaced atomically (`os.replace`) to eliminate 0-byte or corrupted files during interruptions (`Ctrl+C`).
-- **Bounded Process Tree Termination** — Test executions enforce strict timeouts (default 60s); timeouts recursively terminate the entire child process hierarchy (`taskkill` on Windows, process groups on POSIX) to avoid orphan processes.
-- **Build & Navigation Timeouts** — The quality gate enforces explicit deadlines: 120s for builds, 30s for dev server readiness. Timeout expiry triggers process termination and structured error reporting.
-- **Fail-Safe Rollback** — The `/undo` command leverages git status verification to revert working directory modifications without altering committed history.
-- **Circuit Breakers** — Multi-step and retry loops enforce fixed maximum thresholds (`max_retries = 3`) to prevent infinite repair loops.
-- **Sensitive Domain Safeguard** — Hard business constraints on domains marked `sensitive: true` block auto-PR regardless of model confidence.
-- **Concurrency Isolation** — Each BrainFrog process generates unique instance IDs using `os.getpid() + timestamp`, preventing collisions in parallel multi-process environments. Verified with concurrent execution tests.
-- **Secret Leak Prevention** — `git_guard` scans staged changes and enforces `.gitignore` rules for sensitive files (`.env`, API keys, credentials).
+Kontribusi dari komunitas sangat disambut. Ikuti alur kerja standar berikut:
+
+1. **Fork & Clone**:
+   ```bash
+   git clone https://github.com/<username>/brainfrog.git
+   cd brainfrog
+   ```
+2. **Setup Lingkungan Pengembangan**:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   pip install -e .
+   ```
+3. **Menjalankan Pengujian Lokal**:
+   Pastikan seluruh test suite lolos sebelum mengajukan perubahan:
+   ```bash
+   python -m unittest discover -s tests
+   ```
+4. **Konvensi Branch & Pengajuan PR**:
+   - Buat branch fitur dari `main` dengan awalan deskriptif: `feat/nama-fitur`, `fix/nama-bug`, atau `docs/perubahan`.
+   - *Catatan:* Hindari menggunakan awalan `test/` untuk branch kerja aktif, karena awalan tersebut dialokasikan untuk siklus pembersihan PR verifikasi otomatis.
+   - Ajukan Pull Request ke branch `main`. Pastikan seluruh status check CI berhasil.
+   - **Penting:** Jangan pernah menghapus atau mengubah history pada branch `pr-proof-assets` karena branch tersebut digunakan untuk menyimpan aset pembuktian abadi.
 
 ---
 
-## Running Tests
+## 📄 License
 
-```bash
-# Run full test suite
-pytest tests/ -v
-
-# Run specific test modules
-pytest tests/test_mcp_quality_gate.py -v     # MCP client & quality gate
-pytest tests/test_system2_providers.py -v    # System 2 provider tests
-pytest tests/test_git_guard.py -v            # Security guard tests
-```
-
----
-
-## Two-Layer MCP Architecture
-
-The MCP integration follows a clean two-layer separation:
-
-**Layer 1: `core/mcp_client.py`** — Generic, reusable stdio MCP client. Handles JSON-RPC 2.0 protocol mechanics (handshake, tool discovery, tool execution, timeout, cleanup). Zero domain knowledge — works with any MCP server.
-
-**Layer 2: `core/frontend_quality_gate.py`** — Domain-specific verification pipeline. Consumes `McpClient` to execute the 7-step quality gate workflow (build → dev server → navigate → console → network → screenshot → verdict). Returns structured `QualityGateResult` with actionable error context for System 2.
-
-This separation ensures the MCP client can be reused for future MCP server integrations without coupling to frontend verification logic.
-
+*Status Lisensi:* Repositori ini sedang dalam tahap finalisasi pemilihan lisensi open-source resmi (seperti lisensi MIT). Detail hak cipta dan lisensi lengkap akan segera diperbarui.
