@@ -5,7 +5,8 @@ import sys
 
 # Add .github/scripts to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / ".github" / "scripts"))
-from protect_active_prs import is_test_branch
+from protect_active_prs import is_test_branch  # type: ignore[import-not-found]
+
 
 
 class TestProtectActivePrs(unittest.TestCase):

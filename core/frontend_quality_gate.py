@@ -140,9 +140,19 @@ class QualityGateResult:
                 else:
                     lines.append(f"- {req}")
 
-        lines.append(
-            "\nPlease fix the code so that the project builds cleanly with 0 console errors and 0 failed requests."
-        )
+        build_combined = f"{self.build_output} {self.reason}".lower()
+        if "cannot find module" in build_combined or "module not found" in build_combined:
+            lines.append(
+                "\n[CRITICAL DEPENDENCY RULE]: Build failed with 'Cannot find module'. "
+                "The root cause is almost certainly a MISSING DEPENDENCY, NOT a syntax or logic error! "
+                "1. Prioritize running 'npm install <package>' (or adding the dependency to package.json) BEFORE touching other code. "
+                "2. Do NOT patch imports or rewrite components one-by-one (whack-a-mole). "
+                "3. After installing, verify dependency was added (check that 'audited N packages' count increased or verify via 'npm ls <package>') before retrying the build."
+            )
+        else:
+            lines.append(
+                "\nPlease fix the code so that the project builds cleanly with 0 console errors and 0 failed requests."
+            )
         return "\n".join(lines).strip()
 
     def to_dict(self) -> Dict[str, Any]:

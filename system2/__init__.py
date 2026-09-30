@@ -15,6 +15,8 @@ from .claude_client import System2Client as ClaudeSystem2Client
 from .antigravity_client import AntigravitySystem2Client, find_antigravity_bin
 from .json_utils import extract_json, _extract_json, repair_json_content
 
+System2ClientType = ClaudeSystem2Client | AntigravitySystem2Client
+
 
 def get_system2_provider(explicit_provider: Optional[str] = None) -> str:
     """Determine the active System 2 provider.
@@ -69,6 +71,7 @@ __all__ = [
     "UsageTracker",
     "usage_tracker",
     "System2Client",
+    "System2ClientType",
     "ClaudeSystem2Client",
     "AntigravitySystem2Client",
     "get_system2_provider",
