@@ -1,0 +1,63 @@
+name: Stale PR Cleanup
+
+on:
+  schedule:
+    # Runs daily at 18:00 UTC (low-traffic time)
+    - cron: "0 18 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write
+      issues: write
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Protect active work PRs with keep-open label
+        run: python3 .github/scripts/protect_active_prs.py
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mark and close stale test/verification PRs
+        uses: actions/stale@28ca1036281a5e5922ead5184a1bbf96e5fc984e # v9.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          only-pr-labels: ""
+          exempt-pr-labels: "keep-open,work-in-progress"
+
+          # TEMPORARY TEST VALUES: 0 days to trigger immediate evaluation during testing
+          days-before-pr-stale: 0
+          days-before-pr-close: 0
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+
+          stale-pr-label: "stale-verification"
+          stale-pr-message: >
+            PR ini terdeteksi tidak ada aktivitas selama 2 hari dan
+            terlihat seperti PR verifikasi/testing sesaat. Akan otomatis
+            ditutup dalam 3 hari lagi kalau tidak ada aktivitas baru.
+            Kalau ini PR kerja aktif yang memang belum selesai, tambahkan
+            komentar apa saja atau label `keep-open` untuk mencegah
+            auto-close.
+          close-pr-message: >
+            Ditutup otomatis karena tidak ada aktivitas setelah ditandai
+            stale. Kalau ini seharusnya masih dikerjakan, buka PR baru
+            atau reopen manual.
+          delete-branch: true
+          operations-per-run: 30
