@@ -85,12 +85,17 @@ class AntigravitySystem2Client:
         max_tokens: int = 4000,
         images: Optional[List[Any]] = None,
     ) -> str:
-        full_system = self._apply_guidelines(system)
-        tool_guard = (
-            "IMPORTANT: Do NOT execute any external tools, scripts, or terminal commands. "
-            "You are operating in structured output mode. Respond ONLY with the requested JSON format."
-        )
-        full_system = f"{full_system}\n\n{tool_guard}"
+        base_system = self._apply_guidelines(system)
+        if images:
+            tool_guard = (
+                "You may use the `view_file` tool to inspect and view the visual contents of any attached image files. "
+                "Do NOT execute arbitrary terminal commands, scripts, or write to files."
+            )
+        else:
+            tool_guard = (
+                "IMPORTANT: Do NOT execute any external tools, scripts, or terminal commands."
+            )
+        full_system = f"{base_system}\n\n{tool_guard}"
 
         user_content = user
         if images:
@@ -103,8 +108,10 @@ class AntigravitySystem2Client:
             user_content = (
                 f"{user_content}\n\n"
                 "[ATTACHED VISUAL SCREENSHOTS / IMAGES]\n"
-                "The following visual image file(s) are attached to this request. "
-                "Please carefully inspect their visual contents, layout, design, text, and colors:\n"
+                "The user has attached the following visual image file(s). "
+                "Please inspect these image files (using the `view_file` tool or direct visual inspection) "
+                "to examine their exact visual contents, layout, design, headings, text, and colors, "
+                "and base your answer on what is visually shown in these image(s):\n"
                 + "\n".join(image_refs)
             )
 
@@ -334,19 +341,31 @@ class AntigravitySystem2Client:
         images: Optional[List[Any]] = None,
     ) -> str:
         """For change_type == 'question_only': explain, don't edit."""
-        system = (
-            "You are a senior engineer helping a teammate understand their codebase. "
-            "Read the provided files and repo structure, and give a direct, friendly, and concrete answer. "
-            "Point at specific files, functions, or lines where applicable. "
-            "Do not execute any tools, functions, or system commands; provide your answer directly as text. "
-            "Respond in the same language as the user's question (e.g. Indonesian if the question is in Indonesian, "
-            "English if in English). Use clean markdown formatting."
-        )
-        parts = [f"Question:\n{user_prompt}"]
-        if repo_tree:
-            parts.append(f"Repository file tree:\n{repo_tree}")
-        if focus_files:
-            parts.append(f"Relevant files:\n{json.dumps(focus_files, indent=2)}")
+        if images:
+            system = (
+                "You are an expert software engineer and visual reviewer. "
+                "The user has attached visual image(s) or screenshot(s) to this request. "
+                "Carefully inspect the visual contents, headings, text, design, and styling in the attached image(s) (using the `view_file` tool if needed), "
+                "and directly answer the user's inquiry based on what is visually shown in the image(s). "
+                "Respond in the same language as the user's question (e.g. Indonesian if in Indonesian, English if in English). "
+                "Use clean markdown formatting."
+            )
+            parts = [f"Question / Instruction:\n{user_prompt}"]
+        else:
+            system = (
+                "You are a senior engineer helping a teammate understand their codebase. "
+                "Read the provided files and repo structure, and give a direct, friendly, and concrete answer. "
+                "Point at specific files, functions, or lines where applicable. "
+                "Do not execute any tools, functions, or system commands; provide your answer directly as text. "
+                "Respond in the same language as the user's question (e.g. Indonesian if the question is in Indonesian, "
+                "English if in English). Use clean markdown formatting."
+            )
+            parts = [f"Question:\n{user_prompt}"]
+            if repo_tree:
+                parts.append(f"Repository file tree:\n{repo_tree}")
+            if focus_files:
+                parts.append(f"Relevant files:\n{json.dumps(focus_files, indent=2)}")
+
         user = "\n\n".join(parts)
         return self._call(system, user, max_tokens=3000, images=images)
 
