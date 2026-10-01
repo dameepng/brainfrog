@@ -17,13 +17,15 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
 
 # Ensure UTF-8 output on Windows consoles
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        for _stream in (sys.stdout, sys.stderr):
+            _reconfig = getattr(_stream, "reconfigure", None)
+            if callable(_reconfig):
+                _reconfig(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -341,7 +343,7 @@ def execute_task(
     plan_context: Optional[str] = None,
 ) -> int:
     """Run a single task through the dual-system orchestrator."""
-    from config import get_system1
+    from core.config import get_system1
     from modules import load_module_map
     from orchestrator import Orchestrator, RunConfig
     from system2 import System2Client, usage_tracker
@@ -529,11 +531,16 @@ def execute_task(
 # -------------------------------------------------------------------------
 # Autocomplete & Completer Engine
 # -------------------------------------------------------------------------
-try:
+if TYPE_CHECKING:
     from prompt_toolkit.completion import Completer, Completion
-    BaseCompleter = Completer
-except Exception:
-    BaseCompleter = object
+else:
+    try:
+        from prompt_toolkit.completion import Completer, Completion
+    except Exception:
+        class Completer:
+            pass
+        class Completion:
+            pass
 
 
 SLASH_COMMAND_COMPLETIONS = [
@@ -572,7 +579,7 @@ SLASH_COMMAND_COMPLETIONS = [
 ]
 
 
-class BrainFrogCompleter(BaseCompleter):
+class BrainFrogCompleter(Completer):
     def __init__(self, repo_dir_getter) -> None:
         self.repo_dir_getter = repo_dir_getter
 
@@ -764,7 +771,7 @@ def select_model_interactive(provider: str, current_model: str) -> Optional[str]
 def get_active_google_account() -> Optional[str]:
     """Return the currently logged-in Google email for Antigravity, if any."""
     try:
-        import auth_manager
+        from security import auth_manager
         return auth_manager.get_active_account()
     except Exception:
         pass
@@ -793,7 +800,7 @@ def select_provider_interactive(current_provider: str) -> Optional[str]:
 
 def select_account_interactive() -> Optional[str]:
     """Interactive Google account picker — erases itself after selection."""
-    import auth_manager
+    from security import auth_manager
     accts = auth_manager.list_accounts()
     active_email = auth_manager.get_active_account() or ""
 
@@ -852,11 +859,11 @@ def run_interactive(
 
     app_state = {"status": "Ready", "icon": "●"}
 
-    def get_prompt_tokens():
+    def get_prompt_tokens() -> Any:
         """Input prompt symbol for composer box."""
         return [("class:accent", f"{SYM_PROMPT} ")]
 
-    def get_prompt_top_border():
+    def get_prompt_top_border() -> Any:
         """Top border for composer box — mathematically aligned with VSplit."""
         cols, rows, box_w, margin, pad = get_layout_dims()
         bar_w = box_w - 2
@@ -872,7 +879,7 @@ def run_interactive(
             (border_style, f"{right_line}╮"),
         ]
 
-    def get_prompt_bottom_border():
+    def get_prompt_bottom_border() -> Any:
         """Bottom border attached directly under input buffer."""
         cols, rows, box_w, margin, pad = get_layout_dims()
         bar_w = box_w - 2
@@ -881,6 +888,7 @@ def run_interactive(
 
     # Initialize prompt_toolkit session with autocomplete & history
     session = None
+    is_first_turn = [True]
     try:
         from prompt_toolkit.shortcuts import PromptSession
         from prompt_toolkit.styles import Style
@@ -1012,8 +1020,6 @@ def run_interactive(
             mouse_support=False,  # Prevent mouse-scroll from breaking pinned layout
         )
 
-        is_first_turn = [True]
-
         # Structure composer into a bounded, centered box with full borders and pinned footer
         try:
             from prompt_toolkit.layout.containers import Window, ConditionalContainer, VSplit
@@ -1029,9 +1035,9 @@ def run_interactive(
                 """Dynamic left margin for centering."""
                 return get_layout_dims()[3]
 
-            root = session.app.layout.container
-            float_cont = root.children[0].alternative_content
-            hsplit = float_cont.content
+            root: Any = session.app.layout.container
+            float_cont: Any = root.children[0].alternative_content
+            hsplit: Any = float_cont.content
 
             if len(hsplit.children) > 1 and hasattr(hsplit.children[1], "content"):
                 default_buf_win = hsplit.children[1].content
@@ -1075,7 +1081,8 @@ def run_interactive(
                     console.clear()
                     c, r = shutil.get_terminal_size(fallback=(95, 35))
                     print_splash(c, r)
-                    session.app.renderer.reset()
+                    if session and session.app and session.app.renderer:
+                        session.app.renderer.reset()
                 orig_on_resize()
             session.app._on_resize = _on_resize_handler
         except Exception:
@@ -1084,7 +1091,7 @@ def run_interactive(
     except Exception:
         session = None
 
-    def get_chat_toolbar():
+    def get_chat_toolbar() -> Any:
         """Full-width divider + status bar at bottom of the terminal window.
 
         Responsive breakpoints:
@@ -1410,7 +1417,7 @@ def run_interactive(
             print_banner_box(info_msg, level="info", title="Identitas Akun & Sesi")
             continue
         elif lower.startswith("/auth") or lower.startswith("/account"):
-            import auth_manager
+            from security import auth_manager
             parts = prompt.split(maxsplit=2)
             subcmd = parts[1].strip().lower() if len(parts) > 1 else None
             arg = parts[2].strip() if len(parts) > 2 else None
@@ -1601,7 +1608,7 @@ def run_interactive(
 
             if len(parts) > 1:
                 sub_task = parts[1].strip()
-                if is_stale:
+                if is_stale and lp:
                     print_banner_box(
                         f"Rencana terakhir dimuat ([bold]{lp.title}[/bold]), tetapi repository telah berubah sejak dibuat:\n" +
                         "\n".join([f"  • {r}" for r in stale_reasons]) +
@@ -2245,7 +2252,7 @@ def run_interactive(
             parts = prompt.split(maxsplit=1)
             stack_arg = parts[1].strip().lower() if len(parts) > 1 else None
             stack_map = {"web": "vanilla_web", "vanilla": "vanilla_web", "js": "vanilla_web", "node": "node_web", "react": "node_web"}
-            chosen_stack = stack_map.get(stack_arg, stack_arg)
+            chosen_stack = stack_map.get(stack_arg, stack_arg) if stack_arg else None
             new_domains = auto_generate_modules_json(repo_dir, stack=chosen_stack)
             print_banner_box(f"Inisialisasi modules.json untuk {repo_dir.name} selesai!\n{len(new_domains)} domain modul arsitektur terdaftar.", level="success", title="Modules Init")
             continue
