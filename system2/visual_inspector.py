@@ -8,6 +8,7 @@ import base64
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -105,14 +106,17 @@ def capture_screenshot(
     else:
         target_url = str(target)
 
+    user_data_dir = tempfile.mkdtemp(prefix="bf_browser_")
     cmd = [
         bin_path,
         "--headless=new",
+        f"--user-data-dir={user_data_dir}",
         f"--screenshot={str(output_png)}",
         f"--window-size={window_size}",
         "--disable-gpu",
         "--no-sandbox",
         "--disable-dev-shm-usage",
+        "--disable-software-rasterizer",
         "--disable-background-networking",
         "--disable-default-apps",
         "--disable-extensions",
@@ -138,3 +142,5 @@ def capture_screenshot(
         return output_png.exists() and output_png.stat().st_size > 500
     except Exception:
         return False
+    finally:
+        shutil.rmtree(user_data_dir, ignore_errors=True)
