@@ -193,13 +193,28 @@ class System2Client:
             return f"{system}\n\n[Project Guidelines & Memory (from BRAINFROG.md)]\n{self.guidelines.strip()}"
         return system
 
-    def _call(self, system: str, user: str, max_tokens: int = 4000) -> str:
+    def _call(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 4000,
+        images: Optional[List[Any]] = None,
+    ) -> str:
         full_system = self._apply_guidelines(system)
+        content_blocks: List[Dict[str, Any]] = []
+        if images:
+            for img in images:
+                if hasattr(img, "to_claude_content_block"):
+                    content_blocks.append(img.to_claude_content_block())
+                elif isinstance(img, dict) and "source" in img:
+                    content_blocks.append(img)
+        content_blocks.append({"type": "text", "text": user})
+
         with self.client.messages.stream(
             model=self.model,
             max_tokens=max_tokens,
             system=full_system,
-            messages=[{"role": "user", "content": user}],
+            messages=[{"role": "user", "content": content_blocks}],
         ) as stream:
             text = stream.get_final_text()
             final_msg = stream.get_final_message()
@@ -210,7 +225,6 @@ class System2Client:
                 )
         return text
 
-
     # -- 1. planning --------------------------------------------------
     def plan_task(
         self,
@@ -218,6 +232,7 @@ class System2Client:
         repo_tree: str,
         pinned_files: Optional[Dict[str, str]] = None,
         plan_context: Optional[str] = None,
+        images: Optional[List[Any]] = None,
     ) -> List[PlanStep]:
         system = (
             "You are a senior software engineer planning a small, safe change. "
@@ -234,7 +249,7 @@ class System2Client:
             user_parts.append(
                 f"\nUser explicitly pinned files:\n{json.dumps(pinned_files, indent=2)}"
             )
-        raw = self._call(system, "\n".join(user_parts), max_tokens=1500)
+        raw = self._call(system, "\n".join(user_parts), max_tokens=1500, images=images)
         data = _extract_json(raw)
         return [PlanStep(**s) for s in data["steps"]]
 
@@ -245,6 +260,7 @@ class System2Client:
         repo_tree: str,
         focus_files: Dict[str, str],
         pinned_files: Optional[Dict[str, str]] = None,
+        images: Optional[List[Any]] = None,
     ) -> Dict[str, Any]:
         """Generate a practical PRD and step-by-step implementation plan in Plan mode."""
         system = (
@@ -285,7 +301,7 @@ class System2Client:
         if pinned_files:
             user_parts.append(f"User pinned files:\n{json.dumps(pinned_files, indent=2)}")
 
-        raw = self._call(system, "\n\n".join(user_parts), max_tokens=4000)
+        raw = self._call(system, "\n\n".join(user_parts), max_tokens=4000, images=images)
         data = _extract_json(raw)
         return data
 
@@ -296,6 +312,7 @@ class System2Client:
         task: str,
         file_contents: Dict[str, str],
         pinned_files: Optional[Dict[str, str]] = None,
+        images: Optional[List[Any]] = None,
     ) -> Dict[str, str]:
         """Returns {path: new_full_file_content} for every file touched."""
         system = (
@@ -318,7 +335,7 @@ class System2Client:
             f"Current step:\n{step.description}\n\n"
             f"Current file contents:\n{json.dumps(all_context, indent=2)}"
         )
-        raw = self._call(system, user, max_tokens=MAX_OUTPUT_TOKENS)
+        raw = self._call(system, user, max_tokens=MAX_OUTPUT_TOKENS, images=images)
         data = _extract_json(raw)
         return data["files"]
 
@@ -345,7 +362,14 @@ class System2Client:
         return data["files"]
 
     # -- 3b. diagnose only, no code changes ------------------------------
-    def diagnose(self, user_prompt: str, focus_files: Dict[str, str], domain: str, repo_tree: str = "") -> str:
+    def diagnose(
+        self,
+        user_prompt: str,
+        focus_files: Dict[str, str],
+        domain: str,
+        repo_tree: str = "",
+        images: Optional[List[Any]] = None,
+    ) -> str:
         """For change_type == 'question_only': explain, don't edit."""
         system = (
             "You are a senior engineer helping a teammate understand their codebase. "
@@ -360,7 +384,7 @@ class System2Client:
         if focus_files:
             parts.append(f"Relevant files:\n{json.dumps(focus_files, indent=2)}")
         user = "\n\n".join(parts)
-        return self._call(system, user, max_tokens=3000)
+        return self._call(system, user, max_tokens=3000, images=images)
 
     # -- 4. PR copy -------------------------------------------------
     def draft_pr(self, task: str, changed_files: List[str], test_summary: str) -> Dict[str, str]:

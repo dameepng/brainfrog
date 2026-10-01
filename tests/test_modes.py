@@ -77,10 +77,10 @@ class MockSystem2:
     model = "claude-sonnet-5"
     guidelines = ""
 
-    def diagnose(self, task, focus_files, domain_label, repo_tree=""):
+    def diagnose(self, task, focus_files, domain_label, repo_tree="", **kwargs):
         return f"Diagnosed: {task} in {domain_label}"
 
-    def plan_and_prd(self, task, repo_tree, focus_files, pinned_files=None):
+    def plan_and_prd(self, task, repo_tree, focus_files, pinned_files=None, **kwargs):
         return {
             "title": "Fitur Autentikasi Pengguna",
             "is_small_task": False,
@@ -99,13 +99,13 @@ class MockSystem2:
             "markdown_doc": "# PRD: Fitur Autentikasi Pengguna\n\n## Goals\n- Login JWT\n",
         }
 
-    def plan_task(self, task, repo_tree, pinned_files=None, plan_context=None):
+    def plan_task(self, task, repo_tree, pinned_files=None, plan_context=None, **kwargs):
         return [PlanStep("1", "Implementasi auth.py", ["auth.py"])]
 
-    def write_code(self, step, task, file_contents, pinned_files=None):
+    def write_code(self, step, task, file_contents, pinned_files=None, **kwargs):
         return {"auth.py": "def login(): return True\n"}
 
-    def review_and_fix(self, task, step, file_contents, test_output):
+    def review_and_fix(self, task, step, file_contents, test_output, **kwargs):
         return {"auth.py": "def login(): return True # fixed\n"}
 
     def draft_pr(self, task, changed_files, test_status):
