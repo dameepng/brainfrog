@@ -137,6 +137,11 @@ bf --repo /path/to/your/project
 
 Quick in-REPL commands:
 - `@path/file.py` — Autocomplete repository files by typing `@` to pin file paths directly into the prompt
+- `@path/image.png` — Attach image (`.png`, `.jpg`, `.jpeg`, `.webp`) as multimodal vision content block to System 2 (Claude / Gemini)
+- `Ctrl+V` / `/paste` — Paste screenshot directly from OS clipboard and stage for the next prompt
+- `/screenshot [target]` — Capture real-time screenshot of running dev server/UI via MCP or headless browser and attach to prompt
+- `/attach <path>` — Attach an image file from disk to the prompt queue
+- `/images` / `/clear-images` — List currently staged images or clear the image queue
 - `!command` — Execute shell commands directly (e.g., `!pytest`, `!git status`)
 - `/mode [plan|build]` — Switch session mode between **Plan** (read-only exploration & plan drafting) and **Build** (code execution)
 - `/diff` — Review current Git diff changes

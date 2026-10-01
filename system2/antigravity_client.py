@@ -78,16 +78,39 @@ class AntigravitySystem2Client:
             return f"{system}\n\n[Project Guidelines & Memory (from BRAINFROG.md)]\n{self.guidelines.strip()}"
         return system
 
-    def _call(self, system: str, user: str, max_tokens: int = 4000) -> str:
+    def _call(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 4000,
+        images: Optional[List[Any]] = None,
+    ) -> str:
         full_system = self._apply_guidelines(system)
         tool_guard = (
             "IMPORTANT: Do NOT execute any external tools, scripts, or terminal commands. "
             "You are operating in structured output mode. Respond ONLY with the requested JSON format."
         )
         full_system = f"{full_system}\n\n{tool_guard}"
+
+        user_content = user
+        if images:
+            image_refs = []
+            for img in images:
+                path_str = str(getattr(img, "path", img))
+                fname = getattr(img, "filename", Path(path_str).name)
+                kb = getattr(img, "size_kb", 0.0)
+                image_refs.append(f"- [Attached Image File: {path_str}] ({fname}, {kb:.1f} KB)")
+            user_content = (
+                f"{user_content}\n\n"
+                "[ATTACHED VISUAL SCREENSHOTS / IMAGES]\n"
+                "The following visual image file(s) are attached to this request. "
+                "Please carefully inspect their visual contents, layout, design, text, and colors:\n"
+                + "\n".join(image_refs)
+            )
+
         prompt = sanitize_surrogates(
             f"[SYSTEM INSTRUCTIONS]\n{full_system}\n\n"
-            f"[TASK]\n{user}"
+            f"[TASK]\n{user_content}"
         )
 
         cmd = [
@@ -166,6 +189,7 @@ class AntigravitySystem2Client:
         repo_tree: str,
         pinned_files: Optional[Dict[str, str]] = None,
         plan_context: Optional[str] = None,
+        images: Optional[List[Any]] = None,
     ) -> List[PlanStep]:
         system = (
             "You are a senior software engineer planning a small, safe change. "
@@ -183,7 +207,7 @@ class AntigravitySystem2Client:
             user_parts.append(
                 f"\nUser explicitly pinned files:\n{json.dumps(pinned_files, indent=2)}"
             )
-        raw = self._call(system, "\n".join(user_parts), max_tokens=1500)
+        raw = self._call(system, "\n".join(user_parts), max_tokens=1500, images=images)
         data = _extract_json(raw)
         return [PlanStep(**s) for s in data["steps"]]
 
@@ -194,6 +218,7 @@ class AntigravitySystem2Client:
         repo_tree: str,
         focus_files: Dict[str, str],
         pinned_files: Optional[Dict[str, str]] = None,
+        images: Optional[List[Any]] = None,
     ) -> Dict[str, Any]:
         """Generate a practical PRD and step-by-step implementation plan in Plan mode."""
         system = (
@@ -234,7 +259,7 @@ class AntigravitySystem2Client:
         if pinned_files:
             user_parts.append(f"User pinned files:\n{json.dumps(pinned_files, indent=2)}")
 
-        raw = self._call(system, "\n\n".join(user_parts), max_tokens=4000)
+        raw = self._call(system, "\n\n".join(user_parts), max_tokens=4000, images=images)
         data = _extract_json(raw)
         return data
 
@@ -245,6 +270,7 @@ class AntigravitySystem2Client:
         task: str,
         file_contents: Dict[str, str],
         pinned_files: Optional[Dict[str, str]] = None,
+        images: Optional[List[Any]] = None,
     ) -> Dict[str, str]:
         """Returns {path: new_full_file_content} for every file touched."""
         system = (
@@ -268,7 +294,7 @@ class AntigravitySystem2Client:
             f"Current step:\n{step.description}\n\n"
             f"Current file contents:\n{json.dumps(all_context, indent=2)}"
         )
-        raw = self._call(system, user, max_tokens=64000)
+        raw = self._call(system, user, max_tokens=64000, images=images)
         data = _extract_json(raw)
         return data["files"]
 
@@ -295,7 +321,14 @@ class AntigravitySystem2Client:
         return data["files"]
 
     # -- 3b. diagnose only, no code changes ------------------------------
-    def diagnose(self, user_prompt: str, focus_files: Dict[str, str], domain: str, repo_tree: str = "") -> str:
+    def diagnose(
+        self,
+        user_prompt: str,
+        focus_files: Dict[str, str],
+        domain: str,
+        repo_tree: str = "",
+        images: Optional[List[Any]] = None,
+    ) -> str:
         """For change_type == 'question_only': explain, don't edit."""
         system = (
             "You are a senior engineer helping a teammate understand their codebase. "
@@ -311,7 +344,7 @@ class AntigravitySystem2Client:
         if focus_files:
             parts.append(f"Relevant files:\n{json.dumps(focus_files, indent=2)}")
         user = "\n\n".join(parts)
-        return self._call(system, user, max_tokens=3000)
+        return self._call(system, user, max_tokens=3000, images=images)
 
     # -- 4. PR copy -------------------------------------------------
     def draft_pr(self, task: str, changed_files: List[str], test_summary: str) -> Dict[str, str]:

@@ -341,6 +341,7 @@ def execute_task(
     skill: Optional[str] = None,
     mode: str = "build",
     plan_context: Optional[str] = None,
+    attached_images: Optional[List[Any]] = None,
 ) -> int:
     """Run a single task through the dual-system orchestrator."""
     from core.config import get_system1
@@ -395,6 +396,7 @@ def execute_task(
         skill=skill,
         mode=mode,
         plan_context=plan_context,
+        attached_images=attached_images or [],
     )
 
     cols, rows, box_w, margin, pad = get_layout_dims()
@@ -551,6 +553,11 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/undo", "Revert last change cleanly via Git"),
     ("/diff", "View colored git diff of recent changes"),
     ("/preview", "Capture and inspect headless screenshot of frontend UI"),
+    ("/screenshot", "Capture dev server viewport & attach to prompt"),
+    ("/paste", "Paste image from clipboard & attach to prompt"),
+    ("/attach", "Attach an image file to prompt (e.g. /attach path/img.png)"),
+    ("/images", "View currently attached/staged images"),
+    ("/clear-images", "Clear currently attached/staged images"),
     ("/cost", "View session token usage & metrics"),
     ("/rules", "View or create BRAINFROG.md guidelines"),
     ("/learn", "Teach BrainFrog a new rule (e.g. /learn always use dark mode)"),
@@ -589,7 +596,7 @@ class BrainFrogCompleter(Completer):
         ignore = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
         try:
             for p in repo_dir.rglob("*"):
-                if any(part in ignore or part.startswith(".") for part in p.parts):
+                if any(part in ignore or (part.startswith(".") and part != ".brainfrog") for part in p.parts):
                     continue
                 if p.is_file():
                     files.append(p.relative_to(repo_dir))
@@ -647,11 +654,13 @@ class BrainFrogCompleter(Completer):
                     path_str = str(rel_path).replace("\\", "/")
                     if query.lower() in path_str.lower():
                         display_token = f"@{path_str}"
+                        is_img = rel_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+                        meta_label = f"🖼️ {rel_path.name}" if is_img else rel_path.name
                         yield Completion(
                             f"@{path_str} ",
                             start_position=-(len(query) + 1),
                             display=display_token,
-                            display_meta=rel_path.name,
+                            display_meta=meta_label,
                         )
 
 
@@ -858,6 +867,7 @@ def run_interactive(
             active_plan_context = None
 
     app_state = {"status": "Ready", "icon": "●"}
+    staged_images: List[Any] = []
 
     def get_prompt_tokens() -> Any:
         """Input prompt symbol for composer box."""
@@ -869,15 +879,20 @@ def run_interactive(
         bar_w = box_w - 2
         mode_badge = f" [PLAN] " if active_mode == "plan" else f" [BUILD] "
         left_line = "──"
-        right_len = max(1, bar_w - len(left_line) - len(mode_badge))
+        img_badge = f" [🖼️ {len(staged_images)} img] " if staged_images else ""
+        used_len = len(left_line) + len(mode_badge) + len(img_badge)
+        right_len = max(1, bar_w - used_len)
         right_line = "─" * right_len
         style_name = "class:mode-plan" if active_mode == "plan" else "class:mode-build"
         border_style = "class:input-border-plan" if active_mode == "plan" else "class:input-border"
-        return [
+        items = [
             (border_style, f"{pad}╭{left_line}"),
             (style_name, mode_badge),
-            (border_style, f"{right_line}╮"),
         ]
+        if staged_images:
+            items.append(("class:image-badge", img_badge))
+        items.append((border_style, f"{right_line}╮"))
+        return items
 
     def get_prompt_bottom_border() -> Any:
         """Bottom border attached directly under input buffer."""
@@ -928,6 +943,7 @@ def run_interactive(
             # Mode indicators & borders
             "mode-plan": "bg:#173b37 #4EC9B0 bold",
             "mode-build": f"bg:#1f3326 {COLOR_ACCENT} bold",
+            "image-badge": "bg:#203b22 #73d216 bold",
             "input-border-plan": "#4EC9B0",
 
             # Input box borders
@@ -976,6 +992,23 @@ def run_interactive(
             """Ctrl+N: Instant new chat session & reset context window."""
             event.current_buffer.text = "/new"
             event.current_buffer.validate_and_handle()
+
+        @kb.add("c-v")
+        def _clipboard_paste_handler(event):
+            """Ctrl+V: Check for clipboard image, otherwise paste clipboard text."""
+            from core.image_handler import get_clipboard_image
+            scratch_dir = repo_dir / ".brainfrog" / "scratch"
+            img, err = get_clipboard_image(scratch_dir)
+            if img:
+                staged_images.append(img)
+                console.print(f"\n  [bold #33D17A]✔[/bold #33D17A] [bold #E8E8E8]{img.format_badge()}[/bold #E8E8E8]")
+                event.app.invalidate()
+            else:
+                try:
+                    data = event.app.clipboard.get_data()
+                    event.current_buffer.paste_clipboard_data(data)
+                except Exception:
+                    pass
 
         @kb.add("tab")
         def _tab_handler(event):
@@ -1135,20 +1168,22 @@ def run_interactive(
             ]
         elif cols < 60:
             # Narrow (<60 cols): 1-line status bar with model and context tag
-            left_plain = f" ● {model_disp} · [{ctx_tag}]"
+            img_tag = f" · [🖼️{len(staged_images)}]" if staged_images else ""
+            left_plain = f" ● {model_disp}{img_tag} · [{ctx_tag}]"
             right = f"v{CLI_VERSION} "
             gap = max(1, cols - len(left_plain) - len(right) - 1)
             return [
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
-                ("class:toolbar-id", f"{model_disp} · "),
+                ("class:toolbar-id", f"{model_disp}{img_tag} · "),
                 (ctx_style, f"[{ctx_tag}]"),
                 ("class:toolbar-sep", " " * gap),
                 ("class:toolbar-dim", right),
             ]
         else:
             # Standard & Wide (>=60 cols): 2-line status bar with context metrics
-            left_hints = "  tab mode    ctrl+n new    ctrl+p help    /context"
+            img_tag = f"  ·  🖼️ {len(staged_images)} img" if staged_images else ""
+            left_hints = "  tab mode    ctrl+n new    ctrl+p help    /screenshot    /paste"
             right_v = f"v{CLI_VERSION}  "
             gap = max(1, cols - len(left_hints) - len(right_v) - 1)
             line2 = f"{left_hints}{' ' * gap}{right_v}"
@@ -1156,7 +1191,7 @@ def run_interactive(
             return [
                 ("class:toolbar-divider", divider),
                 ("class:toolbar-accent", " ● "),
-                ("class:toolbar-id", f"{model_disp}  ·  {repo_disp}  ·  "),
+                ("class:toolbar-id", f"{model_disp}  ·  {repo_disp}{img_tag}  ·  "),
                 (ctx_style, f"[{ctx_tag}]\n"),
                 ("class:toolbar-dim", line2),
             ]
@@ -1276,6 +1311,11 @@ def run_interactive(
             ("Ctrl+N", "Mulai sesi baru & reset context window ke 0%", "Shortcut"),
             ("Ctrl+P", "Buka bantuan perintah ini", "Shortcut"),
             ("@filename", "Pin konteks file dengan popup pelengkapan otomatis", "Context"),
+            ("@path/image.png", "Attach gambar (.png, .jpg, .webp) langsung ke prompt System 2", "Vision"),
+            ("Ctrl+V, /paste", "Paste gambar dari clipboard & attach ke prompt berikutnya", "Vision"),
+            ("/screenshot [url]", "Capture viewport dev server & attach ke prompt berikutnya", "Vision"),
+            ("/attach <file>", "Attach file gambar dari disk ke prompt berikutnya", "Vision"),
+            ("/images, /clear-images", "Lihat atau bersihkan daftar gambar ter-attach", "Vision"),
             ("!command", "Jalankan perintah shell terminal langsung di sesi REPL", "Shell"),
             ("/whoami", "Tampilkan akun Google aktif & info sesi BrainFrog", "Identity"),
             ("/auth [switch|login|list]", "Kelola & ganti akun Google Antigravity (<100ms)", "Identity"),
@@ -1898,6 +1938,96 @@ def run_interactive(
             else:
                 print_banner_box("Gagal mengambil tangkapan layar headless.", level="error", title="Preview Error")
             continue
+        elif lower.startswith("/screenshot"):
+            parts = prompt.split(maxsplit=1)
+            target_arg = parts[1].strip() if len(parts) > 1 else None
+            from core.image_handler import capture_screenshot_for_repl
+            print_banner_box("Mengambil screenshot viewport dev server / UI ...", level="info", title="Screenshot")
+            img, err = capture_screenshot_for_repl(target_arg, repo_dir)
+            if img:
+                staged_images.append(img)
+                print_banner_box(
+                    f"Tangkapan layar berhasil diambil dan di-attach!\n"
+                    f"• File: [bold {COLOR_ACCENT}]{img.filename}[/bold {COLOR_ACCENT}] ({img.size_kb:.1f} KB)\n"
+                    f"• Path: `{img.path.resolve()}`\n"
+                    f"• Sumber: {img.source}\n\n"
+                    f"Gambar ter-attach ({len(staged_images)} total) dan siap dikirim bersama prompt berikutnya.",
+                    level="success",
+                    title="Image Attached",
+                )
+            else:
+                print_banner_box(f"Gagal mengambil screenshot:\n{err}", level="error", title="Screenshot Error")
+            continue
+        elif lower == "/paste":
+            from core.image_handler import get_clipboard_image
+            scratch_dir = repo_dir / ".brainfrog" / "scratch"
+            img, err = get_clipboard_image(scratch_dir)
+            if img:
+                staged_images.append(img)
+                print_banner_box(
+                    f"Gambar dari clipboard berhasil di-attach!\n"
+                    f"• File: [bold {COLOR_ACCENT}]{img.filename}[/bold {COLOR_ACCENT}] ({img.size_kb:.1f} KB)\n"
+                    f"• Path: `{img.path.resolve()}`\n\n"
+                    f"Gambar ter-attach ({len(staged_images)} total) dan siap dikirim bersama prompt berikutnya.",
+                    level="success",
+                    title="Clipboard Image Attached",
+                )
+            else:
+                print_banner_box(f"{err}", level="warning", title="Clipboard")
+            continue
+        elif lower.startswith("/attach"):
+            parts = prompt.split(maxsplit=1)
+            if len(parts) > 1 and parts[1].strip():
+                target_path = parts[1].strip()
+                from core.image_handler import load_and_validate_image
+                cand = Path(target_path)
+                if not cand.is_absolute():
+                    cand = (repo_dir / cand).resolve()
+                img, err = load_and_validate_image(cand, source="attach_cmd")
+                if img:
+                    staged_images.append(img)
+                    print_banner_box(
+                        f"Gambar berhasil di-attach!\n"
+                        f"• File: [bold {COLOR_ACCENT}]{img.filename}[/bold {COLOR_ACCENT}] ({img.size_kb:.1f} KB)\n"
+                        f"• Path: `{img.path.resolve()}`\n\n"
+                        f"Gambar ter-attach ({len(staged_images)} total) dan siap dikirim bersama prompt berikutnya.",
+                        level="success",
+                        title="Image Attached",
+                    )
+                else:
+                    print_banner_box(f"Gagal me-load gambar:\n{err}", level="error", title="Attach Error")
+            else:
+                print_banner_box("Gunakan: `/attach <path/ke/gambar.png>`\nAtau gunakan `@path/ke/gambar.png` langsung di dalam prompt.", level="info", title="Attach Image")
+            continue
+        elif lower in ("/images", "/image"):
+            if staged_images:
+                cols, rows, box_w, margin, pad = get_layout_dims()
+                table = Table(title=" Attached / Staged Images ", box=box.ROUNDED, border_style=COLOR_FG_MUTED, header_style=f"bold {COLOR_ACCENT}", width=box_w)
+                table.add_column("Filename", style=f"bold {COLOR_FG_PRIMARY}")
+                table.add_column("Size", style=COLOR_FG_SECONDARY)
+                table.add_column("Source", style=COLOR_INFO)
+                table.add_column("Path", style=COLOR_FG_MUTED)
+                for im in staged_images:
+                    table.add_row(im.filename, f"{im.size_kb:.1f} KB", im.source, str(im.path.resolve()))
+                console.print()
+                console.print(Align.center(table) if cols > 100 else table)
+                console.print()
+            else:
+                print_banner_box(
+                    "Belum ada gambar yang di-attach.\n"
+                    "Cara attach gambar:\n"
+                    "1. Ketik `@path/ke/gambar.png` di prompt\n"
+                    "2. Tekan `Ctrl+V` atau ketik `/paste` saat clipboard berisi gambar\n"
+                    "3. Ketik `/screenshot` untuk capture dev server yang berjalan\n"
+                    "4. Ketik `/attach <path/ke/gambar.png>`",
+                    level="info",
+                    title="No Images Attached",
+                )
+            continue
+        elif lower in ("/clear-images", "/clear-image", "/reset-images"):
+            staged_images.clear()
+            print_banner_box("Daftar gambar ter-attach berhasil dibersihkan.", level="success", title="Images Cleared")
+            continue
         elif lower == "/rules":
             from orchestrator import get_guideline_files
             files = get_guideline_files(repo_dir)
@@ -2257,16 +2387,45 @@ def run_interactive(
             print_banner_box(f"Inisialisasi modules.json untuk {repo_dir.name} selesai!\n{len(new_domains)} domain modul arsitektur terdaftar.", level="success", title="Modules Init")
             continue
 
+        # Multimodal image attachment extraction (@image.png & staged images)
+        from core.image_handler import extract_image_references
+
+        cleaned_prompt, prompt_images, img_errors = extract_image_references(prompt, repo_dir)
+        if img_errors:
+            for err in img_errors:
+                print_banner_box(
+                    f"[bold #FF5555]Gagal memproses lampiran gambar:[/bold #FF5555]\n{err}",
+                    level="error",
+                    title="Image Reference Error",
+                )
+            continue
+
+        turn_images = list(staged_images) + prompt_images
+        task_text = cleaned_prompt.strip()
+        if not task_text:
+            if turn_images:
+                task_text = "Jelaskan dan analisis visual gambar yang dilampirkan, lalu berikan saran implementasi atau perbaikan."
+            else:
+                continue
+
         # Execute task with live braille spinner aligned with text box
         cols, rows, box_w, margin, pad = get_layout_dims()
         right_margin = max(0, cols - box_w - margin)
         from rich.padding import Padding
         if not session:
-            prompt_line = Text.from_markup(f"[{COLOR_FG_SECONDARY}]{SYM_USER}[/{COLOR_FG_SECONDARY}] [bold {COLOR_FG_PRIMARY}]{prompt}[/bold {COLOR_FG_PRIMARY}]")
+            prompt_line = Text.from_markup(f"[{COLOR_FG_SECONDARY}]{SYM_USER}[/{COLOR_FG_SECONDARY}] [bold {COLOR_FG_PRIMARY}]{task_text}[/bold {COLOR_FG_PRIMARY}]")
             console.print()
             console.print(Padding(prompt_line, (0, right_margin, 0, margin)))
             console.print()
         else:
+            console.print()
+
+        # Visual confirmation badge for attached images
+        if turn_images:
+            badge_lines = []
+            for img in turn_images:
+                badge_lines.append(f"  [bold #4EC9B0]🖼️ [Image attached: {img.filename}][/bold #4EC9B0] [{COLOR_FG_MUTED}]({img.size_kb:.1f} KB, source: {img.source})[/{COLOR_FG_MUTED}]")
+            console.print("\n".join(badge_lines))
             console.print()
 
         app_state["status"] = "Processing..."
@@ -2279,7 +2438,7 @@ def run_interactive(
         spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]{spinner_text}[/bold {COLOR_FG_PRIMARY}]", style=spinner_style)
         with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
             exit_code = execute_task(
-                task=prompt,
+                task=task_text,
                 repo_dir=repo_dir,
                 backend=active_backend,
                 model=active_model,
@@ -2293,7 +2452,12 @@ def run_interactive(
                 skill=active_skill,
                 mode=active_mode,
                 plan_context=active_plan_context if active_mode == "build" else None,
+                attached_images=turn_images,
             )
+
+        # Clear staged images once submitted
+        staged_images.clear()
+
         if exit_code == 0:
             app_state["status"] = "Done"
             app_state["icon"] = SYM_SUCCESS
@@ -2349,9 +2513,21 @@ def main() -> int:
     chosen_task = args.task or args.flag_task
 
     if chosen_task:
+        from core.image_handler import extract_image_references
+
+        cleaned_task, cli_images, img_errors = extract_image_references(chosen_task, repo_dir)
+        if img_errors:
+            for err in img_errors:
+                print_banner_box(
+                    f"Gagal memproses lampiran gambar:\n{err}",
+                    level="error",
+                    title="Image Reference Error",
+                )
+            return 1
+
         active_test_cmd = args.test_cmd or detect_default_test_cmd(repo_dir)
         return execute_task(
-            task=chosen_task,
+            task=cleaned_task.strip() or chosen_task,
             repo_dir=repo_dir,
             backend=args.backend,
             model=args.model,
@@ -2364,6 +2540,7 @@ def main() -> int:
             max_retries=args.max_retries,
             skill=args.skill,
             mode=args.mode,
+            attached_images=cli_images,
         )
     else:
         run_interactive(

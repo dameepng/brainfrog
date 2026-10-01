@@ -80,4 +80,22 @@ __all__ = [
     "resolve_focus_tree",
     # Config
     "get_system1",
+    # Images
+    "AttachedImage",
+    "is_image_path",
+    "load_and_validate_image",
+    "extract_image_references",
+    "get_clipboard_image",
+    "capture_screenshot_for_repl",
+    "SUPPORTED_IMAGE_EXTENSIONS",
 ]
+
+from .image_handler import (
+    AttachedImage,
+    is_image_path,
+    load_and_validate_image,
+    extract_image_references,
+    get_clipboard_image,
+    capture_screenshot_for_repl,
+    SUPPORTED_IMAGE_EXTENSIONS,
+)

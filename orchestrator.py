@@ -58,6 +58,7 @@ class RunConfig:
     skill: Optional[str] = None
     mode: str = "build"
     plan_context: Optional[str] = None
+    attached_images: List[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -144,12 +145,19 @@ def load_project_guidelines(repo_dir: Path) -> str:
 
 
 def extract_mentioned_files(task: str, repo_dir: Path) -> Dict[str, str]:
-    """Extract and read files referenced with @filename in user prompt."""
+    """Extract and read files referenced with @filename in user prompt.
+
+    Image files (.png, .jpg, .jpeg, .webp) are skipped here and handled
+    separately by extract_image_references as vision content blocks.
+    """
     pattern = r"@([a-zA-Z0-9_\-\.\/\\]+)"
     matches = re.findall(pattern, task)
     pinned = {}
+    image_exts = {".png", ".jpg", ".jpeg", ".webp"}
     for m in matches:
         target = (repo_dir / m).resolve()
+        if target.suffix.lower() in image_exts:
+            continue
         if target.exists() and target.is_file():
             try:
                 rel = str(target.relative_to(repo_dir.resolve()))
@@ -582,6 +590,20 @@ def is_question_task(task: str, change_type: str = "") -> bool:
     return any(clean.startswith(kw) or f" {kw} " in f" {clean} " for kw in question_keywords)
 
 
+def _safe_s2_call(method: Any, *args: Any, **kwargs: Any) -> Any:
+    """Invoke a System 2 method, gracefully omitting kwargs (such as images) if unsupported by the target."""
+    try:
+        import inspect
+        sig = inspect.signature(method)
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        if not has_var_kw:
+            filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+            return method(*args, **filtered)
+    except Exception:
+        pass
+    return method(*args, **kwargs)
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -636,6 +658,16 @@ class Orchestrator:
                 self._log(f"[memory] 🧠 Injected {len(relevant)} learned rule(s) into context")
 
         self.pinned_files = extract_mentioned_files(self.cfg.task, self.cfg.repo_dir)
+
+        # Multimodal image attachment extraction & validation
+        from core.image_handler import extract_image_references, AttachedImage
+        clean_task, img_refs, img_errors = extract_image_references(self.cfg.task, self.cfg.repo_dir)
+        self.cfg.task = clean_task
+        self.attached_images: List[AttachedImage] = list(self.cfg.attached_images or [])
+        self.attached_images.extend(img_refs)
+        for err in img_errors:
+            self._log(f"[brainfrog] ⚠️ {err}")
+
         if self.cfg.mode == "plan":
             self.cfg.auto_pr = False
 
@@ -668,6 +700,9 @@ class Orchestrator:
             self._log(f"[brainfrog] 🎯 Skill: [bold #33D17A]{self.active_skill.name}[/bold #33D17A]")
         if self.pinned_files:
             self._log(f"[brainfrog] 📌 Pinned {len(self.pinned_files)} context file(s): {', '.join(self.pinned_files.keys())}")
+        if self.attached_images:
+            names = ", ".join(f"{img.filename} ({img.size_kb:.1f} KB)" for img in self.attached_images)
+            self._log(f"[brainfrog] 🖼️ Attached {len(self.attached_images)} image(s): [bold #33D17A]{names}[/bold #33D17A]")
 
         scope = self._scope_gate()
 
@@ -675,7 +710,7 @@ class Orchestrator:
             if self.cfg.mode == "build":
                 # BUILD mode: never block the user with scope clarification.
                 # The REPL user knows their project — use full repo tree and proceed.
-                self._log("[system1/jev] scope gate: low confidence in build mode \u2014 using full repo tree")
+                self._log("[system1/jev] scope gate: low confidence in build mode — using full repo tree")
                 scope = ScopeDecision(
                     domain=None,
                     change_type=scope.change_type,
@@ -716,7 +751,14 @@ class Orchestrator:
 
             repo_files = _repo_tree(self.cfg.repo_dir)
             self._log(f"[system2/{self.s2_tag}] answering question / diagnosing ...")
-            answer = self.s2.diagnose(self.cfg.task, focus_files, domain_label, repo_tree=repo_files)
+            answer = _safe_s2_call(
+                self.s2.diagnose,
+                self.cfg.task,
+                focus_files,
+                domain_label,
+                repo_tree=repo_files,
+                images=self.attached_images,
+            )
             return [StepResult(PlanStep("0", "diagnosis", []), "diagnosed", 0, answer)]
 
         if self.cfg.mode == "plan":
@@ -742,11 +784,13 @@ class Orchestrator:
 
             repo_files = _repo_tree(self.cfg.repo_dir)
             self._log(f"[system2/{self.s2_tag}] exploring codebase & drafting PRD in Plan mode ...")
-            plan_data = self.s2.plan_and_prd(
+            plan_data = _safe_s2_call(
+                self.s2.plan_and_prd,
                 task=self.cfg.task,
                 repo_tree=repo_files,
                 focus_files=focus_files,
                 pinned_files=self.pinned_files,
+                images=self.attached_images,
             )
 
             # Generate filename & save plan doc into .brainfrog/plans/
@@ -897,11 +941,13 @@ class Orchestrator:
 
             self._log(f"[system2/{self.s2_tag}] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
             try:
-                steps = self.s2.plan_task(
+                steps = _safe_s2_call(
+                    self.s2.plan_task,
                     effective_task,
                     scope.focus_tree,
                     pinned_files=self.pinned_files,
                     plan_context=self.cfg.plan_context if effective_task == self.cfg.task else None,
+                    images=self.attached_images,
                 )
             except Exception as e:
                 if latest_plan and latest_plan.steps:
@@ -1030,7 +1076,14 @@ class Orchestrator:
             effective_task = f"{self.cfg.task}\n\n[Active Plan Context]\n{self.cfg.plan_context}"
 
         self._log(f"[system2/{self.s2_tag}] writing code ...")
-        new_files = self.s2.write_code(step, effective_task, file_contents, pinned_files=self.pinned_files)
+        new_files = _safe_s2_call(
+            self.s2.write_code,
+            step,
+            effective_task,
+            file_contents,
+            pinned_files=self.pinned_files,
+            images=self.attached_images,
+        )
         _write_files(self.cfg.repo_dir, new_files, mode=self.cfg.mode)
 
         retries = 0
