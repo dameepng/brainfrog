@@ -1,4 +1,4 @@
-"""test_context_memory.py — Unit tests for Memory Context Window tracking & OpenCode-style metrics."""
+"""test_context_memory.py — Unit tests for Context Window tracking & OpenCode-style metrics."""
 import unittest
 
 from system2.claude_client import (
