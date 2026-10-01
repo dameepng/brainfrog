@@ -4,7 +4,7 @@
 
 ---
 
-## ✨ What Makes BrainFrog Different
+## What Makes BrainFrog Different
 
 BrainFrog is not just an LLM wrapper that blindly spits out code in your terminal. It is built with rigorous oversight and end-to-end automated verification:
 
@@ -15,7 +15,7 @@ BrainFrog is not just an LLM wrapper that blindly spits out code in your termina
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
                                   [User Prompt]
@@ -73,7 +73,7 @@ BrainFrog is not just an LLM wrapper that blindly spits out code in your termina
 
 ---
 
-## 🚀 Installation & Getting Started
+## Installation & Getting Started
 
 ### 1. Prerequisites
 
@@ -138,7 +138,7 @@ bf --repo /path/to/your/project
 Quick in-REPL commands:
 - `@path/file.py` — Autocomplete repository files by typing `@` to pin file paths directly into the prompt
 - `@path/image.png` — Attach image (`.png`, `.jpg`, `.jpeg`, `.webp`) as multimodal vision content block to System 2 (Claude / Gemini)
-- `Ctrl+V` / `/paste` — Paste screenshot directly from OS clipboard and stage for the next prompt
+- `/paste` (or `Ctrl+V` if terminal passes key through) — Grab screenshot/image directly from OS clipboard and stage for the next prompt
 - `/screenshot [target]` — Capture real-time screenshot of running dev server/UI via MCP or headless browser and attach to prompt
 - `/attach <path>` — Attach an image file from disk to the prompt queue
 - `/images` / `/clear-images` — List currently staged images or clear the image queue
@@ -154,6 +154,12 @@ Quick in-REPL commands:
 - `/learn <rule>` — Teach a new rule or preference to the BrainFrog memory bank
 - `/memory` — Display all learned rules currently persisted in memory
 - `/stats` / `/cost` — Review token consumption and estimated session costs
+
+Multi-line input:
+- **`Shift+Enter`** — Insert newline without submitting (supported in terminals with extended keyboard protocols like Kitty, WezTerm, and configured terminals)
+- **`Alt+Enter`** / **`Option+Enter`** — Insert newline without submitting (universally supported across Windows Terminal, VS Code integrated terminal, iTerm2, macOS Terminal)
+- **`\` + `Enter`** — Backslash continuation: type `\` at the end of a line then press Enter to continue on a new line (universal fallback working in 100% of terminals)
+- **`Enter`** — Submit prompt (unchanged default behavior)
 
 #### Non-Interactive Mode (Single Task)
 ```bash
@@ -181,7 +187,7 @@ brainfrog \
 
 ---
 
-## 🔒 Quality & Security
+## Quality & Security
 
 This repository enforces industry-grade software engineering standards to guarantee reliability and security:
 
@@ -202,7 +208,7 @@ This repository enforces industry-grade software engineering standards to guaran
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Community contributions are warmly welcome. Please follow our standard development workflow:
 
@@ -231,6 +237,6 @@ Community contributions are warmly welcome. Please follow our standard developme
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the [MIT License](LICENSE).

@@ -40,7 +40,7 @@ from rich import box
 from rich.align import Align
 from rich.console import Console, Group
 from rich.markdown import Markdown
-from rich.panel import Panel
+
 from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
@@ -118,7 +118,7 @@ def print_banner_box(
     level: str = "info",
     title: Optional[str] = None,
 ) -> None:
-    """Print semantic notification in a thin rounded box aligned with composer."""
+    """Print semantic notification as plain styled text (no box border, no padding) for clean copy-paste."""
     styles = {
         "error":   {"color": COLOR_ERROR,   "sym": SYM_ERROR,   "default_title": "Error"},
         "warning": {"color": COLOR_WARNING, "sym": SYM_WARNING, "default_title": "Warning"},
@@ -128,20 +128,55 @@ def print_banner_box(
     cfg = styles.get(level, styles["info"])
     box_title = f"{cfg['sym']} {title or cfg['default_title']}"
 
-    cols, rows, box_w, margin, pad = get_layout_dims()
+    console.print()
+    # Title line with color (flush left for clean copy-paste)
+    console.print(Text.from_markup(f"[{cfg['color']} bold]{box_title}[/{cfg['color']} bold]"))
+    # Simple separator line (no enclosing 4-sided box border)
+    console.print(Text("─" * 40, style=cfg["color"]))
+    # Message body flush left without box border or padding
+    try:
+        body = Text.from_markup(f"[{COLOR_FG_PRIMARY}]{message}[/{COLOR_FG_PRIMARY}]")
+    except Exception:
+        body = Text(message, style=COLOR_FG_PRIMARY)
+    console.print(body)
+    console.print()
 
-    panel = Panel(
-        Text.from_markup(f"[{COLOR_FG_PRIMARY}]{message}[/{COLOR_FG_PRIMARY}]"),
-        title=f"[{cfg['color']} bold]{box_title}[/{cfg['color']} bold]",
-        title_align="left",
-        border_style=cfg["color"],
-        box=box.ROUNDED,
-        padding=(0, 1),
-        width=box_w,
-    )
-    console.print()
-    console.print(Align.center(panel) if cols > 100 else panel)
-    console.print()
+
+def _setup_multiline_key_detection() -> None:
+    """Hook prompt_toolkit parsers for best-effort Shift+Enter detection across terminal types.
+
+    1. Kitty keyboard protocol (CSI u): \\x1b[13;2u
+    2. xterm modifyOtherKeys mode 2: \\x1b[27;2;13~
+    3. VT100 sequence variant: \\x1b[13;2~
+    4. Windows Console API: KEY_EVENT_RECORD with SHIFT_PRESSED on Enter (VK_RETURN)
+    """
+    try:
+        from prompt_toolkit.input.vt100_parser import ANSI_SEQUENCES
+        from prompt_toolkit.keys import Keys
+        ANSI_SEQUENCES["\x1b[13;2u"] = (Keys.Escape, Keys.ControlM)
+        ANSI_SEQUENCES["\x1b[27;2;13~"] = (Keys.Escape, Keys.ControlM)
+        ANSI_SEQUENCES["\x1b[13;2~"] = (Keys.Escape, Keys.ControlM)
+    except Exception:
+        pass
+
+    try:
+        from prompt_toolkit.input.win32 import ConsoleInputReader
+        from prompt_toolkit.key_binding.key_processor import KeyPress
+        from prompt_toolkit.keys import Keys
+
+        if not getattr(ConsoleInputReader, "_brainfrog_shift_enter_hooked", False):
+            _orig_event = ConsoleInputReader._event_to_key_presses
+
+            def _shift_enter_event_to_key_presses(self, ev):
+                # When Shift+Enter is pressed in Win32 console, ev.VirtualKeyCode == 13 and SHIFT_PRESSED is set
+                if (ev.ControlKeyState & self.SHIFT_PRESSED) and ev.VirtualKeyCode == 13:
+                    return [KeyPress(Keys.Escape, ""), KeyPress(Keys.ControlM, "\r")]
+                return _orig_event(self, ev)
+
+            ConsoleInputReader._event_to_key_presses = _shift_enter_event_to_key_presses
+            ConsoleInputReader._brainfrog_shift_enter_hooked = True
+    except Exception:
+        pass
 
 
 def detect_shell_display() -> str:
@@ -408,23 +443,16 @@ def execute_task(
             return
         if clean.startswith("=== Step") and clean.endswith("==="):
             step_title = clean.strip("= ").strip()
-            step_box = Panel(
-                Text(step_title, style=f"bold {COLOR_FG_PRIMARY}", justify="center"),
-                box=box.ROUNDED,
-                border_style=COLOR_ACCENT,
-                padding=(0, 1),
-                width=box_w,
-            )
             console.print()
-            console.print(Align.center(step_box) if cols > 100 else step_box)
+            console.print(Text(f"▸ {step_title}", style=f"bold {COLOR_FG_PRIMARY}"))
+            console.print(Text("─" * 40, style=COLOR_ACCENT))
             console.print()
         else:
-            from rich.padding import Padding
             try:
                 txt = Text.from_markup(clean)
             except Exception:
                 txt = Text(clean, style=COLOR_FG_MUTED)
-            console.print(Padding(txt, (0, right_margin, 0, margin)))
+            console.print(txt)
 
     orchestrator = Orchestrator(
         system1,
@@ -444,30 +472,18 @@ def execute_task(
     # Render Diagnosis / Question Answer / Plan & PRD or Scope Clarification
     for r in results:
         if r.outcome == "diagnosed" and r.detail:
-            ans_panel = Panel(
-                Markdown(r.detail),
-                title=f"[{COLOR_ACCENT} bold]{SYM_ASSISTANT} BrainFrog ({chosen_model})[/{COLOR_ACCENT} bold]",
-                title_align="left",
-                box=box.ROUNDED,
-                border_style=COLOR_ACCENT,
-                padding=(1, 2),
-                width=box_w,
-            )
             console.print()
-            console.print(Align.center(ans_panel) if cols > 100 else ans_panel)
+            ans_title = Text.from_markup(f"[{COLOR_ACCENT} bold]{SYM_ASSISTANT} BrainFrog ({chosen_model})[/{COLOR_ACCENT} bold]")
+            console.print(ans_title)
+            console.print(Text("─" * 40, style=COLOR_ACCENT))
+            console.print(Markdown(r.detail))
             console.print()
         elif r.outcome == "planned" and r.detail:
-            plan_panel = Panel(
-                Markdown(r.detail),
-                title=f"[bold #4EC9B0]📋 Plan & PRD ({chosen_model})[/bold #4EC9B0]",
-                title_align="left",
-                box=box.ROUNDED,
-                border_style="#4EC9B0",
-                padding=(1, 2),
-                width=box_w,
-            )
             console.print()
-            console.print(Align.center(plan_panel) if cols > 100 else plan_panel)
+            plan_title = Text.from_markup(f"[bold #4EC9B0]📋 Plan & PRD ({chosen_model})[/bold #4EC9B0]")
+            console.print(plan_title)
+            console.print(Text("─" * 40, style="#4EC9B0"))
+            console.print(Markdown(r.detail))
             console.print()
         elif r.outcome == "needs_clarification" and r.detail:
             print_banner_box(r.detail, level="warning", title="Scope Clarification")
@@ -967,6 +983,8 @@ def run_interactive(
             "scrollbar.button": f"bg:{COLOR_ACCENT}",
         })
 
+        _setup_multiline_key_detection()
+
         kb = KeyBindings()
         from prompt_toolkit.filters import has_completions
 
@@ -981,6 +999,45 @@ def run_interactive(
                     b.apply_completion(b.complete_state.completions[0])
                 else:
                     b.complete_state = None
+
+        @kb.add("enter", filter=~has_completions)
+        def _enter_submit_handler(event):
+            """Enter submits prompt — unless line ends with backslash (continuation).
+
+            If the current line ends with '\\', strip the backslash and insert
+            a newline instead of submitting — this gives users a universal
+            fallback for multi-line input that works in ALL terminals.
+            """
+            b = event.current_buffer
+            doc = b.document
+            current_line = doc.current_line_before_cursor
+            if current_line.endswith("\\"):
+                # Backslash continuation: strip \\ and insert newline
+                b.delete_before_cursor(1)
+                b.insert_text("\n")
+            else:
+                b.validate_and_handle()
+
+        @kb.add("escape", "enter")
+        def _alt_enter_newline_handler(event):
+            """Alt+Enter (Escape then Enter): Insert newline without submitting.
+
+            This is the most universally supported multi-line key combination
+            across terminal emulators. Works reliably on Windows Terminal,
+            VS Code integrated terminal, iTerm2, Kitty, WezTerm, and most
+            xterm-compatible terminals.
+            """
+            event.current_buffer.insert_text("\n")
+
+        @kb.add("escape", "c-j")
+        def _alt_ctrl_j_newline_handler(event):
+            """Alt+Ctrl+Enter / Alt+LineFeed: Insert newline without submitting."""
+            event.current_buffer.insert_text("\n")
+
+        @kb.add("c-j")
+        def _ctrl_j_newline_handler(event):
+            """Ctrl+J (LineFeed): Insert newline without submitting."""
+            event.current_buffer.insert_text("\n")
 
         @kb.add("c-p")
         def _palette(event):
@@ -1050,6 +1107,7 @@ def run_interactive(
             style=pt_style,
             key_bindings=kb,
             complete_while_typing=True,
+            multiline=True,
             mouse_support=False,  # Prevent mouse-scroll from breaking pinned layout
         )
 
@@ -1310,6 +1368,9 @@ def run_interactive(
             ("Tab", "Ganti mode sesi Plan / Build (saat input kosong)", "Shortcut"),
             ("Ctrl+N", "Mulai sesi baru & reset context window ke 0%", "Shortcut"),
             ("Ctrl+P", "Buka bantuan perintah ini", "Shortcut"),
+            ("Shift+Enter", "Baris baru tanpa submit (terminal dgn Kitty/CSI u)", "Shortcut"),
+            ("Alt+Enter", "Sisipkan baris baru (multi-line input) tanpa submit", "Shortcut"),
+            ("\\ + Enter", "Baris baru via backslash continuation (semua terminal)", "Shortcut"),
             ("@filename", "Pin konteks file dengan popup pelengkapan otomatis", "Context"),
             ("@path/image.png", "Attach gambar (.png, .jpg, .webp) langsung ke prompt System 2", "Vision"),
             ("Ctrl+V, /paste", "Paste gambar dari clipboard & attach ke prompt berikutnya", "Vision"),
@@ -1785,10 +1846,11 @@ def run_interactive(
             if not diff:
                 diff = subprocess.run(["git", "diff", "HEAD~1"], cwd=repo_dir, capture_output=True, text=True).stdout.strip()
             if diff:
-                cols, rows, box_w, margin, pad = get_layout_dims()
-                diff_panel = Panel(Syntax(diff, "diff", theme="monokai", line_numbers=True), title=" Git Diff ", box=box.ROUNDED, border_style=COLOR_ACCENT, width=box_w)
                 console.print()
-                console.print(Align.center(diff_panel) if cols > 100 else diff_panel)
+                diff_title = Text.from_markup(f"[{COLOR_ACCENT} bold]▸ Git Diff[/{COLOR_ACCENT} bold]")
+                console.print(diff_title)
+                console.print(Text("─" * 40, style=COLOR_ACCENT))
+                console.print(Syntax(diff, "diff", theme="monokai", line_numbers=True))
                 console.print()
             else:
                 print_banner_box("Tidak ada perubahan kode yang terdeteksi (working tree clean).", level="info", title="Git Diff")
@@ -2034,16 +2096,11 @@ def run_interactive(
             rules = load_project_guidelines(repo_dir)
             if rules:
                 file_titles = ", ".join(f.name for f in files)
-                cols, rows, box_w, margin, pad = get_layout_dims()
-                rules_panel = Panel(
-                    Markdown(rules),
-                    title=f" Project Rules & Design Guidelines ({file_titles}) ",
-                    box=box.ROUNDED,
-                    border_style=COLOR_INFO,
-                    width=box_w,
-                )
+                rules_title = Text.from_markup(f"[{COLOR_INFO} bold]▸ Project Rules & Design Guidelines ({file_titles})[/{COLOR_INFO} bold]")
                 console.print()
-                console.print(Align.center(rules_panel) if cols > 100 else rules_panel)
+                console.print(rules_title)
+                console.print(Text("─" * 40, style=COLOR_INFO))
+                console.print(Markdown(rules))
                 console.print()
             else:
                 print_banner_box("Tidak ditemukan file BRAINFROG.md di proyek ini.", level="warning", title="Project Memory")
