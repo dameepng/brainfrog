@@ -1,6 +1,5 @@
 """Unit tests for TUI copy-paste UX and multi-line input support."""
 import io
-import pytest
 from rich.console import Console
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
