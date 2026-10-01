@@ -1,5 +1,6 @@
 """test_visual_inspector.py — Unit tests for Visual Inspector & Headless Screenshot Engine."""
 import base64
+import os
 import tempfile
 import unittest
 from pathlib import Path
