@@ -13,7 +13,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import anthropic
 
@@ -130,7 +130,7 @@ class UsageTracker:
 
         # 16-slot visual progress bar
         bar_len = 16
-        filled = int(round((percent / 100.0) * bar_len))
+        filled = round((percent / 100.0) * bar_len)
         filled = max(0, min(bar_len, filled))
         bar = "█" * filled + "░" * (bar_len - filled)
 
@@ -214,7 +214,7 @@ class System2Client:
             model=self.model,
             max_tokens=max_tokens,
             system=full_system,
-            messages=[{"role": "user", "content": content_blocks}],
+            messages=[{"role": "user", "content": cast(Any, content_blocks)}],
         ) as stream:
             text = stream.get_final_text()
             final_msg = stream.get_final_message()
@@ -454,7 +454,7 @@ class System2Client:
             model=self.model,
             max_tokens=MAX_OUTPUT_TOKENS,
             system=full_system,
-            messages=[{"role": "user", "content": content_blocks}],
+            messages=[{"role": "user", "content": cast(Any, content_blocks)}],
         ) as stream:
             raw = stream.get_final_text()
             final_msg = stream.get_final_message()

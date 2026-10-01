@@ -113,8 +113,12 @@ class AntigravitySystem2Client:
             f"[TASK]\n{user_content}"
         )
 
+        if not self.bin_path:
+            raise FileNotFoundError("Google Antigravity CLI ('agy.exe') not found.")
+        bin_path: str = self.bin_path
+
         cmd = [
-            self.bin_path,
+            bin_path,
             "--model", self.model,
             "--output-format", "json",
             "--dangerously-skip-permissions",

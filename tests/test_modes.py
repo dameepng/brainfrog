@@ -54,9 +54,7 @@ from system2.claude_client import System2Client
 
 
 class MockSystem1(SystemOneClient):
-    @property
-    def name(self) -> str:
-        return "mock"
+    name: str = "mock"
 
     def decide(self, state, questions):
         out = {}
