@@ -495,7 +495,7 @@ def execute_task(
         console.print()
         console.print(Align.center(summary_table) if cols > 100 else summary_table)
 
-    # Turn token & context memory footer (left-aligned with text box)
+    # Turn token & context window footer (left-aligned with text box)
     task_usage = usage_tracker.reset_task()
     provider_tag = getattr(system2, "provider_name", "claude")
     cost_str = "Google Auth (Active Session)" if provider_tag == "antigravity" else f"Est. Cost: ${task_usage.cost_usd:.4f}"
@@ -505,21 +505,21 @@ def execute_task(
         from rich.padding import Padding
         cost_line = f"⚡ Turn tokens: {task_usage.input_tokens:,} in / {task_usage.output_tokens:,} out ({task_usage.total_tokens:,} total)  ·  {cost_str}"
         ctx_status_badge = f"[{ctx_info['status_color']}]{ctx_info['bar']}[/{ctx_info['status_color']}] [{ctx_info['status_color']} bold]{ctx_info['percent']}%[/{ctx_info['status_color']} bold] ({ctx_info['tokens_k']}/{ctx_info['limit_k']})"
-        ctx_line = f"🧠 Memory Context: {ctx_status_badge}  ·  [{COLOR_FG_MUTED}]Status:[/{COLOR_FG_MUTED}] [{ctx_info['status_color']}]{ctx_info['status_label']}[/{ctx_info['status_color']}]"
+        ctx_line = f"🧠 Context Window: {ctx_status_badge}  ·  [{COLOR_FG_MUTED}]Status:[/{COLOR_FG_MUTED}] [{ctx_info['status_color']}]{ctx_info['status_label']}[/{ctx_info['status_color']}]"
 
         token_txt = Text.from_markup(f"[{COLOR_FG_MUTED}]{cost_line}[/{COLOR_FG_MUTED}]\n{ctx_line}")
         console.print()
         console.print(Padding(token_txt, (0, right_margin, 0, margin)))
         console.print()
 
-        # Alert recommendation if memory context usage reaches high threshold (>=75%)
+        # Alert recommendation if context window usage reaches high threshold (>=75%)
         if ctx_info["percent"] >= 75.0:
             warn_msg = (
-                f"⚠️  Memory context saat ini mencapai {ctx_info['percent']}% ({ctx_info['tokens']:,} / {ctx_info['limit']:,} token).\n"
+                f"⚠️  Context window saat ini mencapai {ctx_info['percent']}% ({ctx_info['tokens']:,} / {ctx_info['limit']:,} token).\n"
                 "Untuk menjaga akurasi jawaban, mencegah kelupaan instruksi, dan mempercepat respon,\n"
                 "disarankan memulai sesi baru dengan mengetik: [bold]/new[/bold] atau [bold]/reset[/bold]"
             )
-            print_banner_box(warn_msg, level="warning", title="Memory Context Warning (>75%)")
+            print_banner_box(warn_msg, level="warning", title="Context Window Warning (>75%)")
     else:
         console.print()
 
@@ -563,9 +563,9 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/domains", "List detected domain modules and paths"),
     ("/auth", "Manage and switch Google accounts for Antigravity"),
     ("/whoami", "Show active Google account & provider info"),
-    ("/new", "Start new chat session & reset memory context (0%)"),
-    ("/reset", "Reset conversation state and memory context counters"),
-    ("/context", "Display live memory context window metrics & visual bar"),
+    ("/new", "Start new chat session & reset context window (0%)"),
+    ("/reset", "Reset conversation state and context window counters"),
+    ("/context", "Display live context window metrics & visual bar"),
     ("/tokens", "View token usage breakdown and context metrics"),
     ("/clear", "Clear terminal screen"),
     ("/exit", "Exit BrainFrog session"),
@@ -965,7 +965,7 @@ def run_interactive(
 
         @kb.add("c-n")
         def _new_chat_shortcut(event):
-            """Ctrl+N: Instant new chat session & reset memory context."""
+            """Ctrl+N: Instant new chat session & reset context window."""
             event.current_buffer.text = "/new"
             event.current_buffer.validate_and_handle()
 
@@ -1266,7 +1266,7 @@ def run_interactive(
 
         commands = [
             ("Tab", "Ganti mode sesi Plan / Build (saat input kosong)", "Shortcut"),
-            ("Ctrl+N", "Mulai sesi baru & reset memory context ke 0%", "Shortcut"),
+            ("Ctrl+N", "Mulai sesi baru & reset context window ke 0%", "Shortcut"),
             ("Ctrl+P", "Buka bantuan perintah ini", "Shortcut"),
             ("@filename", "Pin konteks file dengan popup pelengkapan otomatis", "Context"),
             ("!command", "Jalankan perintah shell terminal langsung di sesi REPL", "Shell"),
@@ -1291,8 +1291,8 @@ def run_interactive(
             ("/backend [name]", "Status backend System 1 (Jev via TypeSafe Cloud API)", "System"),
             ("/domains", "Tampilkan domain modul arsitektur yang terdeteksi", "Architecture"),
             ("/init [stack]", "Auto-generate modules.json (web | node | python)", "Setup"),
-            ("/new, /reset", "Mulai sesi baru & reset memory context (0%)", "Session"),
-            ("/context, /tokens", "Lihat meteran memory context window & metrik sesi", "Metrics"),
+            ("/new, /reset", "Mulai sesi baru & reset context window (0%)", "Session"),
+            ("/context, /tokens", "Lihat meteran context window & metrik sesi", "Metrics"),
             ("/clear", "Bersihkan layar terminal dan kembali ke tampilan awal", "Session"),
             ("/exit, /quit", "Keluar dari sesi BrainFrog", "Session"),
         ]
@@ -1386,7 +1386,7 @@ def run_interactive(
             ctx = usage_tracker.get_context_info(active_model)
             print_banner_box(
                 "Sesi percakapan baru berhasil dimulai!\n"
-                f"• Memory context di-reset ke 0 token (0.0% dari {ctx['limit_k']}).\n"
+                f"• Context window di-reset ke 0 token (0.0% dari {ctx['limit_k']}).\n"
                 f"• Model aktif: [bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}] ({active_provider})\n"
                 "• Riwayat context window bersih dan siap menerima instruksi baru.",
                 level="success",
@@ -1756,7 +1756,7 @@ def run_interactive(
             table.add_row("Provider", f"{active_provider}")
             table.add_row("Model", f"{active_model}")
             table.add_row("Context Window Limit", f"{ctx['limit']:,} tokens ({ctx['limit_k']})")
-            table.add_row("Active Memory Context", f"{ctx['tokens']:,} tokens ({ctx['percent']}%)")
+            table.add_row("Active Context Window", f"{ctx['tokens']:,} tokens ({ctx['percent']}%)")
             table.add_row("Context Visual Bar", f"[{ctx['status_color']}]{ctx['bar']}[/{ctx['status_color']}]")
             table.add_row("Context Health Status", f"[{ctx['status_color']}]{ctx['status_label']}[/]")
             table.add_row("Cumulative In Tokens", f"{s.input_tokens:,}")
@@ -1773,10 +1773,10 @@ def run_interactive(
 
             if ctx["percent"] >= 75.0:
                 print_banner_box(
-                    f"⚠️  Memory context sudah terisi {ctx['percent']}% ({ctx['tokens']:,} / {ctx['limit']:,} token).\n"
+                    f"⚠️  Context window sudah terisi {ctx['percent']}% ({ctx['tokens']:,} / {ctx['limit']:,} token).\n"
                     "Disarankan menjalankan `/new` atau `/reset` untuk memulai sesi baru agar jawaban tetap optimal.",
                     level="warning",
-                    title="Memory Context Warning (>75%)",
+                    title="Context Window Warning (>75%)",
                 )
             continue
         elif lower.startswith("/preview") or lower.startswith("/shot"):
