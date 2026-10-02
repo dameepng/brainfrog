@@ -1952,3 +1952,19 @@ Base: deep black (`#0A0A0A`) with consistent green accent hue (`#33D17A`), plus 
   - Inspect `npm install` output: ensure package counters increased (e.g., *"audited N packages"* count increased or *"added N packages"* appears).
   - Alternatively, run `npm ls <package>` to confirm the module is present in the `node_modules` dependency tree.
   - If output counters **DID NOT** change after running install, the installation failed or was skipped. **FORBIDDEN** to retry builds under the false assumption that dependencies are installed.
+
+---
+
+## Proactive Suggestions (Post-Success Reflection)
+
+Setelah sebuah step selesai dengan status SUCCESS (bukan ESCALATED/FAILED), sebelum lanjut ke step berikutnya atau menutup task, evaluasi singkat: apakah ada gap, potensi improvement, atau risiko yang TERLIHAT JELAS dari hasil kerja step ini, yang BELUM diminta eksplisit oleh user di task ini?
+
+Kalau ADA dan benar-benar relevan (bukan dipaksakan/generic advice yang berlaku untuk semua project):
+- Tulis 1-3 kalimat observasi singkat, bahasa natural, format kira-kira:
+  "Catatan: [gap/observasi spesifik]. Mau sekalian saya kerjakan juga?"
+- Observasi harus SPESIFIK ke hasil kerja yang baru selesai (misal: "gambar yang baru ditambahkan masih hotlink ke Unsplash, berisiko 404 kalau URL-nya berubah/dihapus — mau sekalian saya pindahkan ke asset lokal?"), BUKAN saran generic yang bisa ditempel di task manapun (misal "pastikan untuk selalu testing dengan baik" — ini TIDAK actionable dan TIDAK boleh ditampilkan).
+
+Kalau TIDAK ADA gap yang jelas/signifikan, JANGAN memaksakan suggestion hanya demi "terlihat proaktif" — diam saja lebih baik daripada noise. Maksimal SATU suggestion per step, jangan menumpuk banyak saran sekaligus yang bikin output berantakan.
+
+JANGAN tampilkan suggestion untuk step yang statusnya ESCALATED/FAILED — fokus ke penyelesaian masalah dulu, suggestion cuma relevan setelah sesuatu benar-benar berhasil.
+

@@ -42,6 +42,7 @@ class StepResult:
     outcome: str  # "opened_pr" | "drafted_pr" | "escalated" | "abandoned"
     retries: int
     detail: str
+    suggestion: Optional[str] = None
 
 
 @dataclass
@@ -1171,9 +1172,16 @@ class Orchestrator:
                     )
 
                 visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
-                if retries > 0 or visual_fixed:
-                    self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
-                return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res)
+                diff_snippet = self._get_step_diff_snippet(new_files)
+                suggestion = self._auto_reflect(
+                    effective_task,
+                    retries,
+                    visual_fixed,
+                    output[-500:],
+                    step=step,
+                    diff_snippet=diff_snippet,
+                )
+                return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion)
 
             # Can retry if within retry budget and Jev has not flagged retries as futile
             can_retry = not retry_exceeded and retries < self.cfg.max_retries
@@ -1224,9 +1232,16 @@ class Orchestrator:
                     )
 
                 visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
-                if retries > 0 or visual_fixed:
-                    self._auto_reflect(effective_task, retries, visual_fixed, output[-500:])
-                return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res)
+                diff_snippet = self._get_step_diff_snippet(new_files)
+                suggestion = self._auto_reflect(
+                    effective_task,
+                    retries,
+                    visual_fixed,
+                    output[-500:],
+                    step=step,
+                    diff_snippet=diff_snippet,
+                )
+                return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion)
 
             if retry_exceeded or retries >= self.cfg.max_retries:
                 return StepResult(step, "abandoned", retries, "Jev assessed retry limit exceeded with no progress.")
@@ -1440,78 +1455,145 @@ class Orchestrator:
                 return False
         return False
 
+    def _get_step_diff_snippet(self, new_files: Dict[str, str], max_len: int = 2500) -> str:
+        parts = []
+        try:
+            diff_proc = _run(["git", "diff"], self.cfg.repo_dir)
+            if diff_proc.returncode == 0 and diff_proc.stdout and diff_proc.stdout.strip():
+                parts.append(diff_proc.stdout.strip())
+        except Exception:
+            pass
+
+        for path, content in new_files.items():
+            if not parts or path not in parts[0]:
+                parts.append(f"--- File: {path} ---\n{content[:600]}")
+
+        combined = "\n\n".join(parts)
+        return combined[:max_len]
+
     def _auto_reflect(
         self,
         task: str,
         retries: int,
         visual_fixed: bool,
         error_summary: str = "",
-    ) -> None:
-        """Extract lessons learned after a difficult task via System 2 reflection.
+        step: Optional[PlanStep] = None,
+        diff_snippet: str = "",
+    ) -> Optional[str]:
+        """Extract lessons learned and evaluate proactive suggestions via System 2 reflection.
 
-        Stores extracted learnings in workspace memory for future context injection.
+        1. If retries > 0 or visual_fixed: Stores extracted learnings in workspace memory.
+        2. Evaluates if there is an actionable, high-signal proactive suggestion for the user.
+        Returns suggestion string if a genuine gap/risk exists, else None.
         """
+        needs_learning = retries > 0 or visual_fixed
+        suggestion_text: Optional[str] = None
+
+        if not hasattr(self.s2, "_call"):
+            return None
+
         try:
             from core.memory import (
                 generate_reflection_prompt,
+                generate_proactive_suggestion_prompt,
+                is_generic_suggestion,
                 load_workspace_memory,
                 save_workspace_memory,
                 add_learning,
             )
 
-            prompt = generate_reflection_prompt(task, retries, visual_fixed, error_summary)
-            self._log("[memory] 🧠 Extracting lessons learned from this session ...")
+            step_desc = step.description if step else task
 
-            # Use System 2 to generate structured reflection
-            system_msg = (
-                "You are a software engineering mentor. Analyze what went wrong "
-                "and extract concise, actionable lessons. Respond in JSON only."
-            )
-            try:
-                raw = self.s2._call(system_msg, prompt, max_tokens=1000)
-            except Exception:
-                # Fallback: create a generic learning from retries/visual info
-                raw = None
+            if needs_learning:
+                prompt = generate_reflection_prompt(
+                    task,
+                    retries,
+                    visual_fixed,
+                    error_summary,
+                    include_proactive=True,
+                    step_desc=step_desc,
+                    diff_snippet=diff_snippet,
+                )
+                self._log("[memory] 🧠 Extracting lessons learned from this session ...")
+                system_msg = (
+                    "You are a software engineering mentor and senior architect performing post-task reflection. "
+                    "Analyze what went wrong, extract lessons learned, and evaluate proactive suggestions. "
+                    "Respond in JSON only."
+                )
+                try:
+                    raw = self.s2._call(system_msg, prompt, max_tokens=1000)
+                except Exception:
+                    raw = None
+            else:
+                prompt = generate_proactive_suggestion_prompt(
+                    task,
+                    step_desc=step_desc,
+                    diff_snippet=diff_snippet,
+                )
+                system_msg = (
+                    "You are a senior software architect performing post-task reflection on a successfully completed step. "
+                    "Evaluate if there is an obvious, specific gap, potential improvement, or risk in the completed work, "
+                    "or remain silent if the work is clean and complete. "
+                    "Respond in JSON only."
+                )
+                try:
+                    raw = self.s2._call(system_msg, prompt, max_tokens=350)
+                except Exception:
+                    raw = None
 
             store = load_workspace_memory(self.cfg.repo_dir)
             learned_count = 0
 
             if raw:
-                # Parse JSON response with auto-repair
                 try:
                     data = extract_json(raw)
-                    for item in data.get("learnings", []):
-                        rule = item.get("rule", "").strip()
-                        tags = item.get("tags", [])
-                        if rule:
-                            add_learning(
-                                store,
-                                rule=rule,
-                                source="reflection",
-                                context=f"Task: {task[:100]}",
-                                tags=tags if tags else None,
-                                repo_name=self.cfg.repo_dir.name,
-                            )
-                            learned_count += 1
+                    if needs_learning:
+                        for item in data.get("learnings", []):
+                            rule = item.get("rule", "").strip()
+                            tags = item.get("tags", [])
+                            if rule:
+                                add_learning(
+                                    store,
+                                    rule=rule,
+                                    source="reflection",
+                                    context=f"Task: {task[:100]}",
+                                    tags=tags if tags else None,
+                                    repo_name=self.cfg.repo_dir.name,
+                                )
+                                learned_count += 1
+
+                    raw_sug = data.get("suggestion")
+                    if isinstance(raw_sug, str):
+                        clean_sug = raw_sug.strip()
+                        if (
+                            clean_sug
+                            and clean_sug.lower() not in ("null", "none", "false", "")
+                            and not is_generic_suggestion(clean_sug)
+                        ):
+                            suggestion_text = clean_sug
                 except Exception:
                     pass
 
-            # Fallback: if no structured reflection, store a generic one
-            if learned_count == 0 and retries > 0:
-                add_learning(
-                    store,
-                    rule=f"Task '{task[:60]}...' required {retries} retries — double-check test expectations before writing.",
-                    source="reflection",
-                    context=f"Auto-generated after {retries} retries",
-                    repo_name=self.cfg.repo_dir.name,
-                )
-                learned_count = 1
+            if needs_learning:
+                if learned_count == 0 and retries > 0:
+                    add_learning(
+                        store,
+                        rule=f"Task '{task[:60]}...' required {retries} retries — double-check test expectations before writing.",
+                        source="reflection",
+                        context=f"Auto-generated after {retries} retries",
+                        repo_name=self.cfg.repo_dir.name,
+                    )
+                    learned_count = 1
 
-            if learned_count > 0:
-                save_workspace_memory(store, self.cfg.repo_dir)
-                self._log(f"[memory] 💾 Stored {learned_count} new lesson(s) in workspace memory")
+                if learned_count > 0:
+                    save_workspace_memory(store, self.cfg.repo_dir)
+                    self._log(f"[memory] 💾 Stored {learned_count} new lesson(s) in workspace memory")
+
+            return suggestion_text
         except Exception as e:
-            self._log(f"[memory] ⚠️ Auto-reflection failed ({e}), continuing without saving")
+            if needs_learning:
+                self._log(f"[memory] ⚠️ Auto-reflection failed ({e}), continuing without saving")
+            return None
 
     def _finalize_pr(
         self,
@@ -1520,6 +1602,7 @@ class Orchestrator:
         test_output: str,
         sensitive: bool = False,
         gate_result: Optional[Any] = None,
+        suggestion: Optional[str] = None,
     ) -> StepResult:
         if self.cfg.mode == "plan":
             raise PermissionError("Pembuatan commit atau pull request dilarang dalam mode Plan.")
@@ -1639,7 +1722,7 @@ class Orchestrator:
                 f"Title: {pr_copy['title']}\nBody:\n{pr_copy['body']}"
             )
             self._log("[orchestrator] " + detail)
-        return StepResult(step, "opened_pr" if auto_ok else "drafted_pr", retries, detail)
+        return StepResult(step, "opened_pr" if auto_ok else "drafted_pr", retries, detail, suggestion=suggestion)
 
     def _open_pr(
         self,

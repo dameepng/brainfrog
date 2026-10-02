@@ -515,6 +515,14 @@ def execute_task(
         console.print()
         console.print(Align.center(summary_table) if cols > 100 else summary_table)
 
+        # Render Proactive Suggestions (Post-Success Reflection)
+        for r in results:
+            if r.outcome in ("opened_pr", "drafted_pr") and getattr(r, "suggestion", None):
+                console.print()
+                step_suffix = f" (Step {r.step.id})" if len(results) > 1 else ""
+                console.print(Text.from_markup(f"[bold #FFB454]💡 Saran Proaktif{step_suffix}:[/bold #FFB454]"))
+                console.print(Text(f"  {r.suggestion}", style=COLOR_FG_PRIMARY))
+
     # Turn token & context window footer (left-aligned with text box)
     task_usage = usage_tracker.reset_task()
     provider_tag = getattr(system2, "provider_name", "claude")
