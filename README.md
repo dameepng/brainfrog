@@ -269,8 +269,13 @@ REMOTE_CHANNEL   RESTRICTED         Safe execution only: queries, memory reads, 
 
 ### Pre-Runtime Gate & Session Isolation
 1. **Pre-Runtime Allowlist**: Every remote channel requires explicit allowlisting (`TELEGRAM_ALLOWED_USERS`, `WHATSAPP_ALLOWED_USERS`). If the allowlist is empty or the sender is not on the list, incoming messages are discarded with a security audit event before entering the runtime.
-2. **Session Scoping**: Sessions are strictly keyed by `channel:user_id:conversation_id` (e.g., `telegram:12345678:12345678`, `cli:local:default`). Cross-session context leakage is architecturally prohibited.
+2. **Session Scoping**: Sessions are strictly keyed by `channel:user_id:conversation_id` (e.g., `telegram:12345678:12345678`, `whatsapp:1234567890:1234567890`, `cli:local:default`). Cross-session context leakage is architecturally prohibited.
 3. **System 1 Intent Triage**: System 1 evaluates intent risk before delegating execution to the Orchestrator. Remote actions that violate permission boundaries return clear, non-leaking rejection messages.
+4. **WhatsApp Channel Parity (Phase 12)**:
+   - **Pluggable Transports**: Supports deterministic `MockWhatsAppTransport` (for offline unit/E2E testing) and `WhatsAppCloudTransport` (official Meta Graph API).
+   - **Delivery & Chunking**: Long responses exceeding 4,000 characters are automatically split and delivered as sequentially ordered messages without content truncation.
+   - **Deterministic Security**: WhatsApp remote execution is constrained by the same runtime security boundary used by other remote channels and covered by automated E2E regression tests.
+   - **Offline & Live Testing**: The test suite executes 100% offline without requiring credentials. Optional live WhatsApp smoke tests can be enabled with `BRAINFROG_WHATSAPP_LIVE=1`.
 
 ---
 

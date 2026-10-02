@@ -177,8 +177,10 @@ def classify_request_action(
         return PermissionAction.SHELL_EXECUTION
 
     shell_patterns = [
-        r"\b(?:run|execute|call)\s+(?:pytest|test|tests|npm|bash|sh|cmd|powershell|pwsh|python|node|cargo|go|make|script)\b",
-        r"\b(?:use|open)\s+(?:the\s+)?(?:terminal|shell|console|command\s+line)\b",
+        r"\b(?:run|execute|call|jalankan|eksekusi)\s+(?:pytest|test|tests|npm|bash|sh|cmd|powershell|pwsh|python|node|cargo|go|make|script)\b",
+        r"\b(?:use|open|buka)\s+(?:the\s+|a\s+)?(?:terminal|shell|console|command\s+line)\b",
+        r"\b(?:run|execute|jalankan|eksekusi)\s+(?:this\s+|a\s+)?shell(?:\s+command)?\b",
+        r"\b(?:jalankan|eksekusi)\s+(?:perintah\s+)?(?:shell|terminal|bash|sh|cmd|powershell)\b",
         r"\bexecute\s+git\s+status\b",
         r"\brun\s+(?:the\s+)?build\s+command\b",
         r"\brun\s+(?:a\s+)?shell\b",
@@ -190,8 +192,9 @@ def classify_request_action(
     # 2. Destructive git & destructive filesystem
     destructive_patterns = [
         r"\bgit\s+(?:reset\s+--hard|push\s+(?:--force|-f)|clean\s+-fd|branch\s+-D)\b",
-        r"\b(?:delete|destroy|remove|wipe)\s+(?:the\s+)?(?:project|repo|repository|codebase|all\s+files)\b",
+        r"\b(?:delete|destroy|remove|wipe|hapus|hancurkan)\s+(?:the\s+)?(?:project|repo|repository|codebase|all\s+files)\b",
         r"\brm\s+-rf\b",
+        r"\bforce\s+push\b",
         r"\bdelete\s+the\s+project\s+repository\b",
     ]
     for pat in destructive_patterns:
@@ -200,8 +203,8 @@ def classify_request_action(
 
     # 3. Credential access
     cred_patterns = [
-        r"\b(?:show|read|print|get|reveal|leak|display|cat)\s+(?:me\s+)?(?:the\s+)?(?:.*?)?(?:api[_\s]?key|secret|token|password|credentials?|\.env|env\s+vars?|environment\s+variables?)\b",
-        r"\b(?:what\s+is|show)\s+(?:the\s+)?(?:telegram\s+bot\s+token|openai\s+api\s+key|anthropic\s+api\s+key)\b",
+        r"\b(?:show|read|print|get|reveal|leak|display|cat|tampilkan|lihat)\s+(?:me\s+)?(?:the\s+)?(?:.*?)?(?:api[_\s]?key|secret|token|password|credentials?|\.env|env\s+vars?|environment\s+variables?)\b",
+        r"\b(?:what\s+is|show|apa)\s+(?:the\s+)?(?:telegram\s+bot\s+token|whatsapp\s+access\s+token|openai\s+api\s+key|anthropic\s+api\s+key|bot\s+token)\b",
         r"\bread\s+\.env\b",
         r"\bprint\s+environment\s+variables\b",
         r"\bshow\s+telegram\s+bot\s+token\b",
@@ -212,7 +215,7 @@ def classify_request_action(
 
     # 4. Deployment
     deploy_patterns = [
-        r"\b(?:deploy|push\s+to\s+production|push\s+the\s+production|restart\s+production|restart\s+prod|deploy\s+the\s+project)\b",
+        r"\b(?:deploy|push\s+to\s+production|push\s+the\s+production|restart\s+production|restart\s+prod|deploy\s+the\s+project|deploy\s+aplikasi)\b",
         r"\bdeploy\s+the\s+project\b",
         r"\bpush\s+the\s+production\s+build\b",
     ]
@@ -222,7 +225,7 @@ def classify_request_action(
 
     # 5. File modifications / code mutation / deletions
     write_patterns = [
-        r"\b(?:modify|edit|update|rewrite|create|write|delete|remove)\s+(?:the\s+)?(?:file|files|src\/|app\/|code|temporary\s+files|temp\s+files|[a-zA-Z0-9_\-\.\/]+\.(?:py|js|ts|json|html|css|yaml|yml|md|txt))\b",
+        r"\b(?:modify|edit|update|rewrite|create|write|delete|remove|ubah|hapus|ganti)\s+(?:the\s+)?(?:file|files|src\/|app\/|code|temporary\s+files|temp\s+files|[a-zA-Z0-9_\-\.\/]+\.(?:py|js|ts|json|html|css|yaml|yml|md|txt))\b",
         r"\b(?:create\s+a\s+new\s+file|rewrite\s+this\s+configuration|apply\s+the\s+requested\s+code\s+changes|delete\s+the\s+temporary\s+files)\b",
     ]
     for pat in write_patterns:
