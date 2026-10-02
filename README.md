@@ -274,6 +274,87 @@ REMOTE_CHANNEL   RESTRICTED         Safe execution only: queries, memory reads, 
 
 ---
 
+## Persistent Runtime State & Session Recovery
+
+BrainFrog provides deterministic, filesystem-backed session persistence so conversation continuity survives daemon restarts and process termination without requiring any external database services.
+
+```
+Incoming Message
+      │
+      ▼
+   Channel (Telegram / WhatsApp / CLI)
+      │
+      ▼
+BrainFrogRuntime
+      │
+      ▼
+SessionManager (Thread-safe with RLock)
+      │
+      ▼
+SessionStore (FileSessionStore / InMemorySessionStore)
+      │
+      ▼
+.brainfrog/sessions/<sha256_hash>.json
+```
+
+### 1. Storage Location & Naming
+- **Session Files**: Stored within the repository at `.brainfrog/sessions/`.
+- **Safe Filenames**: Session IDs (`<channel>:<user_id>:<conversation_id>`) are hashed using SHA-256 (`hashlib.sha256(session_id).hexdigest()[:32] + ".json"`). Raw user/channel inputs never touch the filesystem directly, making path traversal (`../../evil`, drive letters, control characters) mathematically impossible.
+- **Git Guard Defense**: `.brainfrog/sessions/` is protected in `security/git_guard.py`, automatically ensured in `.gitignore`, and purged from git tracking if accidentally staged.
+
+### 2. Schema Specification (Version 1)
+```json
+{
+  "schema_version": 1,
+  "session_id": "telegram:12345678:12345678",
+  "channel": "telegram",
+  "user_id": "12345678",
+  "conversation_id": "12345678",
+  "created_at": 1790968179.698,
+  "last_active_at": 1790968185.120,
+  "active_mode": "build",
+  "active_skill": null,
+  "active_model": "claude-3-7-sonnet-20250219",
+  "active_provider": "claude",
+  "plan_context": null,
+  "metadata": {},
+  "history": [
+    {
+      "role": "user",
+      "content": "My name for this conversation is BrainFrog.",
+      "timestamp": 1790968179.700
+    },
+    {
+      "role": "assistant",
+      "content": "Understood! I will remember that.",
+      "timestamp": 1790968185.120
+    }
+  ]
+}
+```
+
+### 3. Atomic Writes & Platform Compatibility
+- Writes are executed via a temporary file in the same directory (`.tmp_<hash>_<uuid>.json`), flushed, fsynced to disk, and atomically swapped into place using `os.replace`.
+- Fully compatible with POSIX and Windows filesystem semantics (preventing race conditions and zero-byte file states during unexpected process termination).
+
+### 4. Crash & Corruption Recovery
+- **Quarantine Policy**: If a session file contains truncated data, invalid JSON, or missing required fields, it is safely moved to `.brainfrog/sessions/corrupt/<timestamp>_<filename>` for post-mortem analysis.
+- **Zero Daemon Crash**: The runtime logs an audit warning and transparently initializes a clean session state. Corrupted files never crash the gateway or expose error internals to remote users.
+- **Schema Safety**: If a file has an unsupported schema version (`> CURRENT_SESSION_SCHEMA_VERSION`), it is safely preserved and ignored rather than overwritten or misparsed.
+
+### 5. Multi-Session Isolation & Security
+- **Strict Isolation**: Distinct channel/user/chat identifiers produce distinct hashes and files. User A on Chat 1 cannot access User B or User A's Chat 2 history.
+- **Secret Scrubbing on Disk**: Even if sensitive tokens or keys appear in user prompts or tool responses, `scrub_secrets()` redacts them (`sk-...XXXX`, bot tokens, bearer headers) before data is serialized to disk.
+- **Remote Read-Only Invariant**: Persistence operates strictly on internal runtime metadata files in `.brainfrog/sessions/`. It cannot be leveraged by remote commands to modify workspace code or project files.
+
+### 6. Reset & Lifecycle Behavior
+- **Reset Command (`/reset`, `/new`)**: Purges the active session state from memory and deletes the persisted `.json` file from disk. The next message starts with a clean slate.
+- **Channel Defaults**:
+  - **Telegram & WhatsApp Gateway**: Persistent by default (`persist_sessions=True`). Full conversation continuity across daemon restarts.
+  - **Interactive CLI**: Ephemeral by default (each fresh terminal invocation starts with a clean context, while in-session REPL turns are preserved until `/reset`, `/new`, or terminal exit).
+
+---
+
 ## Quality & Security
 
 This repository enforces industry-grade software engineering standards to guarantee reliability and security:

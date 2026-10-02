@@ -25,31 +25,15 @@ from .permissions import (
     evaluate_channel_action,
     get_default_policy,
 )
-from .session import SessionManager, SessionState, session_manager
-
-
-def scrub_secrets(text: str) -> str:
-    """Scrub sensitive keys, tokens, and credentials from outgoing text."""
-    if not text:
-        return text
-    import re
-    # Known secret environment variables
-    secret_env_vars = [
-        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN",
-        "TYPESAFE_API_KEY", "WHATSAPP_API_TOKEN", "CUSTOM_API_KEY",
-        "OPENROUTER_API_KEY", "GH_TOKEN", "GITHUB_TOKEN",
-    ]
-    scrubbed = text
-    for var in secret_env_vars:
-        val = os.environ.get(var)
-        if val and len(val) >= 6:
-            scrubbed = scrubbed.replace(val, f"[{var}_REDACTED]")
-
-    # Generic patterns for API keys and tokens
-    scrubbed = re.sub(r"sk-[a-zA-Z0-9_\-]{20,}", "[REDACTED_API_KEY]", scrubbed)
-    scrubbed = re.sub(r"\b\d{8,11}:[A-Za-z0-9_-]{30,40}\b", "[REDACTED_BOT_TOKEN]", scrubbed)
-    scrubbed = re.sub(r"(?i)\bBearer\s+[a-zA-Z0-9_\-\.]{8,}\b", "Bearer [REDACTED_TOKEN]", scrubbed)
-    return scrubbed
+from .session import (
+    FileSessionStore,
+    InMemorySessionStore,
+    SessionManager,
+    SessionState,
+    SessionStore,
+    scrub_secrets,
+    session_manager,
+)
 
 
 class BrainFrogRuntime:
@@ -68,16 +52,27 @@ class BrainFrogRuntime:
         default_model: Optional[str] = None,
         default_test_cmd: Optional[str] = None,
         sessions: Optional[SessionManager] = None,
+        session_store: Optional[SessionStore] = None,
         policy_provider: Optional[Callable[[str], PermissionPolicy]] = None,
         system1_factory: Optional[Callable[[str], Any]] = None,
         system2_factory: Optional[Callable[..., Any]] = None,
+        persist_sessions: bool = True,
     ) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
         self.default_backend = default_backend
         self.default_provider = default_provider
         self.default_model = default_model
         self.default_test_cmd = default_test_cmd
-        self.sessions = sessions or session_manager
+
+        if sessions is not None:
+            self.sessions = sessions
+        elif session_store is not None:
+            self.sessions = SessionManager(store=session_store)
+        elif persist_sessions:
+            self.sessions = SessionManager(store=FileSessionStore(repo_dir=self.repo_dir))
+        else:
+            self.sessions = session_manager
+
         self.policy_provider = policy_provider or get_default_policy
         self.system1_factory = system1_factory or get_system1
         self.system2_factory = system2_factory or System2Client
@@ -175,7 +170,7 @@ class BrainFrogRuntime:
                 return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
 
             if cmd in ("/reset", "/new"):
-                session.reset()
+                self.sessions.reset(session.session_id)
                 return OutgoingMessage(text="🔄 Session context has been reset.", events=events, success=True, status="completed")
 
             if cmd in ("/undo", "/diff", "/preview", "/screenshot", "/paste", "/attach", "/images", "/clear-images"):
@@ -338,8 +333,9 @@ class BrainFrogRuntime:
 
         final_text = scrub_secrets("\n\n".join(reply_texts).strip() or "Task completed.")
 
-        # Record in isolated session history
+        # Record in isolated session history and persist
         session.record_interaction(user_text=raw_text, assistant_text=final_text)
+        self.sessions.save(session)
 
         return OutgoingMessage(
             text=final_text,

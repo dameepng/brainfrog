@@ -32,7 +32,7 @@ class TestRuntimeBoundary(unittest.TestCase):
         self.assertEqual(len(s_user2.history), 1)
 
     def test_remote_shell_execution_rejected(self):
-        runtime = BrainFrogRuntime(repo_dir=Path.cwd())
+        runtime = BrainFrogRuntime(repo_dir=Path.cwd(), persist_sessions=False)
         msg = IncomingMessage(
             text="!rm -rf /",
             channel="telegram",
@@ -54,7 +54,7 @@ class TestRuntimeBoundary(unittest.TestCase):
         ]
         mock_orch_cls.return_value = mock_orch
 
-        runtime = BrainFrogRuntime(repo_dir=Path.cwd())
+        runtime = BrainFrogRuntime(repo_dir=Path.cwd(), persist_sessions=False)
         msg = IncomingMessage(
             text="How does auth work?",
             channel="cli",
