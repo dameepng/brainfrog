@@ -48,6 +48,7 @@ def scrub_secrets(text: str) -> str:
     # Generic patterns for API keys and tokens
     scrubbed = re.sub(r"sk-[a-zA-Z0-9_\-]{20,}", "[REDACTED_API_KEY]", scrubbed)
     scrubbed = re.sub(r"\b\d{8,11}:[A-Za-z0-9_-]{30,40}\b", "[REDACTED_BOT_TOKEN]", scrubbed)
+    scrubbed = re.sub(r"(?i)\bBearer\s+[a-zA-Z0-9_\-\.]{8,}\b", "Bearer [REDACTED_TOKEN]", scrubbed)
     return scrubbed
 
 
@@ -68,6 +69,8 @@ class BrainFrogRuntime:
         default_test_cmd: Optional[str] = None,
         sessions: Optional[SessionManager] = None,
         policy_provider: Optional[Callable[[str], PermissionPolicy]] = None,
+        system1_factory: Optional[Callable[[str], Any]] = None,
+        system2_factory: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
         self.default_backend = default_backend
@@ -76,6 +79,8 @@ class BrainFrogRuntime:
         self.default_test_cmd = default_test_cmd
         self.sessions = sessions or session_manager
         self.policy_provider = policy_provider or get_default_policy
+        self.system1_factory = system1_factory or get_system1
+        self.system2_factory = system2_factory or System2Client
 
     def _resolve_test_cmd(self, custom_cmd: Optional[str]) -> List[str]:
         if custom_cmd:
@@ -130,6 +135,60 @@ class BrainFrogRuntime:
         requested_mode = message.metadata.get("mode") or session.active_mode
 
         raw_text = message.text.strip()
+
+        # Handle slash commands for remote/all channels
+        if raw_text.startswith("/"):
+            parts = raw_text.split(maxsplit=1)
+            cmd = parts[0].lower()
+
+            if cmd in ("/help", "/start"):
+                help_text = (
+                    "🐸 **BrainFrog Agent Runtime**\n\n"
+                    "Available commands:\n"
+                    "• `/help` — Show available commands and instructions\n"
+                    "• `/status` — View active session and runtime diagnostics\n"
+                    "• `/doctor` — Run comprehensive system & configuration check\n"
+                    "• `/reset` or `/new` — Reset current conversation session\n\n"
+                    "💡 You can query the repository, request architecture analysis, or generate plans.\n"
+                    "⚠️ Local CLI commands (`/undo`, `/diff`, `/preview`, `/screenshot`, `/paste`, shell execution) are restricted to local CLI."
+                )
+                return OutgoingMessage(text=help_text, events=events, success=True, status="completed")
+
+            if cmd in ("/status", "/info"):
+                status_text = (
+                    f"🐸 **BrainFrog Status**\n"
+                    f"• Channel: `{effective_channel}`\n"
+                    f"• Session ID: `{session.session_id}`\n"
+                    f"• Active Mode: `{session.active_mode}`\n"
+                    f"• History Turns: `{len(session.history)}`\n"
+                    f"• Trust Level: `{policy.trust_level}`"
+                )
+                return OutgoingMessage(text=status_text, events=events, success=True, status="completed")
+
+            if cmd in ("/doctor", "/diagnose"):
+                from .doctor import run_doctor_diagnostics
+                checks = run_doctor_diagnostics(self.repo_dir)
+                lines = ["🐸 **BrainFrog Doctor Diagnostics:**\n"]
+                for c in checks:
+                    icon = "✅" if c.status == "OK" else ("⚠️" if c.status == "WARN" else ("❌" if c.status == "FAIL" else "ℹ️"))
+                    lines.append(f"{icon} **[{c.category}]** {c.name}: {c.detail}")
+                return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
+
+            if cmd in ("/reset", "/new"):
+                session.reset()
+                return OutgoingMessage(text="🔄 Session context has been reset.", events=events, success=True, status="completed")
+
+            if cmd in ("/undo", "/diff", "/preview", "/screenshot", "/paste", "/attach", "/images", "/clear-images"):
+                reason = f"Command '{cmd}' is only available in the local CLI interface."
+                emit("agent.rejected", {"command": cmd, "reason": reason})
+                return OutgoingMessage(
+                    text=f"⚠️ {reason}",
+                    events=events,
+                    success=False,
+                    status="rejected",
+                    error=reason,
+                )
+
         action = classify_request_action(raw_text, message.metadata)
 
         allowed, reason = evaluate_channel_action(
@@ -176,14 +235,14 @@ class BrainFrogRuntime:
 
         # 4. Instantiate System 1 & System 2 Clients
         try:
-            s1 = get_system1(backend)
+            s1 = self.system1_factory(backend)
         except Exception as e:
             err_msg = f"System 1 Initialization Error: {e}"
             emit("agent.error", {"error": err_msg})
             return OutgoingMessage(text=f"❌ {err_msg}", events=events, success=False, error=err_msg)
 
         try:
-            s2 = System2Client(model=model, provider=provider)
+            s2 = self.system2_factory(model=model, provider=provider)
         except Exception as e:
             err_msg = f"System 2 Initialization Error: {e}"
             emit("agent.error", {"error": err_msg})
@@ -192,9 +251,22 @@ class BrainFrogRuntime:
         # 5. Load Domains & Prepare Orchestrator Config
         can_auto_create = bool(effective_mode == "build" and policy.allow_code_edits)
         domains = load_module_map(workspace_dir, task=raw_text, auto_create=can_auto_create)
+
+        effective_task = raw_text
+        if session.history:
+            history_lines = []
+            for turn in session.history[-3:]:
+                u_text = turn.get("user", "").strip()
+                a_text = turn.get("assistant", "").strip()
+                if len(a_text) > 300:
+                    a_text = a_text[:300] + "..."
+                history_lines.append(f"User: {u_text}\nAssistant: {a_text}")
+            if history_lines:
+                effective_task = f"{raw_text}\n\n[Previous Conversation Context]\n" + "\n---\n".join(history_lines)
+
         cfg = RunConfig(
             repo_dir=workspace_dir,
-            task=raw_text,
+            task=effective_task,
             test_command=test_cmd_list,
             max_retries=max_retries,
             auto_pr=auto_pr,

@@ -37,3 +37,7 @@ search-path = [".github/scripts"]
 [tool.pyright]
 extraPaths = [".github/scripts"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+

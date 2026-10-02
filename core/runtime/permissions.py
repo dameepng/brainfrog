@@ -220,16 +220,24 @@ def classify_request_action(
         if re.search(pat, clean):
             return PermissionAction.DEPLOYMENT
 
-    # 5. File modifications / code mutation
+    # 5. File modifications / code mutation / deletions
     write_patterns = [
-        r"\b(?:modify|edit|update|rewrite|create|write)\s+(?:file|src\/|app\/|code|configuration|[a-zA-Z0-9_\-\.\/]+\.(?:py|js|ts|json|html|css|yaml|yml|md|txt))\b",
-        r"\b(?:create\s+a\s+new\s+file|rewrite\s+this\s+configuration|apply\s+the\s+requested\s+code\s+changes)\b",
+        r"\b(?:modify|edit|update|rewrite|create|write|delete|remove)\s+(?:the\s+)?(?:file|files|src\/|app\/|code|temporary\s+files|temp\s+files|[a-zA-Z0-9_\-\.\/]+\.(?:py|js|ts|json|html|css|yaml|yml|md|txt))\b",
+        r"\b(?:create\s+a\s+new\s+file|rewrite\s+this\s+configuration|apply\s+the\s+requested\s+code\s+changes|delete\s+the\s+temporary\s+files)\b",
     ]
     for pat in write_patterns:
         if re.search(pat, clean):
             return PermissionAction.WRITE_CODE
 
-    # 6. Fallback based on question vs plan vs read
+    # 6. Git operations (commit, checkout, staging)
+    git_patterns = [
+        r"\b(?:git\s+commit|git\s+add|git\s+checkout|commit\s+(?:the\s+)?changes?|make\s+a\s+commit)\b",
+    ]
+    for pat in git_patterns:
+        if re.search(pat, clean):
+            return PermissionAction.GIT_SAFE_OPS
+
+    # 7. Fallback based on question vs plan vs read
     if clean.endswith("?") or any(clean.startswith(w) for w in ("how ", "what ", "why ", "explain ", "describe ", "list ")):
         return PermissionAction.DIAGNOSE
 

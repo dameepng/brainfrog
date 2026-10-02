@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import requests
@@ -21,6 +22,29 @@ from core.runtime.messages import IncomingMessage, OutgoingMessage
 from .base import BaseChannel, MessageHandler
 
 TELEGRAM_MAX_MSG_LEN = 4000
+
+
+class TelegramTransport(ABC):
+    """Abstract transport for delivering messages to Telegram."""
+
+    @abstractmethod
+    def send(self, chat_id: str, text: str) -> bool:
+        """Send a message chunk to the specified Telegram chat ID."""
+        raise NotImplementedError
+
+
+class MockTelegramTransport(TelegramTransport):
+    """Deterministic in-memory transport for testing Telegram message delivery without credentials."""
+
+    def __init__(self) -> None:
+        self.sent_messages: List[Dict[str, str]] = []
+
+    def send(self, chat_id: str, text: str) -> bool:
+        self.sent_messages.append({"chat_id": str(chat_id), "text": text})
+        return True
+
+    def clear(self) -> None:
+        self.sent_messages.clear()
 
 
 class TelegramChannel(BaseChannel):
@@ -34,10 +58,12 @@ class TelegramChannel(BaseChannel):
         allowed_users: Optional[List[str | int] | Set[str | int]] = None,
         rate_limit_seconds: float = 1.0,
         poll_interval: float = 2.0,
+        transport: Optional[TelegramTransport] = None,
     ) -> None:
         self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         self.rate_limit_seconds = rate_limit_seconds
         self.poll_interval = poll_interval
+        self.transport = transport
 
         # Parse allowlist
         self.allowed_users: Set[str] = set()
@@ -82,6 +108,8 @@ class TelegramChannel(BaseChannel):
         return False
 
     def _check_rate_limit(self, user_id: str) -> bool:
+        if self.rate_limit_seconds <= 0.0:
+            return True
         now = time.time()
         last = self._last_user_time.get(user_id, 0.0)
         if (now - last) < self.rate_limit_seconds:
@@ -113,13 +141,13 @@ class TelegramChannel(BaseChannel):
                 "Hubungi administrator untuk menambahkan ID Anda ke `TELEGRAM_ALLOWED_USERS`."
             )
             self._send_text(chat_id, unauthorized_msg)
-            return OutgoingMessage(text="Unauthorized", success=False, error="User not allowlisted")
+            return OutgoingMessage(text="Unauthorized", success=False, status="rejected", error="User not allowlisted")
 
         # 2. Rate Limiting Check
         if not self._check_rate_limit(user_id):
             rate_msg = "⏳ Terlalu cepat. Harap tunggu sebentar sebelum mengirim pesan berikutnya."
             self._send_text(chat_id, rate_msg)
-            return OutgoingMessage(text="Rate limited", success=False, error="Rate limit exceeded")
+            return OutgoingMessage(text="Rate limited", success=False, status="rejected", error="Rate limit exceeded")
 
         # 3. Create Normalized IncomingMessage
         incoming = IncomingMessage(
@@ -150,14 +178,19 @@ class TelegramChannel(BaseChannel):
         return out
 
     def _send_text(self, chat_id: str, text: str) -> bool:
-        if not self.bot_token:
+        if not self.bot_token and not self.transport:
             return False
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         chunks = [text[i : i + TELEGRAM_MAX_MSG_LEN] for i in range(0, len(text), TELEGRAM_MAX_MSG_LEN)]
         all_ok = True
 
         for chunk in chunks:
+            if self.transport:
+                ok = self.transport.send(chat_id, chunk)
+                all_ok = all_ok and ok
+                continue
+
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
             payload = {
                 "chat_id": chat_id,
                 "text": chunk,
@@ -178,6 +211,33 @@ class TelegramChannel(BaseChannel):
     def send(self, message: OutgoingMessage, destination: str) -> bool:
         return self._send_text(destination, message.text)
 
+    def simulate_incoming(
+        self,
+        chat_id: str,
+        user_id: str,
+        text: str,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        update_id: int = 1,
+    ) -> Optional[OutgoingMessage]:
+        """Convenience method for testing: simulate an update arriving from Telegram."""
+        update = {
+            "update_id": update_id,
+            "message": {
+                "from": {
+                    "id": user_id,
+                    "username": username or f"user_{user_id}",
+                    "first_name": first_name or "TestUser",
+                },
+                "chat": {
+                    "id": chat_id,
+                    "type": "private",
+                },
+                "text": text,
+            },
+        }
+        return self.process_update(update)
+
     def _poll_worker(self) -> None:
         url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
         while not self._stop_event.is_set():
@@ -196,18 +256,20 @@ class TelegramChannel(BaseChannel):
             time.sleep(self.poll_interval)
 
     def start(self) -> None:
-        if not self.bot_token:
+        if not self.bot_token and not self.transport:
             raise RuntimeError("Cannot start TelegramChannel: TELEGRAM_BOT_TOKEN is missing.")
         if self._is_running:
             return
 
         self._stop_event.clear()
         self._is_running = True
-        self._thread = threading.Thread(target=self._poll_worker, daemon=True, name="TelegramPollWorker")
-        self._thread.start()
+        if self.bot_token:
+            self._thread = threading.Thread(target=self._poll_worker, daemon=True, name="TelegramPollWorker")
+            self._thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
         self._is_running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+
