@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import anthropic
 
@@ -29,7 +30,12 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     # Gemini / Antigravity models
     "gemini-3.8-flash-high": 1_000_000,
     "gemini-3.8-flash-medium": 1_000_000,
+    "gemini-3.8-flash-low": 1_000_000,
     "gemini-3.7-flash-high": 1_000_000,
+    "gemini-3.7-flash-thinking": 1_000_000,
+    "gemini-flash-thinking": 1_000_000,
+    "gemini-3.8-pro-high": 2_000_000,
+    "gemini-3.8-pro-medium": 2_000_000,
     "gemini-3.1-pro-high": 2_000_000,
     "gemini-1.5-pro": 2_000_000,
     "gemini-1.5-flash": 1_000_000,
@@ -55,23 +61,83 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
 }
 DEFAULT_CONTEXT_LIMIT = 128_000
 
+# Track models for which a fallback warning has already been logged (prevents spamming every turn)
+_WARNED_UNKNOWN_MODELS: Set[str] = set()
+
+
+def resolve_model_context_limit(model_name: Optional[str] = None) -> Tuple[int, bool]:
+    """Resolve context limit for a model name.
+
+    Returns:
+        (limit_tokens, is_fallback): A tuple containing the context window size
+        and a boolean flag indicating whether this is an unverified fallback estimate.
+    """
+    if not model_name:
+        return DEFAULT_CONTEXT_LIMIT, True
+
+    m = model_name.lower().strip()
+
+    # 1. Exact match in canonical dictionary
+    if m in MODEL_CONTEXT_LIMITS:
+        return MODEL_CONTEXT_LIMITS[m], False
+
+    # 2. Gemini family
+    # Priority Rule:
+    # Google's Gemini models have distinct tiers: Flash (1M tokens) vs Pro (2M tokens).
+    # If a model name contains both keywords (e.g. hypothetical 'gemini-3.8-flash-pro-experimental'),
+    # 'flash' is prioritized first (1M tokens). This is deliberate and conservative:
+    # 1M is safer than over-estimating to 2M, preventing premature context overflow assumptions.
+    # Any suffix variant (-high, -medium, -low, -thinking, -exp) retains the base tier limit.
+    if "gemini" in m or "flash" in m:
+        if "flash" in m:
+            return 1_000_000, False
+        if "pro" in m:
+            return 2_000_000, False
+        # General Gemini fallback if neither 'flash' nor 'pro' is in name (e.g. 'gemini-1.5' or 'gemini-nano')
+        return 1_000_000, False
+
+    # 3. Claude family (Anthropic API direct or via Antigravity Google Auth)
+    # Covers claude-*, sonnet-*, opus-*, haiku-*
+    if any(k in m for k in ("claude", "sonnet", "opus", "haiku")):
+        return 200_000, False
+
+    # 4. OpenAI reasoning models (o1, o3, o4 series have 200k context limit)
+    if any(k in m for k in ("o1-", "o1", "o3-", "o3", "o4-", "o4")):
+        return 200_000, False
+
+    # 5. OpenAI GPT family & open-weights (gpt-4, gpt-4o, gpt-5, gpt-oss)
+    if "gpt" in m:
+        return 128_000, False
+
+    # 6. DeepSeek family
+    if "deepseek" in m:
+        return 64_000, False
+
+    # 7. Other common open-weight families
+    if any(k in m for k in ("llama", "qwen", "mistral")):
+        return 128_000, False
+
+    # Unrecognized model -> fallback
+    return DEFAULT_CONTEXT_LIMIT, True
+
 
 def get_model_context_limit(model_name: Optional[str] = None) -> int:
-    """Return the maximum context window size in tokens for a given model."""
-    if not model_name:
-        return DEFAULT_CONTEXT_LIMIT
-    m = model_name.lower().strip()
-    if m in MODEL_CONTEXT_LIMITS:
-        return MODEL_CONTEXT_LIMITS[m]
-    if "gemini" in m:
-        return 2_000_000 if "pro" in m else 1_000_000
-    if "claude" in m:
-        return 200_000
-    if "gpt-4" in m or "gpt-o" in m or "o1" in m or "o3" in m:
-        return 128_000
-    if "deepseek" in m:
-        return 64_000
-    return DEFAULT_CONTEXT_LIMIT
+    """Return the maximum context window size in tokens for a given model.
+
+    If the model is unrecognized or None, logs a visible warning to stderr once
+    and returns DEFAULT_CONTEXT_LIMIT (128,000).
+    """
+    limit, is_fallback = resolve_model_context_limit(model_name)
+    if is_fallback:
+        raw_key = model_name or "<none>"
+        if raw_key not in _WARNED_UNKNOWN_MODELS:
+            _WARNED_UNKNOWN_MODELS.add(raw_key)
+            sys.stderr.write(
+                f"[BrainFrog Warning] Model context limit unknown for '{raw_key}'. "
+                f"Defaulting to estimated fallback {limit // 1000}k tokens.\n"
+            )
+            sys.stderr.flush()
+    return limit
 
 
 @dataclass
@@ -123,7 +189,9 @@ class UsageTracker:
 
     def get_context_info(self, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Compute current context window consumption metrics and warning status."""
-        limit = get_model_context_limit(model_name)
+        limit, is_fallback = resolve_model_context_limit(model_name)
+        if is_fallback:
+            get_model_context_limit(model_name)  # triggers once-warning to stderr if unlogged
         tokens = self.last_context_tokens or self.session.input_tokens
         percent = (tokens / limit * 100.0) if limit > 0 else 0.0
         percent = round(min(percent, 100.0), 1)
@@ -147,6 +215,9 @@ class UsageTracker:
             status_label = "Kritis"
             status_color = "#E01E5A"  # Red
 
+        limit_k_num = f"{limit / 1000:.0f}k" if limit >= 1000 else str(limit)
+        limit_k = f"{limit_k_num} (est.)" if is_fallback else limit_k_num
+
         return {
             "tokens": tokens,
             "limit": limit,
@@ -156,7 +227,8 @@ class UsageTracker:
             "status_color": status_color,
             "bar": bar,
             "tokens_k": f"{tokens / 1000:.1f}k" if tokens >= 1000 else str(tokens),
-            "limit_k": f"{limit / 1000:.0f}k" if limit >= 1000 else str(limit),
+            "limit_k": limit_k,
+            "is_fallback": is_fallback,
         }
 
 
