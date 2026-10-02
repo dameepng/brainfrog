@@ -9,6 +9,7 @@ from .claude_client import (
     UsageStats,
     UsageTracker,
     get_model_context_limit,
+    resolve_model_context_limit,
     usage_tracker,
 )
 from .claude_client import System2Client as ClaudeSystem2Client
@@ -76,6 +77,9 @@ __all__ = [
     "AntigravitySystem2Client",
     "get_system2_provider",
     "find_antigravity_bin",
+    "get_model_context_limit",
+    "resolve_model_context_limit",
+    "MODEL_CONTEXT_LIMITS",
     "extract_json",
     "_extract_json",
     "repair_json_content",

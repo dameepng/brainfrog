@@ -4,6 +4,7 @@ import unittest
 from system2.claude_client import (
     UsageTracker,
     get_model_context_limit,
+    resolve_model_context_limit,
     MODEL_CONTEXT_LIMITS,
 )
 from cli import SLASH_COMMAND_COMPLETIONS
@@ -11,24 +12,48 @@ from cli import SLASH_COMMAND_COMPLETIONS
 
 class TestContextMemory(unittest.TestCase):
     def test_model_context_limits(self):
-        # Gemini limits
+        # Gemini limits with suffixes (-high, -medium, -low, -thinking)
         self.assertEqual(get_model_context_limit("gemini-3.8-flash-high"), 1_000_000)
+        self.assertEqual(get_model_context_limit("gemini-3.8-flash-medium"), 1_000_000)
+        self.assertEqual(get_model_context_limit("gemini-3.8-flash-low"), 1_000_000)
+        self.assertEqual(get_model_context_limit("gemini-3.7-flash-high"), 1_000_000)
+        self.assertEqual(get_model_context_limit("gemini-3.7-flash-thinking"), 1_000_000)
+        self.assertEqual(get_model_context_limit("gemini-flash-thinking"), 1_000_000)
+        self.assertEqual(get_model_context_limit("gemini-3.8-pro-high"), 2_000_000)
+        self.assertEqual(get_model_context_limit("gemini-3.8-pro-medium"), 2_000_000)
         self.assertEqual(get_model_context_limit("gemini-3.1-pro-high"), 2_000_000)
         self.assertEqual(get_model_context_limit("gemini-custom-flash"), 1_000_000)
         self.assertEqual(get_model_context_limit("gemini-custom-pro"), 2_000_000)
 
-        # Claude limits
+        # Priority rule: Hybrid model containing both 'flash' and 'pro' prioritizes Flash (conservative 1M)
+        self.assertEqual(get_model_context_limit("gemini-3.8-flash-pro-experimental"), 1_000_000)
+
+        # Claude limits (standard & thinking suffixes)
         self.assertEqual(get_model_context_limit("claude-sonnet-5"), 200_000)
         self.assertEqual(get_model_context_limit("claude-3-5-sonnet-20241022"), 200_000)
         self.assertEqual(get_model_context_limit("claude-sonnet-4-6"), 200_000)
+        self.assertEqual(get_model_context_limit("claude-opus-4-6-thinking"), 200_000)
+        self.assertEqual(get_model_context_limit("sonnet-4-6"), 200_000)
+        self.assertEqual(get_model_context_limit("haiku-3.5"), 200_000)
 
-        # GPT / DeepSeek limits
+        # OpenAI / reasoning limits
+        self.assertEqual(get_model_context_limit("o1"), 200_000)
+        self.assertEqual(get_model_context_limit("o1-mini"), 200_000)
+        self.assertEqual(get_model_context_limit("o3-mini"), 200_000)
         self.assertEqual(get_model_context_limit("gpt-4o"), 128_000)
         self.assertEqual(get_model_context_limit("gpt-oss-120b-medium"), 128_000)
         self.assertEqual(get_model_context_limit("deepseek-chat"), 64_000)
 
-        # Fallback default
-        self.assertEqual(get_model_context_limit("unknown-model"), 128_000)
+        # Fallback default with fallback detection
+        lim_unknown, is_fallback_unknown = resolve_model_context_limit("unknown-model-xyz")
+        self.assertEqual(lim_unknown, 128_000)
+        self.assertTrue(is_fallback_unknown)
+
+        lim_none, is_fallback_none = resolve_model_context_limit(None)
+        self.assertEqual(lim_none, 128_000)
+        self.assertTrue(is_fallback_none)
+
+        self.assertEqual(get_model_context_limit("unknown-model-xyz"), 128_000)
         self.assertEqual(get_model_context_limit(None), 128_000)
 
     def test_usage_tracker_context_tracking(self):
@@ -79,6 +104,17 @@ class TestContextMemory(unittest.TestCase):
         self.assertEqual(info_reset["percent"], 0.0)
         self.assertEqual(info_reset["status"], "safe")
         self.assertEqual(tracker.session.total_tokens, 0)
+
+        # Context limit label tests for known vs fallback models
+        info_flash = tracker.get_context_info("gemini-3.8-flash-high")
+        self.assertEqual(info_flash["limit"], 1_000_000)
+        self.assertEqual(info_flash["limit_k"], "1000k")
+        self.assertFalse(info_flash["is_fallback"])
+
+        info_unk = tracker.get_context_info("unknown-model-xyz")
+        self.assertEqual(info_unk["limit"], 128_000)
+        self.assertEqual(info_unk["limit_k"], "128k (est.)")
+        self.assertTrue(info_unk["is_fallback"])
 
     def test_cli_command_completions(self):
         commands = [c[0] for c in SLASH_COMMAND_COMPLETIONS]

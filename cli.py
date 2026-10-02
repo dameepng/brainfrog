@@ -414,6 +414,9 @@ def execute_task(
         print_banner_box(f"System 2 Error: {e}", level="error")
         return 1
 
+    # Ensure chosen_model reflects the actual model resolved by System2Client (e.g. default Gemini Flash)
+    chosen_model = getattr(system2, "model", chosen_model) or chosen_model
+
     domains = load_module_map(repo_dir, Path(module_map) if module_map else None, task=task)
 
     if mode == "plan":
