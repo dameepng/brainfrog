@@ -380,9 +380,14 @@ def execute_task(
 ) -> int:
     """Run a single task through the dual-system orchestrator."""
     from core.config import get_system1
+    from core.runtime.session import session_manager
     from modules import load_module_map
     from orchestrator import Orchestrator, RunConfig
     from system2 import System2Client, usage_tracker
+
+    session = session_manager.get_or_create("cli", "local", "default", default_mode=mode)
+    session.active_mode = mode
+    session.active_skill = skill
 
     if not (repo_dir / ".git").exists():
         ensure_git_remote(repo_dir)
@@ -554,6 +559,13 @@ def execute_task(
     else:
         console.print()
 
+    # Record turn in isolated session state
+    try:
+        assistant_texts = [r.detail for r in results if getattr(r, "detail", None)]
+        session.record_interaction(user_text=task, assistant_text="\n\n".join(assistant_texts))
+    except Exception:
+        pass
+
     return 0
 
 
@@ -608,6 +620,8 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/reset", "Reset conversation state and context window counters"),
     ("/context", "Display live context window metrics & visual bar"),
     ("/tokens", "View token usage breakdown and context metrics"),
+    ("/doctor", "Diagnose system health, providers, and channel status"),
+    ("/gateway", "Start or inspect multi-channel gateway (Telegram/WhatsApp)"),
     ("/clear", "Clear terminal screen"),
     ("/exit", "Exit BrainFrog session"),
 ]
@@ -708,6 +722,21 @@ PROVIDER_MODELS = {
         ("claude-sonnet-5", "Claude Sonnet 5", "Default recommended model"),
         ("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet", "Standard Sonnet release"),
         ("claude-3-5-haiku-20241022", "Claude 3.5 Haiku", "Fast & lightweight"),
+    ],
+    "openai": [
+        ("gpt-4o", "GPT-4o", "High-intelligence flagship model (Default)"),
+        ("gpt-4o-mini", "GPT-4o Mini", "Fast and affordable small model"),
+        ("o1", "OpenAI o1", "Advanced reasoning model"),
+        ("o3-mini", "OpenAI o3-mini", "Fast reasoning model"),
+    ],
+    "openrouter": [
+        ("anthropic/claude-3.5-sonnet", "Claude 3.5 Sonnet", "Anthropic flagship via OpenRouter"),
+        ("openai/gpt-4o", "GPT-4o", "OpenAI flagship via OpenRouter"),
+        ("deepseek/deepseek-r1", "DeepSeek R1", "Open weights reasoning model"),
+        ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B", "Fast open-weight model"),
+    ],
+    "openai-compatible": [
+        ("custom-model", "Custom Model", "Generic OpenAI-compatible model from .env"),
     ],
 }
 
@@ -830,6 +859,9 @@ def select_provider_interactive(current_provider: str) -> Optional[str]:
     items = [
         ("antigravity", "antigravity", google_desc),
         ("claude",      "claude",      "Anthropic API Key — pay per token"),
+        ("openai",      "openai",      "OpenAI API Key (gpt-4o, o1, o3-mini)"),
+        ("openrouter",  "openrouter",  "OpenRouter API Key (any model)"),
+        ("openai-compatible", "openai-compatible", "Generic OpenAI-compatible endpoint"),
     ]
     return _picker("Providers", items, current_provider, id_col="Provider")
 
@@ -848,6 +880,74 @@ def select_account_interactive() -> Optional[str]:
     items.append(("__login_new__", "+ Hubungkan Akun Google Baru...", "Buka browser untuk login OAuth"))
 
     return _picker("Google Accounts  ·  Antigravity", items, active_email, id_col="Email")
+
+
+def show_doctor(repo_dir: Path) -> int:
+    """Run and render diagnostic health check for BrainFrog and all components."""
+    from core.runtime.doctor import run_doctor_diagnostics
+    cols, rows, box_w, margin, pad = get_layout_dims()
+    checks = run_doctor_diagnostics(repo_dir)
+
+    table = Table(
+        title=" 🩺 BrainFrog System & Channel Doctor ",
+        box=box.ROUNDED,
+        border_style=COLOR_FG_MUTED,
+        header_style=f"bold {COLOR_ACCENT}",
+        show_header=True,
+        padding=(0, 1),
+        width=box_w,
+    )
+    table.add_column("Category", style=f"bold {COLOR_FG_PRIMARY}", width=15)
+    table.add_column("Check", style=f"bold {COLOR_FG_PRIMARY}", width=32)
+    table.add_column("Status", justify="center", width=8)
+    table.add_column("Details", style=COLOR_FG_SECONDARY)
+
+    for c in checks:
+        if c.status == "OK":
+            badge = f"[bold {COLOR_SUCCESS}]✓ OK[/bold {COLOR_SUCCESS}]"
+        elif c.status == "WARN":
+            badge = f"[bold {COLOR_WARNING}]⚠ WARN[/bold {COLOR_WARNING}]"
+        elif c.status == "FAIL":
+            badge = f"[bold {COLOR_ERROR}]✗ FAIL[/bold {COLOR_ERROR}]"
+        else:
+            badge = f"[{COLOR_INFO}]ℹ INFO[/{COLOR_INFO}]"
+        table.add_row(c.category, c.name, badge, c.detail)
+
+    console.print()
+    console.print(Align.center(table) if cols > 100 else table)
+    console.print()
+    return 0
+
+
+def show_gateway(repo_dir: Path, action: str = "start") -> int:
+    """Manage or start the multi-channel BrainFrog gateway."""
+    from core.runtime.gateway import BrainFrogGateway
+    gateway = BrainFrogGateway(repo_dir=repo_dir)
+    status = gateway.get_status()
+
+    if action == "status":
+        channels_str = "\n".join(f"  • {ch['name']}: {'running' if ch['running'] else 'idle'}" for ch in status['channels'])
+        print_banner_box(
+            f"Gateway Running: {status['gateway_running']}\n"
+            f"Workspace: {status['workspace']}\n"
+            f"Active Sessions: {status['active_sessions_count']}\n"
+            f"Channels:\n{channels_str}",
+            level="info",
+            title="Gateway Status",
+        )
+        return 0
+
+    print_banner_box(
+        f"Starting BrainFrog Gateway across {len(gateway.channels)} configured channel(s)...\n"
+        "Press Ctrl+C to stop gateway gracefully.",
+        level="info",
+        title="Gateway Starting",
+    )
+    try:
+        gateway.run_forever()
+    except KeyboardInterrupt:
+        print_banner_box("Gateway stopped.", level="info")
+    return 0
 
 
 # -------------------------------------------------------------------------
@@ -1490,6 +1590,14 @@ def run_interactive(
         elif lower in ("/help", "/?"):
             show_help()
             continue
+        elif lower in ("/doctor", "/doc"):
+            show_doctor(repo_dir)
+            continue
+        elif lower.startswith("/gateway"):
+            parts = lower.split()
+            subaction = parts[1] if len(parts) > 1 else "start"
+            show_gateway(repo_dir, action=subaction)
+            continue
         elif lower == "/clear":
             console.clear()
             is_first_turn[0] = True
@@ -1497,6 +1605,8 @@ def run_interactive(
             print_splash(cols, rows)
             continue
         elif lower in ("/new", "/reset"):
+            from core.runtime.session import session_manager
+            session_manager.reset("cli:local:default")
             usage_tracker.reset_session()
             console.clear()
             is_first_turn[0] = True
@@ -2542,13 +2652,13 @@ def main() -> int:
         prog="brainfrog",
         description="🐸 BrainFrog: Dual-System Coding Agent (Jev System 1 + Claude/Gemini System 2)",
     )
-    p.add_argument("task", nargs="?", default=None, help="Task to execute (leave empty for interactive REPL)")
+    p.add_argument("task", nargs="*", default=None, help="Task to execute (leave empty for interactive REPL)")
     p.add_argument("--task", dest="flag_task", default=None, help="Alternative flag for task description")
     p.add_argument("-r", "--repo", default=".", help="Path to target git repository (default: current directory)")
     p.add_argument("-t", "--test-cmd", default=None, help="Shell command for running test suite")
     p.add_argument("-b", "--backend", choices=["jev", "typesafe", "auto"], default="jev", help="System 1 decision backend (jev | typesafe)")
     p.add_argument("-m", "--model", "--claude-model", dest="model", default=None, help="Model name (e.g. gemini-3.8-flash-high, claude-sonnet-5)")
-    p.add_argument("--provider", choices=["claude", "antigravity", "gemini", "auto"], default=None, help="System 2 AI provider (antigravity: Google Login, claude: Anthropic API)")
+    p.add_argument("--provider", default=None, help="System 2 AI provider (antigravity, claude, openai, openrouter, openai-compatible)")
     p.add_argument("--skill", default=None, help="Explicitly activate a modular skill (e.g. --skill audit-anti-slop)")
     p.add_argument("--mode", choices=["build", "plan"], default="build", help="Session mode: build (default) or plan")
     p.add_argument("--auto-pr", action="store_true", help="Push branch and open GitHub PR when approved")
@@ -2562,6 +2672,16 @@ def main() -> int:
 
     repo_dir = find_git_root(Path(args.repo))
     load_all_envs(repo_dir)
+
+    raw_task = " ".join(args.task) if isinstance(args.task, list) and args.task else args.flag_task
+    chosen_task = (raw_task or "").strip()
+    if chosen_task in ("doctor", "/doctor"):
+        return show_doctor(repo_dir)
+
+    if chosen_task.startswith("gateway") or chosen_task.startswith("/gateway"):
+        parts = chosen_task.split()
+        subaction = parts[1] if len(parts) > 1 else "start"
+        return show_gateway(repo_dir, action=subaction)
 
     from system2 import get_system2_provider, find_antigravity_bin
 
@@ -2577,8 +2697,6 @@ def main() -> int:
                 title="Antigravity Not Found",
             )
             return 1
-
-    chosen_task = args.task or args.flag_task
 
     if chosen_task:
         from core.image_handler import extract_image_references
