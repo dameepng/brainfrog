@@ -65,6 +65,39 @@ class TestSystem2Providers(unittest.TestCase):
         self.assertEqual(resp, "hello from gemini")
         self.assertTrue(mock_popen.called)
 
+        # Verify command flags include --disable-slash-commands
+        call_args, call_kwargs = mock_popen.call_args
+        cmd = call_args[0]
+        self.assertIn("--disable-slash-commands", cmd)
+        self.assertIn("--dangerously-skip-permissions", cmd)
+
+        # Verify prompt includes dual anti-tool sandwich guard
+        communicate_call = mock_proc.communicate.call_args
+        sent_input = communicate_call[1].get("input", "")
+        self.assertIn("CRITICAL INSTRUCTION: You are operating strictly as a stateless, non-interactive JSON generator", sent_input)
+        self.assertIn("[CRITICAL FINAL CONSTRAINT]", sent_input)
+        self.assertIn("REMINDER: ABSOLUTELY DO NOT CALL ANY TOOLS OR COMMANDS", sent_input)
+
+        # Verify default timeout is 240s
+        self.assertEqual(communicate_call[1].get("timeout"), 240.0)
+
+    @patch("subprocess.Popen")
+    def test_antigravity_timeout_env_override(self, mock_popen):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = (
+            '{"status": "SUCCESS", "response": "ok", "usage": {}}',
+            "",
+        )
+        mock_popen.return_value = mock_proc
+
+        client = AntigravitySystem2Client(model="gemini-3.8-flash-high")
+        with patch.dict(os.environ, {"ANTIGRAVITY_TIMEOUT": "350"}):
+            client._call("system", "user")
+
+        communicate_call = mock_proc.communicate.call_args
+        self.assertEqual(communicate_call[1].get("timeout"), 350.0)
+
     def test_model_selection_helpers(self):
         from cli import PROVIDER_MODELS, select_model_interactive, select_provider_interactive
 
