@@ -302,15 +302,80 @@ def format_learnings_for_prompt(learnings: List[Learning], max_tokens_approx: in
 # Reflection Prompt Generator
 # ---------------------------------------------------------------------------
 
+def is_generic_suggestion(sug: Optional[str]) -> bool:
+    """Return True if suggestion contains banned generic, non-actionable advice."""
+    if not sug:
+        return False
+    s = sug.lower()
+    banned_phrases = [
+        "selalu testing",
+        "testing dengan baik",
+        "pastikan untuk testing",
+        "selalu uji coba",
+        "tulis dokumentasi",
+        "pastikan kode rapi",
+        "maintain clean code",
+        "always write tests",
+        "make sure to test",
+        "ensure thorough testing",
+        "add comprehensive tests",
+    ]
+    return any(bp in s for bp in banned_phrases)
+
+
+def generate_proactive_suggestion_prompt(
+    task: str,
+    step_desc: str = "",
+    diff_snippet: str = "",
+) -> str:
+    """Generate a prompt for evaluating proactive suggestions after a successful step.
+
+    This prompt asks System 2 to identify genuine technical gaps, missing tests,
+    unhandled edge cases, or potential improvements, or return null if clean.
+    """
+    effective_step = step_desc or task
+    diff_part = f"\n\nCode changes made (diff excerpt):\n{diff_snippet[:2000]}" if diff_snippet else ""
+
+    return (
+        "A step in the coding task has just PASSED all tests and succeeded.\n\n"
+        f"Original user task: {task}\n"
+        f"Step completed: {effective_step}"
+        f"{diff_part}\n\n"
+        "Evaluate the completed work according to the Proactive Suggestion rules:\n"
+        "Is there an obvious, specific gap, potential improvement, or risk in the result of this step "
+        "that was NOT explicitly requested by the user in this task?\n"
+        "Examples of valid gaps:\n"
+        "- Newly added component uses hardcoded placeholder data instead of dynamic props/state.\n"
+        "- Newly added image or asset is hotlinked to an external URL (e.g. Unsplash) risking 404.\n"
+        "- A new function or utility was introduced without test coverage.\n"
+        "- An obvious edge case is left unhandled.\n\n"
+        "CRITICAL RULES:\n"
+        "1. If YES and truly relevant/specific to this exact work:\n"
+        '   Write 1-3 natural Indonesian sentences, format: "Catatan: [gap/observasi spesifik]. Mau sekalian saya kerjakan juga?"\n'
+        "2. If NO clear/significant gap exists: set suggestion to null.\n"
+        "   Do NOT invent suggestions just to look proactive. Silence (null) is far better than generic noise.\n"
+        "3. NEVER output generic advice that applies to any project (e.g., 'pastikan selalu testing', 'buat dokumentasi').\n"
+        "4. Maximum ONE concise suggestion.\n\n"
+        "Respond with ONLY JSON:\n"
+        '{"suggestion": "Catatan: [gap spesifik]. Mau sekalian saya kerjakan juga?"}\n'
+        '(Or {"suggestion": null} if no genuine gap exists).'
+    )
+
+
 def generate_reflection_prompt(
     task: str,
     retries: int,
     visual_fixed: bool,
     error_summary: str = "",
+    include_proactive: bool = False,
+    step_desc: str = "",
+    diff_snippet: str = "",
 ) -> str:
     """Generate a reflection prompt for auto-learning after a difficult task.
 
     This prompt is sent to System 2 to extract a concise lesson learned.
+    If include_proactive is True, combines internal lessons extraction with
+    evaluating user-facing proactive suggestions in a single call.
     """
     context_parts = []
     if retries > 0:
@@ -321,15 +386,44 @@ def generate_reflection_prompt(
         context_parts.append(f"Error encountered: {error_summary[:300]}")
 
     context = " ".join(context_parts)
+    effective_step = step_desc or task
+
+    if not include_proactive:
+        return (
+            "You just completed a task that required extra effort to get right. "
+            f"Context: {context}\n\n"
+            f"Original task: {task}\n\n"
+            "Extract 1-3 concise, actionable lessons learned from this experience. "
+            "Each lesson should be a single sentence that would help avoid the same "
+            "pitfall in future tasks on this codebase.\n\n"
+            "Respond with ONLY JSON:\n"
+            '{"learnings": [{"rule": "concise lesson", "tags": ["frontend", "style"]}]}\n'
+            "Tags must be from: frontend, backend, test, git, style, performance, general."
+        )
+
+    diff_part = f"\n\nCode changes made (diff excerpt):\n{diff_snippet[:2000]}" if diff_snippet else ""
 
     return (
-        "You just completed a task that required extra effort to get right. "
-        f"Context: {context}\n\n"
-        f"Original task: {task}\n\n"
-        "Extract 1-3 concise, actionable lessons learned from this experience. "
-        "Each lesson should be a single sentence that would help avoid the same "
-        "pitfall in future tasks on this codebase.\n\n"
+        "You just completed a task step that required extra effort to get right.\n"
+        f"Context: {context}\n"
+        f"Original task: {task}\n"
+        f"Step completed: {effective_step}"
+        f"{diff_part}\n\n"
+        "Perform a two-fold post-task reflection:\n"
+        "1. Internal Learning: Extract 1-3 concise, actionable lessons learned to avoid the same "
+        "pitfall in future tasks on this codebase (single sentence each).\n"
+        "2. Proactive Suggestion for User: Evaluate if there is an obvious, specific gap, potential improvement, "
+        "or risk in the result of this step that was NOT explicitly requested by the user in this task.\n"
+        "   - If YES and truly relevant/specific to this work:\n"
+        '     Write 1-3 natural Indonesian sentences, format: "Catatan: [gap/observasi spesifik]. Mau sekalian saya kerjakan juga?"\n'
+        "   - If NO clear/significant gap exists: set suggestion to null.\n"
+        "   - Max ONE suggestion. NEVER output generic advice like 'pastikan selalu testing'.\n\n"
         "Respond with ONLY JSON:\n"
-        '{"learnings": [{"rule": "concise lesson", "tags": ["frontend", "style"]}]}\n'
+        '{\n'
+        '  "learnings": [{"rule": "concise lesson", "tags": ["frontend", "style"]}],\n'
+        '  "suggestion": "Catatan: [gap spesifik]. Mau sekalian saya kerjakan juga?"\n'
+        '}\n'
+        '(Note: set "suggestion": null if no genuine gap exists).\n'
         "Tags must be from: frontend, backend, test, git, style, performance, general."
     )
+
