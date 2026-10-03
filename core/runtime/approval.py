@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.runtime.targets import (
-    TargetCandidate,
     TargetClassification,
     classify_target_candidate,
     extract_deterministic_targets,
@@ -384,6 +383,15 @@ class ApprovalStore(ABC):
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
         """Atomically verify and consume an approved request in a single step."""
         raise NotImplementedError
+
+    def _get_quota_lock(self, timeout: float = 10.0) -> Any:
+        return nullcontext()
+
+    def _get_request_lock(self, request_id: str, timeout: float = 10.0) -> Any:
+        return nullcontext()
+
+    def cleanup_expired(self, max_items: int = DEFAULT_MAX_CLEANUP_BATCH) -> int:
+        return 0
 
 
 class InMemoryApprovalStore(ApprovalStore):

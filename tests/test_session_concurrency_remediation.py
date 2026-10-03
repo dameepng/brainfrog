@@ -24,12 +24,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from core.runtime.messages import IncomingMessage, OutgoingMessage
 from core.runtime.runtime import BrainFrogRuntime
 from core.runtime.session import (
-    CURRENT_SESSION_SCHEMA_VERSION,
     FileSessionStore,
     InMemorySessionStore,
     SessionManager,
@@ -37,12 +36,10 @@ from core.runtime.session import (
     StaleSessionStateError,
 )
 from core.runtime.approval import (
-    ApprovalRequest,
     ApprovalService,
     ApprovalStatus,
     CanonicalOperation,
     FileApprovalStore,
-    InMemoryApprovalStore,
 )
 from system1.base import Answer, SystemOneClient
 
@@ -196,7 +193,7 @@ class TestSessionConcurrencyRemediation(unittest.TestCase):
         )
         store.save(init_sess)
 
-        worker_script = f"""
+        worker_script = """
 import sys, time
 from pathlib import Path
 from core.runtime.session import FileSessionStore, StaleSessionStateError
@@ -209,7 +206,7 @@ session_id = sys.argv[4]
 store = FileSessionStore(sessions_dir=sessions_dir)
 
 for turn in range(turns_count):
-    msg_id = f"proc-{{worker_id}}-turn-{{turn}}"
+    msg_id = f"proc-{worker_id}-turn-{turn}"
     committed = False
     for attempt in range(50):
         try:
@@ -217,14 +214,14 @@ for turn in range(turns_count):
             if sess is None:
                 time.sleep(0.02)
                 continue
-            sess.record_interaction(f"msg:{{msg_id}}", f"resp:{{msg_id}}")
+            sess.record_interaction(f"msg:{msg_id}", f"resp:{msg_id}")
             if store.save(sess):
                 committed = True
                 break
         except StaleSessionStateError:
             time.sleep(0.01 * (attempt % 5 + 1))
     if not committed:
-        sys.stderr.write(f"Worker {{worker_id}} failed to commit {{msg_id}}\\n")
+        sys.stderr.write(f"Worker {worker_id} failed to commit {msg_id}\\n")
         sys.exit(1)
 
 sys.exit(0)

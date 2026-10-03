@@ -27,7 +27,6 @@ from .permissions import (
 )
 from .session import (
     FileSessionStore,
-    InMemorySessionStore,
     SessionManager,
     SessionState,
     SessionStore,
@@ -38,13 +37,10 @@ from .session import (
 from .approval import (
     ApprovalPayloadTooLargeError,
     ApprovalQuotaExceededError,
-    ApprovalRequest,
     ApprovalService,
     ApprovalStatus,
     ApprovalStore,
-    CanonicalOperation,
     FileApprovalStore,
-    InMemoryApprovalStore,
     RiskClass,
     extract_canonical_operation,
 )
@@ -193,7 +189,6 @@ class BrainFrogRuntime:
             default_mode=message.metadata.get("mode", "build"),
         )
         initial_incarnation = session.session_incarnation_id
-        initial_revision = session.revision
 
         # 2. Deterministic Permission Gate
         policy = self.policy_provider(effective_channel)
