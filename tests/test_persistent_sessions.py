@@ -553,7 +553,7 @@ sys.exit(0)
         store = FileSessionStore(sessions_dir=self.sessions_dir)
 
         # Make store.save fail artificially
-        store.save = lambda s: False  # Simulate disk full / permission denied
+        store.save = lambda session, force=False: False  # Simulate disk full / permission denied
 
         mgr = SessionManager(store=store)
         runtime = BrainFrogRuntime(

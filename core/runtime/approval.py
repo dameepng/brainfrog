@@ -22,10 +22,33 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from core.runtime.targets import (
+    TargetClassification,
+    classify_target_candidate,
+    extract_deterministic_targets,
+)
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+try:
+    import fcntl
+    _HAS_FCNTL = hasattr(fcntl, "flock")
+except ImportError:
+    fcntl = None
+    _HAS_FCNTL = False
+
+_LOCK_EX = getattr(fcntl, "LOCK_EX", 2)
+_LOCK_NB = getattr(fcntl, "LOCK_NB", 4)
+_LOCK_UN = getattr(fcntl, "LOCK_UN", 8)
 
 from core.runtime.session import scrub_secrets
 
@@ -33,6 +56,24 @@ logger = logging.getLogger(__name__)
 
 CURRENT_APPROVAL_SCHEMA_VERSION = 1
 DEFAULT_APPROVAL_TTL_SECONDS = 300.0  # 5 minutes
+DEFAULT_MAX_PENDING_PER_SESSION = 20
+DEFAULT_MAX_PENDING_PER_REQUESTER = 200
+DEFAULT_MAX_PENDING_GLOBAL = 1000
+DEFAULT_MAX_TERMINAL_RETENTION = 200
+DEFAULT_MAX_PAYLOAD_BYTES = 64 * 1024  # 64 KB
+DEFAULT_MAX_CLEANUP_BATCH = 50
+
+
+class ApprovalQuotaExceededError(ValueError):
+    """Raised when an approval request exceeds session, user, or global quota."""
+
+    pass
+
+
+class ApprovalPayloadTooLargeError(ValueError):
+    """Raised when an approval request payload exceeds maximum permitted byte size."""
+
+    pass
 
 
 class ApprovalStatus(str, Enum):
@@ -44,6 +85,15 @@ class ApprovalStatus(str, Enum):
     EXPIRED = "EXPIRED"
     CONSUMED = "CONSUMED"
     CANCELLED = "CANCELLED"
+
+
+ACTIVE_APPROVAL_STATUSES = frozenset({ApprovalStatus.PENDING, ApprovalStatus.APPROVED})
+TERMINAL_APPROVAL_STATUSES = frozenset({
+    ApprovalStatus.REJECTED,
+    ApprovalStatus.EXPIRED,
+    ApprovalStatus.CONSUMED,
+    ApprovalStatus.CANCELLED,
+})
 
 
 class RiskClass(str, Enum):
@@ -72,10 +122,10 @@ class CanonicalOperation:
         clean_params: Dict[str, Any] = {}
         for k in sorted(self.parameters.keys()):
             val = self.parameters[k]
-            clean_params[str(k)] = val
+            clean_params[k] = val
         return {
-            "action_type": str(self.action_type).strip().lower(),
-            "target": str(self.target).strip(),
+            "action_type": self.action_type.strip().lower(),
+            "target": self.target.strip(),
             "parameters": clean_params,
         }
 
@@ -97,34 +147,100 @@ def extract_canonical_operation(
     text: str,
     action: Any = None,
     metadata: Optional[Dict[str, Any]] = None,
+    repo_dir: Optional[Path] = None,
 ) -> CanonicalOperation:
-    """Deterministically extract a CanonicalOperation from raw text and action."""
+    """Deterministically extract a CanonicalOperation from raw text and action.
+
+    Remediates M-02 (Heuristic Target Extraction):
+    - Rejects version numbers, URLs, packages, issue references, and numbers from filesystem targets.
+    - Deterministically validates metadata targets against workspace filesystem rules.
+    - Detects ambiguous or non-filesystem tokens and fails closed (target='').
+    - Disallows path traversal, drive letters, and UNC paths.
+    """
     import re
 
     meta = metadata or {}
+    rdir = repo_dir
+    if not rdir and "repo_dir" in meta and meta["repo_dir"]:
+        try:
+            rdir = Path(meta["repo_dir"])
+        except Exception:
+            rdir = None
+
     action_type = meta.get("action_type") or (
         action.value if hasattr(action, "value") else str(action or "generic_action")
     )
     action_type = str(action_type).strip().lower()
 
-    target = meta.get("target") or meta.get("path")
-    if not target:
-        # Detect file paths in text (e.g. config.py, src/main.py, /path/to/file)
-        match = re.search(r"([a-zA-Z0-9_\-\.\/\\]+\.[a-zA-Z0-9_\-]+)", text)
-        if match:
-            target = match.group(1).replace("\\", "/")
-        else:
-            # Detect environment or target keywords (e.g. production, staging)
-            env_match = re.search(r"\b(production|prod|staging|test)\b", text, re.IGNORECASE)
-            if env_match:
-                target = env_match.group(1).lower()
-            else:
-                target = text.strip()
-
     params: Dict[str, Any] = {}
     for k in ("environment", "branch", "force", "mode", "command"):
         if k in meta:
             params[k] = meta[k]
+
+    # Non-filesystem action types have their own explicit target extraction
+    if action_type in ("deployment", "deploy_project"):
+        raw_target = meta.get("target") or meta.get("path")
+        if not raw_target:
+            env_match = re.search(r"\b(production|prod|staging|test)\b", text, re.IGNORECASE)
+            target = env_match.group(1).lower() if env_match else ""
+        else:
+            target = str(raw_target).strip().lower()
+        return CanonicalOperation(
+            action_type=action_type,
+            target=target,
+            parameters=params,
+        )
+
+    if action_type in ("shell_execution", "run_shell_command"):
+        raw_target = meta.get("target") or meta.get("command") or text.strip()
+        return CanonicalOperation(
+            action_type=action_type,
+            target=str(raw_target).strip(),
+            parameters=params,
+        )
+
+    # For filesystem actions (write_code, write_files, read_code, etc.) and generic actions:
+    # 1. Check if metadata provided explicit target/path
+    meta_target = meta.get("target") or meta.get("path")
+    if meta_target:
+        cand = classify_target_candidate(str(meta_target).strip(), repo_dir=rdir)
+        if cand.is_valid:
+            target = cand.normalized
+        else:
+            # Metadata target is invalid or non-filesystem token -> fail closed
+            target = ""
+            if cand.classification == TargetClassification.INVALID_PATH:
+                params["invalid_path"] = True
+            elif cand.classification in (TargetClassification.AMBIGUOUS, TargetClassification.NON_FILESYSTEM_TOKEN):
+                params["ambiguous"] = True
+            params["target_classification"] = cand.classification.value
+            params["target_reason"] = cand.reason
+    else:
+        # 2. Extract deterministically from text
+        valid_targets, candidates = extract_deterministic_targets(text, repo_dir=rdir)
+        if valid_targets:
+            target = valid_targets[0]
+            if len(valid_targets) > 1:
+                params["targets"] = valid_targets
+        else:
+            target = ""
+            if any(c.classification == TargetClassification.INVALID_PATH for c in candidates):
+                params["invalid_path"] = True
+            else:
+                params["ambiguous"] = True
+
+    # Multi-targets in metadata
+    multi = meta.get("targets") or meta.get("files")
+    if isinstance(multi, (list, tuple, set)):
+        verified_multi: List[str] = []
+        for t in multi:
+            tc = classify_target_candidate(str(t).strip(), repo_dir=rdir)
+            if tc.is_valid and tc.normalized not in verified_multi:
+                verified_multi.append(tc.normalized)
+        if verified_multi:
+            params["targets"] = verified_multi
+            if not target:
+                target = verified_multi[0]
 
     return CanonicalOperation(
         action_type=action_type,
@@ -154,6 +270,7 @@ class ApprovalRequest:
     approved_at: Optional[float] = None
     consumed_at: Optional[float] = None
     rejection_reason: Optional[str] = None
+    session_incarnation_id: Optional[str] = None
     schema_version: int = CURRENT_APPROVAL_SCHEMA_VERSION
 
     def is_expired(self, now: Optional[float] = None) -> bool:
@@ -167,6 +284,7 @@ class ApprovalRequest:
             "schema_version": self.schema_version,
             "request_id": self.request_id,
             "session_id": self.session_id,
+            "session_incarnation_id": self.session_incarnation_id,
             "channel": self.channel,
             "user_id": self.user_id,
             "conversation_id": self.conversation_id,
@@ -222,6 +340,7 @@ class ApprovalRequest:
             approved_at=float(data["approved_at"]) if data.get("approved_at") else None,
             consumed_at=float(data["consumed_at"]) if data.get("consumed_at") else None,
             rejection_reason=data.get("rejection_reason"),
+            session_incarnation_id=data.get("session_incarnation_id"),
             schema_version=version,
         )
 
@@ -242,7 +361,14 @@ class ApprovalStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_requests(self) -> List[ApprovalRequest]:
+    def list_requests(
+        self,
+        session_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        limit: Optional[int] = None,
+        active_only: bool = True,
+    ) -> List[ApprovalRequest]:
         raise NotImplementedError
 
     @abstractmethod
@@ -252,21 +378,56 @@ class ApprovalStore(ABC):
         expected_digest: str,
         session_id: str,
         channel: str,
+        session_incarnation_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
         """Atomically verify and consume an approved request in a single step."""
         raise NotImplementedError
+
+    def _get_quota_lock(self, timeout: float = 10.0) -> Any:
+        return nullcontext()
+
+    def _get_request_lock(self, request_id: str, timeout: float = 10.0) -> Any:
+        return nullcontext()
+
+    def cleanup_expired(self, max_items: int = DEFAULT_MAX_CLEANUP_BATCH) -> int:
+        return 0
 
 
 class InMemoryApprovalStore(ApprovalStore):
     """Thread-safe in-memory approval store for unit testing."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_terminal_retention: int = DEFAULT_MAX_TERMINAL_RETENTION) -> None:
         self._requests: Dict[str, ApprovalRequest] = {}
         self._lock = threading.RLock()
+        self.max_terminal_retention = max_terminal_retention
+
+    def _get_quota_lock(self, timeout: float = 10.0) -> Any:
+        return self._lock
+
+    def cleanup_expired(self, max_items: int = DEFAULT_MAX_CLEANUP_BATCH) -> int:
+        with self._lock:
+            now = time.time()
+            cleaned = 0
+            for req in list(self._requests.values()):
+                if cleaned >= max_items:
+                    break
+                if req.status in ACTIVE_APPROVAL_STATUSES and req.is_expired(now):
+                    req.status = ApprovalStatus.EXPIRED
+                    cleaned += 1
+            return cleaned
 
     def save(self, request: ApprovalRequest) -> bool:
         with self._lock:
             self._requests[request.request_id] = request
+            terminal_keys = [
+                k for k, r in self._requests.items()
+                if r.status in TERMINAL_APPROVAL_STATUSES
+            ]
+            if len(terminal_keys) > self.max_terminal_retention:
+                excess = len(terminal_keys) - self.max_terminal_retention
+                for k in terminal_keys[:excess]:
+                    del self._requests[k]
             return True
 
     def get(self, request_id: str) -> Optional[ApprovalRequest]:
@@ -280,9 +441,30 @@ class InMemoryApprovalStore(ApprovalStore):
                 return True
             return False
 
-    def list_requests(self) -> List[ApprovalRequest]:
+    def list_requests(
+        self,
+        session_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        limit: Optional[int] = None,
+        active_only: bool = True,
+    ) -> List[ApprovalRequest]:
         with self._lock:
-            return list(self._requests.values())
+            results: List[ApprovalRequest] = []
+            for req in list(self._requests.values()):
+                if limit is not None and len(results) >= limit:
+                    break
+                if session_id is not None and req.session_id != session_id:
+                    continue
+                if requester_id is not None and req.user_id != requester_id.strip():
+                    continue
+                if channel is not None and req.channel.lower() != channel.lower().strip():
+                    continue
+                if active_only:
+                    if req.status not in ACTIVE_APPROVAL_STATUSES or req.is_expired():
+                        continue
+                results.append(req)
+            return results
 
     def claim_and_consume(
         self,
@@ -290,6 +472,8 @@ class InMemoryApprovalStore(ApprovalStore):
         expected_digest: str,
         session_id: str,
         channel: str,
+        session_incarnation_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
         with self._lock:
             req = self._requests.get(request_id)
@@ -330,10 +514,163 @@ class InMemoryApprovalStore(ApprovalStore):
                     f"attempted execution from '{channel}'."
                 )
 
+            if requester_id is not None and req.user_id != requester_id.strip():
+                return False, req, (
+                    f"Requester mismatch: request belongs to user '{req.user_id}', "
+                    f"attempted execution by '{requester_id}'."
+                )
+
+            # Session incarnation validation (HIGH-02)
+            if session_incarnation_id is not None:
+                if not req.session_incarnation_id:
+                    return False, req, (
+                        f"Legacy approval '{request_id}' lacks session incarnation binding (execution rejected)."
+                    )
+                if req.session_incarnation_id != session_incarnation_id:
+                    return False, req, (
+                        f"Session incarnation mismatch: request belongs to incarnation '{req.session_incarnation_id}', "
+                        f"attempted execution in '{session_incarnation_id}' (stale approval rejected)."
+                    )
+            elif req.session_incarnation_id is not None:
+                return False, req, (
+                    f"Session incarnation mismatch: request requires incarnation binding '{req.session_incarnation_id}', "
+                    f"but no session incarnation was provided."
+                )
+
             # Atomic one-time state transition
             req.status = ApprovalStatus.CONSUMED
             req.consumed_at = time.time()
             return True, req, "Approval successfully consumed."
+
+
+class _CrossProcessLock:
+    """OS-level advisory file lock for cross-process synchronization.
+
+    Provides cross-process and cross-thread mutual exclusion:
+    - Windows: msvcrt.locking with byte-range locking on an open file descriptor
+    - POSIX: fcntl.flock with LOCK_EX / LOCK_NB
+    - Re-entrant per thread within the same process
+    - Automatic OS cleanup if holding process terminates or crashes
+    - Configurable acquisition timeout and polling backoff
+    """
+
+    def __init__(
+        self,
+        lock_path: Path,
+        timeout: float = 10.0,
+        poll_interval: float = 0.01,
+    ) -> None:
+        self.lock_path = lock_path
+        self.timeout = timeout
+        self.poll_interval = poll_interval
+        self._thread_lock = threading.RLock()
+        self._owner_thread: Optional[int] = None
+        self._depth: int = 0
+        self._file: Optional[Any] = None
+
+    def acquire(self) -> bool:
+        """Acquire the cross-process lock with re-entrancy and timeout."""
+        cur_thread = threading.get_ident()
+        if self._owner_thread == cur_thread:
+            self._depth += 1
+            return True
+
+        start_time = time.monotonic()
+        acquired = self._thread_lock.acquire(timeout=self.timeout)
+        if not acquired:
+            raise TimeoutError(
+                f"Timed out after {self.timeout}s waiting for thread lock on {self.lock_path.name}"
+            )
+
+        try:
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = open(self.lock_path, "a+b")
+            fd = self._file.fileno()
+
+            while True:
+                try:
+                    if msvcrt is not None:
+                        self._file.seek(0)
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    elif _HAS_FCNTL:
+                        getattr(fcntl, "flock")(fd, _LOCK_EX | _LOCK_NB)
+                    break
+                except (OSError, IOError):
+                    if (time.monotonic() - start_time) >= self.timeout:
+                        if self._file:
+                            try:
+                                self._file.close()
+                            except Exception:
+                                pass
+                            self._file = None
+                        raise TimeoutError(
+                            f"Timed out after {self.timeout}s waiting for lock on {self.lock_path.name}"
+                        )
+                    time.sleep(self.poll_interval)
+
+            self._owner_thread = cur_thread
+            self._depth = 1
+            return True
+        except Exception:
+            if self._file:
+                try:
+                    self._file.close()
+                except Exception:
+                    pass
+                self._file = None
+            self._thread_lock.release()
+            raise
+
+    def release(self) -> None:
+        """Release the cross-process lock."""
+        cur_thread = threading.get_ident()
+        if self._owner_thread != cur_thread:
+            return
+
+        self._depth -= 1
+        if self._depth > 0:
+            return
+
+        self._owner_thread = None
+        try:
+            if self._file is not None:
+                try:
+                    fd = self._file.fileno()
+                    if msvcrt is not None:
+                        self._file.seek(0)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    elif _HAS_FCNTL:
+                        getattr(fcntl, "flock")(fd, _LOCK_UN)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        self._file.close()
+                    except Exception:
+                        pass
+                    self._file = None
+        finally:
+            self._thread_lock.release()
+
+    def __enter__(self) -> _CrossProcessLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.release()
+
+
+_PROCESS_LOCKS: Dict[str, _CrossProcessLock] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
+
+
+def _get_cross_process_lock(lock_path: Path, timeout: float = 10.0) -> _CrossProcessLock:
+    """Get or create the process-singleton _CrossProcessLock for a given canonical path."""
+    resolved_key = str(lock_path.resolve())
+    with _PROCESS_LOCKS_GUARD:
+        if resolved_key not in _PROCESS_LOCKS:
+            _PROCESS_LOCKS[resolved_key] = _CrossProcessLock(lock_path, timeout=timeout)
+        return _PROCESS_LOCKS[resolved_key]
 
 
 class FileApprovalStore(ApprovalStore):
@@ -344,34 +681,81 @@ class FileApprovalStore(ApprovalStore):
     - Complete path traversal immunity
     - Atomic writes via tempfile + os.replace
     - Corruption quarantine to .brainfrog/approvals/corrupt/
-    - Thread-safe atomic consumption with RLock
+    - Cross-process and cross-thread mutual exclusion on claim/consume
+    - Physical partitioning between active/ and terminal/ approvals
+    - Deterministic bounded terminal retention and expired cleanup
     """
 
-    def __init__(self, repo_dir: Optional[Path] = None, approvals_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        repo_dir: Optional[Path] = None,
+        approvals_dir: Optional[Path] = None,
+        max_terminal_retention: int = DEFAULT_MAX_TERMINAL_RETENTION,
+    ) -> None:
         if approvals_dir is not None:
             self.approvals_dir = Path(approvals_dir).resolve()
         else:
             base = Path(repo_dir).resolve() if repo_dir else Path.cwd().resolve()
             self.approvals_dir = base / ".brainfrog" / "approvals"
 
+        self.terminal_dir = self.approvals_dir / "terminal"
         self.corrupt_dir = self.approvals_dir / "corrupt"
+        self.locks_dir = self.approvals_dir / ".locks"
+        self.max_terminal_retention = max_terminal_retention
         self._lock = threading.RLock()
         self._ensure_directories()
+        self._clean_stale_tmp_files()
 
     def _ensure_directories(self) -> None:
         try:
             self.approvals_dir.mkdir(parents=True, exist_ok=True)
+            self.terminal_dir.mkdir(parents=True, exist_ok=True)
             self.corrupt_dir.mkdir(parents=True, exist_ok=True)
+            self.locks_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.warning(f"Could not create approvals directory {self.approvals_dir}: {e}")
 
-    def _get_approval_path(self, request_id: str) -> Path:
+    def _clean_stale_tmp_files(self) -> None:
+        """Remove any abandoned temporary files older than 60 seconds."""
+        try:
+            now = time.time()
+            for d in (self.approvals_dir, self.terminal_dir):
+                if not d.exists():
+                    continue
+                for f in d.glob(".tmp_*.json"):
+                    try:
+                        if (now - f.stat().st_mtime) > 60:
+                            f.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    def _get_approval_path(self, request_id: str, terminal: bool = False) -> Path:
         """Generate safe deterministic hashed filename from request_id."""
         raw_hash = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:32]
-        target_path = (self.approvals_dir / f"{raw_hash}.json").resolve()
+        base_dir = self.terminal_dir if terminal else self.approvals_dir
+        target_path = (base_dir / f"{raw_hash}.json").resolve()
         if not target_path.is_relative_to(self.approvals_dir):
             raise ValueError(f"Path traversal detected for request_id: {request_id}")
         return target_path
+
+    def _get_lock_path(self, request_id: str) -> Path:
+        """Generate safe deterministic lockfile path from request_id."""
+        raw_hash = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:32]
+        target_path = (self.locks_dir / f"{raw_hash}.lock").resolve()
+        if not target_path.is_relative_to(self.approvals_dir):
+            raise ValueError(f"Path traversal detected for lockfile request_id: {request_id}")
+        return target_path
+
+    def _get_request_lock(self, request_id: str, timeout: float = 10.0) -> _CrossProcessLock:
+        """Obtain the process-singleton cross-process lock for a given request_id."""
+        return _get_cross_process_lock(self._get_lock_path(request_id), timeout=timeout)
+
+    def _get_quota_lock(self, timeout: float = 10.0) -> _CrossProcessLock:
+        """Obtain the process-singleton cross-process lock for store-wide quota operations."""
+        quota_lock_path = (self.locks_dir / "__store_quota__.lock").resolve()
+        return _get_cross_process_lock(quota_lock_path, timeout=timeout)
 
     def _quarantine_file(self, file_path: Path, reason: str) -> None:
         """Safely quarantine a corrupted approval file."""
@@ -384,38 +768,120 @@ class FileApprovalStore(ApprovalStore):
         except Exception as e:
             logger.error(f"Failed to quarantine corrupt file '{file_path}': {e}")
 
-    def save(self, request: ApprovalRequest) -> bool:
+    def _prune_terminal_records(self) -> int:
+        """Bounded pruning of terminal approval records to prevent unbounded disk growth."""
+        try:
+            if not self.terminal_dir.exists():
+                return 0
+            terminal_files = [f for f in self.terminal_dir.glob("*.json") if not f.name.startswith(".tmp_")]
+            if len(terminal_files) <= self.max_terminal_retention:
+                return 0
+            terminal_files.sort(key=lambda p: p.stat().st_mtime)
+            excess = len(terminal_files) - self.max_terminal_retention
+            pruned = 0
+            for f in terminal_files[:excess]:
+                try:
+                    f.unlink(missing_ok=True)
+                    lock_file = self.locks_dir / f"{f.stem}.lock"
+                    if lock_file.exists():
+                        try:
+                            lock_file.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    pruned += 1
+                except OSError:
+                    pass
+            return pruned
+        except Exception as e:
+            logger.warning(f"Error during terminal records pruning: {e}")
+            return 0
+
+    def cleanup_expired(self, max_items: int = DEFAULT_MAX_CLEANUP_BATCH) -> int:
+        """Bounded garbage collection of expired active approvals.
+
+        Inspects active approvals, transitions expired requests to EXPIRED (which moves them
+        to the terminal directory), and caps total work per invocation at max_items.
+        """
         with self._lock:
-            try:
-                self._ensure_directories()
-                target_file = self._get_approval_path(request.request_id)
-                data = request.to_dict()
-                content = json.dumps(data, indent=2, ensure_ascii=False)
+            if not self.approvals_dir.exists():
+                return 0
+            now = time.time()
+            cleaned = 0
+            for f in self.approvals_dir.glob("*.json"):
+                if f.name.startswith(".tmp_"):
+                    continue
+                if cleaned >= max_items:
+                    break
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    data = json.loads(content)
+                    expires_at = float(data.get("expires_at", 0))
+                    if expires_at and expires_at < now:
+                        req_id = data.get("request_id")
+                        if req_id:
+                            req = self.get(req_id)
+                            if req and req.is_expired(now):
+                                req.status = ApprovalStatus.EXPIRED
+                                self.save(req)
+                                cleaned += 1
+                except Exception:
+                    pass
+            return cleaned
 
-                tmp_name = f".tmp_{hashlib.sha256(request.request_id.encode('utf-8')).hexdigest()[:16]}_{uuid.uuid4().hex[:8]}.json"
-                tmp_file = self.approvals_dir / tmp_name
+    def save(self, request: ApprovalRequest) -> bool:
+        lock = self._get_request_lock(request.request_id)
+        try:
+            with lock:
+                with self._lock:
+                    self._ensure_directories()
+                    raw_hash = hashlib.sha256(request.request_id.encode("utf-8")).hexdigest()[:32]
+                    is_terminal = request.status in TERMINAL_APPROVAL_STATUSES
+                    dest_dir = self.terminal_dir if is_terminal else self.approvals_dir
+                    target_file = dest_dir / f"{raw_hash}.json"
+                    other_file = (self.approvals_dir if is_terminal else self.terminal_dir) / f"{raw_hash}.json"
 
-                with open(tmp_file, "w", encoding="utf-8") as f:
-                    f.write(content)
-                    f.flush()
-                    try:
-                        os.fsync(f.fileno())
-                    except (AttributeError, OSError):
-                        pass
+                    data = request.to_dict()
+                    content = json.dumps(data, indent=2, ensure_ascii=False)
 
-                os.replace(tmp_file, target_file)
-                return True
-            except Exception as e:
-                logger.error(f"Failed to save approval request '{request.request_id}': {e}")
-                return False
+                    tmp_name = f".tmp_{raw_hash[:16]}_{uuid.uuid4().hex[:8]}.json"
+                    tmp_file = dest_dir / tmp_name
+
+                    with open(tmp_file, "w", encoding="utf-8") as f:
+                        f.write(content)
+                        f.flush()
+                        try:
+                            os.fsync(f.fileno())
+                        except (AttributeError, OSError):
+                            pass
+
+                    # Unlink from other directory if transitioning
+                    if other_file.exists():
+                        try:
+                            other_file.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+
+                    os.replace(tmp_file, target_file)
+
+                    if is_terminal:
+                        self._prune_terminal_records()
+
+                    return True
+        except Exception as e:
+            logger.error(f"Failed to save approval request '{request.request_id}': {e}")
+            return False
 
     def get(self, request_id: str) -> Optional[ApprovalRequest]:
         with self._lock:
-            try:
-                target_file = self._get_approval_path(request_id)
+            # Check active first
+            target_file = self._get_approval_path(request_id, terminal=False)
+            if not target_file.exists():
+                # Check terminal
+                target_file = self._get_approval_path(request_id, terminal=True)
                 if not target_file.exists():
                     return None
 
+            try:
                 content = target_file.read_text(encoding="utf-8")
                 if not content.strip():
                     self._quarantine_file(target_file, "Empty approval file")
@@ -440,33 +906,69 @@ class FileApprovalStore(ApprovalStore):
                 return None
 
     def delete(self, request_id: str) -> bool:
-        with self._lock:
-            try:
-                target_file = self._get_approval_path(request_id)
-                if target_file.exists():
-                    target_file.unlink()
-                    return True
-                return False
-            except Exception as e:
-                logger.warning(f"Failed to delete approval file for '{request_id}': {e}")
-                return False
+        lock = self._get_request_lock(request_id)
+        try:
+            with lock:
+                with self._lock:
+                    deleted = False
+                    active_file = self._get_approval_path(request_id, terminal=False)
+                    if active_file.exists():
+                        active_file.unlink(missing_ok=True)
+                        deleted = True
+                    terminal_file = self._get_approval_path(request_id, terminal=True)
+                    if terminal_file.exists():
+                        terminal_file.unlink(missing_ok=True)
+                        deleted = True
+                    return deleted
+        except Exception as e:
+            logger.warning(f"Failed to delete approval file for '{request_id}': {e}")
+            return False
 
-    def list_requests(self) -> List[ApprovalRequest]:
+    def list_requests(
+        self,
+        session_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        limit: Optional[int] = None,
+        active_only: bool = True,
+    ) -> List[ApprovalRequest]:
         with self._lock:
-            requests = []
+            requests: List[ApprovalRequest] = []
             if not self.approvals_dir.exists():
                 return requests
 
-            for f in sorted(self.approvals_dir.glob("*.json")):
-                if f.name.startswith(".tmp_"):
-                    continue
+            # Active requests reside in self.approvals_dir (non-recursive glob)
+            candidate_files = [f for f in sorted(self.approvals_dir.glob("*.json")) if not f.name.startswith(".tmp_")]
+            if not active_only and self.terminal_dir.exists():
+                candidate_files.extend(
+                    [f for f in sorted(self.terminal_dir.glob("*.json")) if not f.name.startswith(".tmp_")]
+                )
+
+            for f in candidate_files:
+                if limit is not None and len(requests) >= limit:
+                    break
                 try:
                     content = f.read_text(encoding="utf-8")
                     data = json.loads(content)
-                    if isinstance(data, dict) and "request_id" in data:
-                        requests.append(ApprovalRequest.from_dict(data))
+                    if not isinstance(data, dict) or "request_id" not in data:
+                        continue
+
+                    if session_id is not None and data.get("session_id") != session_id:
+                        continue
+                    if requester_id is not None and data.get("user_id") != requester_id.strip():
+                        continue
+                    if channel is not None and str(data.get("channel", "")).lower() != channel.lower().strip():
+                        continue
+
+                    req = ApprovalRequest.from_dict(data)
+                    if active_only:
+                        if req.status not in ACTIVE_APPROVAL_STATUSES or req.is_expired():
+                            continue
+
+                    requests.append(req)
                 except Exception:
                     pass
+
             return requests
 
     def claim_and_consume(
@@ -475,52 +977,83 @@ class FileApprovalStore(ApprovalStore):
         expected_digest: str,
         session_id: str,
         channel: str,
+        session_incarnation_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
-        with self._lock:
-            req = self.get(request_id)
-            if req is None:
-                return False, None, f"Approval request '{request_id}' not found."
+        lock = self._get_request_lock(request_id)
+        try:
+            with lock:
+                with self._lock:
+                    req = self.get(request_id)
+                    if req is None:
+                        return False, None, f"Approval request '{request_id}' not found."
 
-            if req.status == ApprovalStatus.CONSUMED:
-                return False, req, f"Approval request '{request_id}' has already been consumed (replay prevented)."
+                    if req.status == ApprovalStatus.CONSUMED:
+                        return False, req, f"Approval request '{request_id}' has already been consumed (replay prevented)."
 
-            if req.status == ApprovalStatus.REJECTED:
-                return False, req, f"Approval request '{request_id}' was rejected."
+                    if req.status == ApprovalStatus.REJECTED:
+                        return False, req, f"Approval request '{request_id}' was rejected."
 
-            if req.status == ApprovalStatus.CANCELLED:
-                return False, req, f"Approval request '{request_id}' was cancelled."
+                    if req.status == ApprovalStatus.CANCELLED:
+                        return False, req, f"Approval request '{request_id}' was cancelled."
 
-            if req.is_expired():
-                req.status = ApprovalStatus.EXPIRED
-                self.save(req)
-                return False, req, f"Approval request '{request_id}' has expired."
+                    if req.is_expired():
+                        req.status = ApprovalStatus.EXPIRED
+                        self.save(req)
+                        return False, req, f"Approval request '{request_id}' has expired."
 
-            if req.status != ApprovalStatus.APPROVED:
-                return False, req, f"Approval request '{request_id}' is not in APPROVED state (current: {req.status.value})."
+                    if req.status != ApprovalStatus.APPROVED:
+                        return False, req, f"Approval request '{request_id}' is not in APPROVED state (current: {req.status.value})."
 
-            if req.operation_digest != expected_digest:
-                return False, req, (
-                    f"Operation digest mismatch: expected '{expected_digest}', "
-                    f"approved '{req.operation_digest}' (operation substitution prevented)."
-                )
+                    if req.operation_digest != expected_digest:
+                        return False, req, (
+                            f"Operation digest mismatch: expected '{expected_digest}', "
+                            f"approved '{req.operation_digest}' (operation substitution prevented)."
+                        )
 
-            if req.session_id != session_id:
-                return False, req, (
-                    f"Session mismatch: request belongs to '{req.session_id}', "
-                    f"attempted execution from '{session_id}'."
-                )
+                    if req.session_id != session_id:
+                        return False, req, (
+                            f"Session mismatch: request belongs to '{req.session_id}', "
+                            f"attempted execution from '{session_id}'."
+                        )
 
-            if req.channel.lower() != channel.lower():
-                return False, req, (
-                    f"Channel mismatch: request belongs to '{req.channel}', "
-                    f"attempted execution from '{channel}'."
-                )
+                    if req.channel.lower() != channel.lower():
+                        return False, req, (
+                            f"Channel mismatch: request belongs to '{req.channel}', "
+                            f"attempted execution from '{channel}'."
+                        )
 
-            # Atomic one-time state transition
-            req.status = ApprovalStatus.CONSUMED
-            req.consumed_at = time.time()
-            self.save(req)
-            return True, req, "Approval successfully consumed."
+                    if requester_id is not None and req.user_id != requester_id.strip():
+                        return False, req, (
+                            f"Requester mismatch: request belongs to user '{req.user_id}', "
+                            f"attempted execution by '{requester_id}'."
+                        )
+
+                    # Session incarnation validation (HIGH-02)
+                    if session_incarnation_id is not None:
+                        if not req.session_incarnation_id:
+                            return False, req, (
+                                f"Legacy approval '{request_id}' lacks session incarnation binding (execution rejected)."
+                            )
+                        if req.session_incarnation_id != session_incarnation_id:
+                            return False, req, (
+                                f"Session incarnation mismatch: request belongs to incarnation '{req.session_incarnation_id}', "
+                                f"attempted execution in '{session_incarnation_id}' (stale approval rejected)."
+                            )
+                    elif req.session_incarnation_id is not None:
+                        return False, req, (
+                            f"Session incarnation mismatch: request requires incarnation binding '{req.session_incarnation_id}', "
+                            f"but no session incarnation was provided."
+                        )
+
+                    # Atomic one-time state transition
+                    req.status = ApprovalStatus.CONSUMED
+                    req.consumed_at = time.time()
+                    self.save(req)
+                    return True, req, "Approval successfully consumed."
+        except TimeoutError as te:
+            logger.warning(f"Timeout acquiring lock for request '{request_id}': {te}")
+            return False, None, f"Lock timeout: request '{request_id}' is currently locked by another process."
 
 
 class ApprovalService:
@@ -531,10 +1064,18 @@ class ApprovalService:
         store: Optional[ApprovalStore] = None,
         default_ttl_seconds: float = DEFAULT_APPROVAL_TTL_SECONDS,
         two_man_rule_enabled: bool = True,
+        max_pending_per_session: int = DEFAULT_MAX_PENDING_PER_SESSION,
+        max_pending_per_requester: int = DEFAULT_MAX_PENDING_PER_REQUESTER,
+        max_pending_global: int = DEFAULT_MAX_PENDING_GLOBAL,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
     ) -> None:
         self.store = store or FileApprovalStore()
         self.default_ttl_seconds = default_ttl_seconds
         self.two_man_rule_enabled = two_man_rule_enabled
+        self.max_pending_per_session = max_pending_per_session
+        self.max_pending_per_requester = max_pending_per_requester
+        self.max_pending_global = max_pending_global
+        self.max_payload_bytes = max_payload_bytes
 
     def create_request(
         self,
@@ -546,8 +1087,9 @@ class ApprovalService:
         canonical_operation: CanonicalOperation,
         risk_class: str = RiskClass.MEDIUM.value,
         ttl_seconds: Optional[float] = None,
+        session_incarnation_id: Optional[str] = None,
     ) -> ApprovalRequest:
-        """Create and persist a new PENDING approval request with secure nonce."""
+        """Create and persist a new PENDING approval request with secure nonce and quota bounds."""
         now = time.time()
         ttl = ttl_seconds or self.default_ttl_seconds
         expires_at = now + ttl
@@ -561,8 +1103,8 @@ class ApprovalService:
             request_id=request_id,
             session_id=session_id,
             channel=channel.lower().strip(),
-            user_id=str(user_id).strip(),
-            conversation_id=str(conversation_id).strip(),
+            user_id=user_id.strip(),
+            conversation_id=conversation_id.strip(),
             operation_type=operation_type,
             canonical_operation=canonical_operation,
             operation_digest=digest,
@@ -571,8 +1113,58 @@ class ApprovalService:
             expires_at=expires_at,
             nonce=nonce,
             status=ApprovalStatus.PENDING,
+            session_incarnation_id=session_incarnation_id,
         )
-        self.store.save(request)
+
+        # 1. Deterministic Payload Size Bound (serialized JSON)
+        serialized_bytes = len(json.dumps(request.to_dict(), ensure_ascii=False).encode("utf-8"))
+        if serialized_bytes > self.max_payload_bytes:
+            raise ApprovalPayloadTooLargeError(
+                f"Approval payload size ({serialized_bytes} bytes) exceeds limit "
+                f"({self.max_payload_bytes} bytes)."
+            )
+
+        # 2. Atomic Quota Enforcement under store quota lock
+        quota_lock_ctx = (
+            self.store._get_quota_lock()
+            if hasattr(self.store, "_get_quota_lock")
+            else nullcontext()
+        )
+        with quota_lock_ctx:
+            # Perform bounded expired cleanup to release stale quota slots
+            if hasattr(self.store, "cleanup_expired"):
+                self.store.cleanup_expired(max_items=DEFAULT_MAX_CLEANUP_BATCH)
+
+            active_requests = self.store.list_requests(active_only=True)
+
+            # Global quota check
+            global_count = len(active_requests)
+            if global_count >= self.max_pending_global:
+                raise ApprovalQuotaExceededError(
+                    f"Global pending approval quota exceeded "
+                    f"({global_count}/{self.max_pending_global})."
+                )
+
+            # Session quota check
+            session_count = sum(1 for r in active_requests if r.session_id == session_id and not r.is_expired())
+            if session_count >= self.max_pending_per_session:
+                raise ApprovalQuotaExceededError(
+                    f"Pending approval quota exceeded for session '{session_id}' "
+                    f"({session_count}/{self.max_pending_per_session})."
+                )
+
+            # Requester quota check
+            clean_user = user_id.strip()
+            requester_count = sum(1 for r in active_requests if r.user_id == clean_user and not r.is_expired())
+            if requester_count >= self.max_pending_per_requester:
+                raise ApprovalQuotaExceededError(
+                    f"Pending approval quota exceeded for requester '{clean_user}' "
+                    f"({requester_count}/{self.max_pending_per_requester})."
+                )
+
+            if not self.store.save(request):
+                raise IOError(f"Failed to persist approval request '{request.request_id}'")
+
         return request
 
     def approve(
@@ -583,36 +1175,42 @@ class ApprovalService:
         session_id: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
         """Transition a request from PENDING -> APPROVED with two-man rule validation."""
-        req = self.store.get(request_id)
-        if req is None:
-            return False, f"Approval request '{request_id}' not found.", None
+        lock_ctx = (
+            self.store._get_request_lock(request_id)
+            if hasattr(self.store, "_get_request_lock")
+            else nullcontext()
+        )
+        with lock_ctx:
+            req = self.store.get(request_id)
+            if req is None:
+                return False, f"Approval request '{request_id}' not found.", None
 
-        if req.is_expired():
-            req.status = ApprovalStatus.EXPIRED
+            if req.is_expired():
+                req.status = ApprovalStatus.EXPIRED
+                self.store.save(req)
+                return False, f"Approval request '{request_id}' has expired.", req
+
+            if req.status != ApprovalStatus.PENDING:
+                return False, f"Cannot approve request '{request_id}' with status {req.status.value}.", req
+
+            # Channel verification
+            if channel.lower().strip() != req.channel.lower():
+                return False, f"Channel mismatch: request belongs to '{req.channel}', cannot approve from '{channel}'.", req
+
+            # Session verification (if enforced)
+            if session_id and session_id != req.session_id:
+                return False, f"Session mismatch: request belongs to session '{req.session_id}'.", req
+
+            # Two-man rule enforcement
+            clean_approver = approver_id.strip()
+            if self.two_man_rule_enabled and clean_approver == req.user_id:
+                return False, "Two-man rule violation: Requester cannot approve their own request.", req
+
+            req.status = ApprovalStatus.APPROVED
+            req.approver_id = clean_approver
+            req.approved_at = time.time()
             self.store.save(req)
-            return False, f"Approval request '{request_id}' has expired.", req
-
-        if req.status != ApprovalStatus.PENDING:
-            return False, f"Cannot approve request '{request_id}' with status {req.status.value}.", req
-
-        # Channel verification
-        if channel.lower().strip() != req.channel.lower():
-            return False, f"Channel mismatch: request belongs to '{req.channel}', cannot approve from '{channel}'.", req
-
-        # Session verification (if enforced)
-        if session_id and session_id != req.session_id:
-            return False, f"Session mismatch: request belongs to session '{req.session_id}'.", req
-
-        # Two-man rule enforcement
-        clean_approver = str(approver_id).strip()
-        if self.two_man_rule_enabled and clean_approver == req.user_id:
-            return False, "Two-man rule violation: Requester cannot approve their own request.", req
-
-        req.status = ApprovalStatus.APPROVED
-        req.approver_id = clean_approver
-        req.approved_at = time.time()
-        self.store.save(req)
-        return True, f"Request '{request_id}' has been approved by user '{clean_approver}'.", req
+            return True, f"Request '{request_id}' has been approved by user '{clean_approver}'.", req
 
     def reject(
         self,
@@ -622,19 +1220,25 @@ class ApprovalService:
         reason: str = "Rejected by human operator",
     ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
         """Transition a request from PENDING -> REJECTED."""
-        req = self.store.get(request_id)
-        if req is None:
-            return False, f"Approval request '{request_id}' not found.", None
+        lock_ctx = (
+            self.store._get_request_lock(request_id)
+            if hasattr(self.store, "_get_request_lock")
+            else nullcontext()
+        )
+        with lock_ctx:
+            req = self.store.get(request_id)
+            if req is None:
+                return False, f"Approval request '{request_id}' not found.", None
 
-        if req.status != ApprovalStatus.PENDING:
-            return False, f"Cannot reject request '{request_id}' with status {req.status.value}.", req
+            if req.status != ApprovalStatus.PENDING:
+                return False, f"Cannot reject request '{request_id}' with status {req.status.value}.", req
 
-        clean_approver = str(approver_id).strip()
-        req.status = ApprovalStatus.REJECTED
-        req.approver_id = clean_approver
-        req.rejection_reason = reason
-        self.store.save(req)
-        return True, f"Request '{request_id}' has been rejected by user '{clean_approver}'.", req
+            clean_approver = approver_id.strip()
+            req.status = ApprovalStatus.REJECTED
+            req.approver_id = clean_approver
+            req.rejection_reason = reason
+            self.store.save(req)
+            return True, f"Request '{request_id}' has been rejected by user '{clean_approver}'.", req
 
     def cancel(
         self,
@@ -642,19 +1246,55 @@ class ApprovalService:
         requester_id: str,
     ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
         """Allow the original requester to cancel their own pending request."""
-        req = self.store.get(request_id)
-        if req is None:
-            return False, f"Approval request '{request_id}' not found.", None
+        lock_ctx = (
+            self.store._get_request_lock(request_id)
+            if hasattr(self.store, "_get_request_lock")
+            else nullcontext()
+        )
+        with lock_ctx:
+            req = self.store.get(request_id)
+            if req is None:
+                return False, f"Approval request '{request_id}' not found.", None
 
-        if req.status != ApprovalStatus.PENDING:
-            return False, f"Cannot cancel request '{request_id}' with status {req.status.value}.", req
+            if req.status != ApprovalStatus.PENDING:
+                return False, f"Cannot cancel request '{request_id}' with status {req.status.value}.", req
 
-        if str(requester_id).strip() != req.user_id:
-            return False, "Only the original requester can cancel a pending request.", req
+            if requester_id.strip() != req.user_id:
+                return False, "Only the original requester can cancel a pending request.", req
 
-        req.status = ApprovalStatus.CANCELLED
-        self.store.save(req)
-        return True, f"Request '{request_id}' has been cancelled.", req
+            req.status = ApprovalStatus.CANCELLED
+            self.store.save(req)
+            return True, f"Request '{request_id}' has been cancelled.", req
+
+    def invalidate_session_approvals(
+        self,
+        session_id: str,
+        session_incarnation_id: Optional[str] = None,
+        reason: str = "Session reset",
+    ) -> int:
+        """Cancel/invalidate all outstanding (PENDING and APPROVED) approvals for a session."""
+        invalidated = 0
+        for req in self.store.list_requests(session_id=session_id, active_only=True):
+            if req.session_id != session_id:
+                continue
+            if session_incarnation_id is not None and req.session_incarnation_id and req.session_incarnation_id != session_incarnation_id:
+                continue
+            if req.status not in ACTIVE_APPROVAL_STATUSES:
+                continue
+
+            lock_ctx = (
+                self.store._get_request_lock(req.request_id)
+                if hasattr(self.store, "_get_request_lock")
+                else nullcontext()
+            )
+            with lock_ctx:
+                current = self.store.get(req.request_id)
+                if current and current.status in ACTIVE_APPROVAL_STATUSES:
+                    current.status = ApprovalStatus.CANCELLED
+                    current.rejection_reason = f"Cancelled due to {reason}"
+                    self.store.save(current)
+                    invalidated += 1
+        return invalidated
 
     def verify_and_consume(
         self,
@@ -662,6 +1302,8 @@ class ApprovalService:
         expected_digest: str,
         session_id: str,
         channel: str,
+        session_incarnation_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
         """Atomically verify and consume an approved request."""
         return self.store.claim_and_consume(
@@ -669,6 +1311,8 @@ class ApprovalService:
             expected_digest=expected_digest,
             session_id=session_id,
             channel=channel,
+            session_incarnation_id=session_incarnation_id,
+            requester_id=requester_id,
         )
 
     def format_approval_prompt(self, request: ApprovalRequest) -> str:

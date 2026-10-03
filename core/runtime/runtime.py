@@ -27,24 +27,24 @@ from .permissions import (
 )
 from .session import (
     FileSessionStore,
-    InMemorySessionStore,
     SessionManager,
     SessionState,
     SessionStore,
+    StaleSessionStateError,
     scrub_secrets,
     session_manager,
 )
 from .approval import (
-    ApprovalRequest,
+    ApprovalPayloadTooLargeError,
+    ApprovalQuotaExceededError,
     ApprovalService,
     ApprovalStatus,
     ApprovalStore,
-    CanonicalOperation,
     FileApprovalStore,
-    InMemoryApprovalStore,
     RiskClass,
     extract_canonical_operation,
 )
+from .contract import ApprovedExecutionContract
 
 
 class BrainFrogRuntime:
@@ -72,6 +72,15 @@ class BrainFrogRuntime:
         approval_store: Optional[ApprovalStore] = None,
         require_approval: bool = False,
         two_man_rule_enabled: bool = True,
+        max_pending_per_session: Optional[int] = None,
+        max_pending_per_requester: Optional[int] = None,
+        max_pending_global: Optional[int] = None,
+        max_payload_bytes: Optional[int] = None,
+        max_terminal_retention: Optional[int] = None,
+        max_history_entries: Optional[int] = None,
+        max_history_bytes: Optional[int] = None,
+        max_message_bytes: Optional[int] = None,
+        session_ttl_seconds: Optional[float] = None,
     ) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
         self.default_backend = default_backend
@@ -79,12 +88,22 @@ class BrainFrogRuntime:
         self.default_model = default_model
         self.default_test_cmd = default_test_cmd
 
+        session_mgr_kwargs: Dict[str, Any] = {}
+        if max_history_entries is not None:
+            session_mgr_kwargs["max_history_entries"] = max_history_entries
+        if max_history_bytes is not None:
+            session_mgr_kwargs["max_history_bytes"] = max_history_bytes
+        if max_message_bytes is not None:
+            session_mgr_kwargs["max_message_bytes"] = max_message_bytes
+        if session_ttl_seconds is not None:
+            session_mgr_kwargs["session_ttl_seconds"] = session_ttl_seconds
+
         if sessions is not None:
             self.sessions = sessions
         elif session_store is not None:
-            self.sessions = SessionManager(store=session_store)
+            self.sessions = SessionManager(store=session_store, **session_mgr_kwargs)
         elif persist_sessions:
-            self.sessions = SessionManager(store=FileSessionStore(repo_dir=self.repo_dir))
+            self.sessions = SessionManager(store=FileSessionStore(repo_dir=self.repo_dir), **session_mgr_kwargs)
         else:
             self.sessions = session_manager
 
@@ -95,12 +114,31 @@ class BrainFrogRuntime:
         if approval_service is not None:
             self.approval_service = approval_service
         elif approval_store is not None:
-            self.approval_service = ApprovalService(store=approval_store, two_man_rule_enabled=two_man_rule_enabled)
+            svc_kwargs: Dict[str, Any] = {"store": approval_store, "two_man_rule_enabled": two_man_rule_enabled}
+            if max_pending_per_session is not None:
+                svc_kwargs["max_pending_per_session"] = max_pending_per_session
+            if max_pending_per_requester is not None:
+                svc_kwargs["max_pending_per_requester"] = max_pending_per_requester
+            if max_pending_global is not None:
+                svc_kwargs["max_pending_global"] = max_pending_global
+            if max_payload_bytes is not None:
+                svc_kwargs["max_payload_bytes"] = max_payload_bytes
+            self.approval_service = ApprovalService(**svc_kwargs)
         else:
-            self.approval_service = ApprovalService(
-                store=FileApprovalStore(repo_dir=self.repo_dir),
-                two_man_rule_enabled=two_man_rule_enabled,
-            )
+            store_kwargs: Dict[str, Any] = {"repo_dir": self.repo_dir}
+            if max_terminal_retention is not None:
+                store_kwargs["max_terminal_retention"] = max_terminal_retention
+            store = FileApprovalStore(**store_kwargs)
+            svc_kwargs = {"store": store, "two_man_rule_enabled": two_man_rule_enabled}
+            if max_pending_per_session is not None:
+                svc_kwargs["max_pending_per_session"] = max_pending_per_session
+            if max_pending_per_requester is not None:
+                svc_kwargs["max_pending_per_requester"] = max_pending_per_requester
+            if max_pending_global is not None:
+                svc_kwargs["max_pending_global"] = max_pending_global
+            if max_payload_bytes is not None:
+                svc_kwargs["max_payload_bytes"] = max_payload_bytes
+            self.approval_service = ApprovalService(**svc_kwargs)
         self.require_approval = require_approval
 
     def _resolve_test_cmd(self, custom_cmd: Optional[str]) -> List[str]:
@@ -150,6 +188,7 @@ class BrainFrogRuntime:
             conversation_id=message.conversation_id,
             default_mode=message.metadata.get("mode", "build"),
         )
+        initial_incarnation = session.session_incarnation_id
 
         # 2. Deterministic Permission Gate
         policy = self.policy_provider(effective_channel)
@@ -196,7 +235,14 @@ class BrainFrogRuntime:
                 return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
 
             if cmd in ("/reset", "/new"):
+                old_incarnation = session.session_incarnation_id
+                self.approval_service.invalidate_session_approvals(
+                    session_id=session.session_id,
+                    session_incarnation_id=old_incarnation,
+                    reason=f"session reset ({cmd})",
+                )
                 self.sessions.reset(session.session_id)
+                emit("agent.session.reset", {"session_id": session.session_id, "command": cmd})
                 return OutgoingMessage(text="🔄 Session context has been reset.", events=events, success=True, status="completed")
 
             if cmd == "/approve":
@@ -245,12 +291,17 @@ class BrainFrogRuntime:
                     return OutgoingMessage(text=f"❌ {resp_msg}", events=events, success=False, status="rejected", error=resp_msg)
 
             if cmd == "/approvals":
+                pending = self.approval_service.store.list_requests(
+                    session_id=session.session_id,
+                    active_only=True,
+                    limit=20,
+                )
                 pending = [
-                    r for r in self.approval_service.store.list_requests()
-                    if r.session_id == session.session_id
+                    r for r in pending
+                    if (r.session_incarnation_id is None or r.session_incarnation_id == session.session_incarnation_id)
                     and r.status == ApprovalStatus.PENDING
                     and not r.is_expired()
-                ]
+                ][:20]
                 if not pending:
                     return OutgoingMessage(text="ℹ️ No pending approvals for this session.", events=events, success=True, status="completed")
                 lines = ["📋 **Pending Approvals:**\n"]
@@ -259,18 +310,37 @@ class BrainFrogRuntime:
                 return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
 
             if cmd in ("/exec", "/run"):
-                if len(parts) < 2 or not parts[1].strip():
+                tokens = raw_text.strip().split()
+                if len(tokens) < 2 or not tokens[1].strip():
                     return OutgoingMessage(text="⚠️ Usage: `/exec <request_id>`", events=events, success=False, status="rejected")
-                exec_req_id = parts[1].strip()
+                if len(tokens) > 2:
+                    reason = "Additional arguments in /exec command are not permitted."
+                    emit("agent.rejected", {"command": cmd, "reason": reason})
+                    return OutgoingMessage(
+                        text=f"⚠️ Usage: `/exec <request_id>` ({reason})",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=reason,
+                    )
+                exec_req_id = tokens[1].strip()
                 target_req = self.approval_service.store.get(exec_req_id)
                 if not target_req:
                     return OutgoingMessage(text=f"❌ Request '{exec_req_id}' not found.", events=events, success=False, status="rejected")
                 raw_text = f"{target_req.canonical_operation.action_type} {target_req.canonical_operation.target}"
-                message.metadata["approval_id"] = exec_req_id
-                message.metadata["action_type"] = target_req.canonical_operation.action_type
-                message.metadata["target"] = target_req.canonical_operation.target
+
+                # Sanitize metadata: discard untrusted incoming payload, use only approved canonical parameters
+                trusted_meta = {}
+                if "repo_dir" in message.metadata:
+                    trusted_meta["repo_dir"] = message.metadata["repo_dir"]
+                trusted_meta["approval_id"] = exec_req_id
+                trusted_meta["expected_digest"] = target_req.operation_digest
+                trusted_meta["action_type"] = target_req.canonical_operation.action_type
+                trusted_meta["target"] = target_req.canonical_operation.target
                 for k, v in target_req.canonical_operation.parameters.items():
-                    message.metadata[k] = v
+                    trusted_meta[k] = v
+                message.metadata.clear()
+                message.metadata.update(trusted_meta)
 
             if cmd in ("/undo", "/diff", "/preview", "/screenshot", "/paste", "/attach", "/images", "/clear-images"):
                 reason = f"Command '{cmd}' is only available in the local CLI interface."
@@ -291,15 +361,20 @@ class BrainFrogRuntime:
 
         approval_id = message.metadata.get("approval_id") or message.metadata.get("request_id")
         approved_execution = False
+        execution_contract: Optional[ApprovedExecutionContract] = None
 
         if approval_id:
-            canonical_op = extract_canonical_operation(raw_text, action, message.metadata)
-            digest = canonical_op.compute_digest()
+            digest = message.metadata.get("expected_digest")
+            if not digest:
+                canonical_op = extract_canonical_operation(raw_text, action, message.metadata, repo_dir=Path(self.repo_dir))
+                digest = canonical_op.compute_digest()
             is_valid, app_req, consume_reason = self.approval_service.verify_and_consume(
                 request_id=approval_id,
                 expected_digest=digest,
                 session_id=session.session_id,
                 channel=effective_channel,
+                session_incarnation_id=session.session_incarnation_id,
+                requester_id=message.user_id,
             )
             if not is_valid:
                 emit("agent.approval.invalid", {"request_id": approval_id, "reason": consume_reason})
@@ -311,6 +386,11 @@ class BrainFrogRuntime:
                     error=consume_reason,
                 )
             approved_execution = True
+            if app_req is not None:
+                execution_contract = ApprovedExecutionContract.from_approval_request(
+                    app_req,
+                    repo_dir=Path(message.metadata.get("repo_dir") or self.repo_dir).resolve(),
+                )
             emit("agent.approval.consumed", {
                 "request_id": approval_id,
                 "approver": app_req.approver_id if app_req else None,
@@ -319,21 +399,70 @@ class BrainFrogRuntime:
         if not allowed and not approved_execution:
             should_request_approval = bool(self.require_approval or message.metadata.get("require_approval"))
             if should_request_approval:
-                canonical_op = extract_canonical_operation(raw_text, action, message.metadata)
+                canonical_op = extract_canonical_operation(raw_text, action, message.metadata, repo_dir=Path(self.repo_dir))
+
+                # M-02 Remediation: Fail-closed on invalid or ambiguous filesystem targets
+                is_fs_action = action in (
+                    PermissionAction.WRITE_CODE,
+                    PermissionAction.WRITE_FILES,
+                    PermissionAction.READ_CODE,
+                ) or canonical_op.action_type in ("write_code", "write_files", "write_file", "delete_file", "read_code")
+
+                if is_fs_action:
+                    if canonical_op.parameters.get("invalid_path"):
+                        fail_reason = "Invalid target path: Path must be a safe, workspace-relative path."
+                        emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": fail_reason})
+                        return OutgoingMessage(
+                            text=f"❌ {fail_reason}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=fail_reason,
+                        )
+                    if not canonical_op.target or canonical_op.parameters.get("ambiguous"):
+                        fail_reason = "Target is ambiguous or non-filesystem token. Please specify an exact workspace-relative path."
+                        emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": fail_reason})
+                        return OutgoingMessage(
+                            text=f"⚠️ {fail_reason}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=fail_reason,
+                        )
                 risk = (
                     RiskClass.CRITICAL.value
                     if action in (PermissionAction.SHELL_EXECUTION, PermissionAction.GIT_DESTRUCTIVE, PermissionAction.DEPLOYMENT)
                     else (RiskClass.HIGH.value if action == PermissionAction.CREDENTIAL_ACCESS else RiskClass.MEDIUM.value)
                 )
-                app_req = self.approval_service.create_request(
-                    session_id=session.session_id,
-                    channel=effective_channel,
-                    user_id=message.user_id,
-                    conversation_id=message.conversation_id,
-                    operation_type=action.value if hasattr(action, "value") else str(action),
-                    canonical_operation=canonical_op,
-                    risk_class=risk,
-                )
+                try:
+                    app_req = self.approval_service.create_request(
+                        session_id=session.session_id,
+                        channel=effective_channel,
+                        user_id=message.user_id,
+                        conversation_id=message.conversation_id,
+                        operation_type=action.value if hasattr(action, "value") else str(action),
+                        canonical_operation=canonical_op,
+                        risk_class=risk,
+                        session_incarnation_id=session.session_incarnation_id,
+                    )
+                except ApprovalQuotaExceededError as qe:
+                    emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": str(qe)})
+                    return OutgoingMessage(
+                        text=f"⚠️ Approval quota exceeded: {qe}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=str(qe),
+                    )
+                except ApprovalPayloadTooLargeError as pe:
+                    emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": str(pe)})
+                    return OutgoingMessage(
+                        text=f"❌ Approval payload too large: {pe}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=str(pe),
+                    )
                 emit("agent.approval.requested", {
                     "request_id": app_req.request_id,
                     "operation": canonical_op.to_canonical_dict(),
@@ -382,14 +511,18 @@ class BrainFrogRuntime:
         test_cmd_list = self._resolve_test_cmd(message.metadata.get("test_cmd"))
 
         # Plan context resolution
-        plan_context = message.metadata.get("plan_context") or session.plan_context
-        if effective_mode == "build" and not plan_context:
-            try:
-                lp = get_latest_plan(workspace_dir)
-                if lp:
-                    plan_context = format_plan_handoff(lp, workspace_dir)
-            except Exception:
-                pass
+        if approved_execution:
+            # Under approved execution, plan_context is only trusted if explicitly authorized in the approval request
+            plan_context = message.metadata.get("plan_context")
+        else:
+            plan_context = message.metadata.get("plan_context") or session.plan_context
+            if effective_mode == "build" and not plan_context:
+                try:
+                    lp = get_latest_plan(workspace_dir)
+                    if lp:
+                        plan_context = format_plan_handoff(lp, workspace_dir)
+                except Exception:
+                    pass
 
         # 4. Instantiate System 1 & System 2 Clients
         try:
@@ -407,11 +540,11 @@ class BrainFrogRuntime:
             return OutgoingMessage(text=f"❌ {err_msg}", events=events, success=False, error=err_msg)
 
         # 5. Load Domains & Prepare Orchestrator Config
-        can_auto_create = bool(effective_mode == "build" and (policy.allow_code_edits or approved_execution))
+        can_auto_create = bool(effective_mode == "build" and policy.allow_code_edits)
         domains = load_module_map(workspace_dir, task=raw_text, auto_create=can_auto_create)
 
         effective_task = raw_text
-        if session.history:
+        if not approved_execution and session.history:
             history_lines = []
             for turn in session.history[-3:]:
                 u_text = turn.get("user", "").strip()
@@ -421,6 +554,14 @@ class BrainFrogRuntime:
                 history_lines.append(f"User: {u_text}\nAssistant: {a_text}")
             if history_lines:
                 effective_task = f"{raw_text}\n\n[Previous Conversation Context]\n" + "\n---\n".join(history_lines)
+
+        is_remote_channel = (
+            policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value
+            or effective_channel.lower().strip() not in ("cli", "local", "terminal")
+        )
+        allow_remote_git_push = False if is_remote_channel else (
+            execution_contract.allows_remote_git_push() if execution_contract else True
+        )
 
         cfg = RunConfig(
             repo_dir=workspace_dir,
@@ -433,6 +574,9 @@ class BrainFrogRuntime:
             mode=effective_mode,
             plan_context=plan_context,
             attached_images=list(message.attachments),
+            execution_contract=execution_contract,
+            origin_channel=effective_channel,
+            allow_remote_git_push=allow_remote_git_push,
         )
 
         def log_runtime(msg: str) -> None:
@@ -496,9 +640,50 @@ class BrainFrogRuntime:
 
         final_text = scrub_secrets("\n\n".join(reply_texts).strip() or "Task completed.")
 
-        # Record in isolated session history and persist
+        # Check if session was reset while request was in-flight (F02 Guard)
+        if session.session_incarnation_id != initial_incarnation:
+            emit("agent.session.stale", {
+                "session_id": session.session_id,
+                "initial_incarnation": initial_incarnation,
+                "current_incarnation": session.session_incarnation_id,
+                "reason": "in_flight_reset",
+            })
+            stale_msg = "⚠️ Session state changed while this request was executing; result was not persisted."
+            return OutgoingMessage(
+                text=stale_msg,
+                events=events,
+                success=False,
+                status="rejected",
+                error=stale_msg,
+                metadata={
+                    "session_id": session.session_id,
+                    "mode": effective_mode,
+                    "stale_session": True,
+                },
+            )
+
+        # Record in isolated session history and persist under optimistic concurrency control
         session.record_interaction(user_text=raw_text, assistant_text=final_text)
-        self.sessions.save(session)
+        try:
+            self.sessions.save(session)
+        except StaleSessionStateError as se:
+            emit("agent.session.stale", {
+                "session_id": session.session_id,
+                "error": str(se),
+            })
+            stale_msg = "⚠️ Session state changed while this request was executing; result was not persisted."
+            return OutgoingMessage(
+                text=stale_msg,
+                events=events,
+                success=False,
+                status="rejected",
+                error=stale_msg,
+                metadata={
+                    "session_id": session.session_id,
+                    "mode": effective_mode,
+                    "stale_session": True,
+                },
+            )
 
         return OutgoingMessage(
             text=final_text,

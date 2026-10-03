@@ -61,13 +61,23 @@ class DeterministicFakeSystem1(SystemOneClient):
 
     def decide(self, state: Dict[str, Any], questions: Dict[str, Any]) -> Dict[str, Answer]:
         self.call_count += 1
-        return {
+        answers = {
             "likely_domain": Answer(choice="unrelated", confidence=0.85),
             "change_type": Answer(choice=self.default_change_type, confidence=0.92),
             "is_sensitive": Answer(noul=0.05, confidence=0.95),
             "complexity": Answer(score=0, confidence=0.90),
             "needs_tests": Answer(noul=0.05, confidence=0.95),
+            "tests_passing": Answer(noul=1.0, confidence=0.95),
+            "diff_complete": Answer(noul=1.0, confidence=0.95),
+            "failure_fixable": Answer(noul=1.0, confidence=0.95),
+            "retry_concern": Answer(score=0, confidence=0.95),
+            "diff_risk": Answer(score="low", confidence=0.95),
+            "safe_to_proceed": Answer(noul=1.0, confidence=0.95),
         }
+        for q_name in questions:
+            if q_name not in answers:
+                answers[q_name] = Answer(choice="open_pr", noul=1.0, score=0, confidence=0.95)
+        return answers
 
 
 class AdversarialFakeSystem1(SystemOneClient):
@@ -89,6 +99,7 @@ class DeterministicFakeSystem2:
     """Deterministic System 2 test double."""
 
     provider_name: str = "fake_system2"
+    model: str = "fake_system2_model"
 
     def __init__(self) -> None:
         self.guidelines: str = ""
@@ -109,8 +120,29 @@ class DeterministicFakeSystem2:
             "relevant_files": [],
         }
 
+    def plan_task(self, task: str, *args: Any, **kwargs: Any) -> List[PlanStep]:
+        self.call_count += 1
+        files = ["config.py"] if "config.py" in task else []
+        return [PlanStep(id="1", description="Implement changes", files=files)]
+
     def write_code(self, *args: Any, **kwargs: Any) -> Dict[str, str]:
+        self.call_count += 1
+        task_str = ""
+        if len(args) > 1 and isinstance(args[1], str):
+            task_str = args[1]
+        elif "task" in kwargs:
+            task_str = str(kwargs["task"])
+        elif args and hasattr(args[0], "files") and args[0].files:
+            return {f: f"# content for {f}" for f in args[0].files}
+        if "config.py" in task_str:
+            return {"config.py": "# config"}
         return {"result": "Code generated successfully"}
+
+    def draft_pr(self, task: str, changed_files: List[str], test_output: str, **kwargs: Any) -> Dict[str, str]:
+        return {"title": f"Update {task}", "body": "Automated PR body"}
+
+    def review_and_fix(self, *args: Any, **kwargs: Any) -> Dict[str, str]:
+        return {}
 
 
 # =============================================================================
@@ -215,6 +247,8 @@ class TestApprovalDomainModel(unittest.TestCase):
         # PENDING -> APPROVED
         ok, msg, approved_req = service.approve(req.request_id, "u1", "telegram", "s1")
         self.assertTrue(ok)
+        self.assertIsNotNone(approved_req)
+        assert approved_req is not None
         self.assertEqual(approved_req.status, ApprovalStatus.APPROVED)
 
         # Cannot approve already APPROVED request
@@ -227,6 +261,8 @@ class TestApprovalDomainModel(unittest.TestCase):
             req.request_id, op.compute_digest(), "s1", "telegram"
         )
         self.assertTrue(ok_consume)
+        self.assertIsNotNone(consumed_req)
+        assert consumed_req is not None
         self.assertEqual(consumed_req.status, ApprovalStatus.CONSUMED)
 
         # CONSUMED -> APPROVED (Denied)
@@ -237,6 +273,8 @@ class TestApprovalDomainModel(unittest.TestCase):
         req_reject = service.create_request("s2", "telegram", "u1", "c1", "write_files", op)
         ok_rej, _, rejected_req = service.reject(req_reject.request_id, "u2", "telegram")
         self.assertTrue(ok_rej)
+        self.assertIsNotNone(rejected_req)
+        assert rejected_req is not None
         self.assertEqual(rejected_req.status, ApprovalStatus.REJECTED)
 
         # REJECTED -> APPROVED (Denied)
@@ -358,6 +396,8 @@ class TestApprovalStorePersistence(unittest.TestCase):
         # Consume via store 2
         ok, consumed, _ = store_2.claim_and_consume(req.request_id, op.compute_digest(), "s1", "whatsapp")
         self.assertTrue(ok)
+        self.assertIsNotNone(consumed)
+        assert consumed is not None
         self.assertEqual(consumed.status, ApprovalStatus.CONSUMED)
 
         # Destroy instance 2 and reload instance 3; verify it remains CONSUMED
@@ -399,6 +439,8 @@ class TestTwoManRuleAndApproverBinding(unittest.TestCase):
 
         ok, msg, approved = service.approve(req.request_id, approver_id="userB", channel="telegram")
         self.assertTrue(ok)
+        self.assertIsNotNone(approved)
+        assert approved is not None
         self.assertEqual(approved.status, ApprovalStatus.APPROVED)
         self.assertEqual(approved.approver_id, "userB")
 
@@ -420,6 +462,8 @@ class TestTwoManRuleAndApproverBinding(unittest.TestCase):
         ok, msg, res = service.approve(req.request_id, approver_id="userA", channel="telegram")
         self.assertFalse(ok)
         self.assertIn("Two-man rule violation", msg)
+        self.assertIsNotNone(res)
+        assert res is not None
         self.assertEqual(res.status, ApprovalStatus.PENDING)
 
     def test_self_approval_allowed_when_two_man_rule_disabled(self) -> None:
@@ -439,6 +483,8 @@ class TestTwoManRuleAndApproverBinding(unittest.TestCase):
 
         ok, msg, approved = service.approve(req.request_id, approver_id="userA", channel="telegram")
         self.assertTrue(ok)
+        self.assertIsNotNone(approved)
+        assert approved is not None
         self.assertEqual(approved.status, ApprovalStatus.APPROVED)
 
 
@@ -519,6 +565,8 @@ class TestOneTimeConsumptionAndConcurrency(unittest.TestCase):
         # 1st claim
         ok1, res1, _ = service.verify_and_consume(req.request_id, op.compute_digest(), "s1", "telegram")
         self.assertTrue(ok1)
+        self.assertIsNotNone(res1)
+        assert res1 is not None
         self.assertEqual(res1.status, ApprovalStatus.CONSUMED)
 
         # 2nd claim (Replay attack)
@@ -920,6 +968,8 @@ class TestEndToEndRuntimeIntegration(unittest.TestCase):
         )
         res_req = self.runtime.process_message(req_msg)
         req_id = res_req.metadata.get("request_id")
+        self.assertIsNotNone(req_id)
+        assert req_id is not None
 
         # Approve by user B
         self.runtime.process_message(
