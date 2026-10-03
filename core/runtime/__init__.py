@@ -20,6 +20,7 @@ from .approval import (
     InMemoryApprovalStore,
     RiskClass,
 )
+from .contract import ApprovedExecutionContract
 from .runtime import BrainFrogRuntime
 from .session import SessionManager, SessionState, session_manager
 
@@ -45,4 +46,5 @@ __all__ = [
     "FileApprovalStore",
     "InMemoryApprovalStore",
     "RiskClass",
+    "ApprovedExecutionContract",
 ]

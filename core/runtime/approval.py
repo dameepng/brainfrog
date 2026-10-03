@@ -22,10 +22,21 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 from core.runtime.session import scrub_secrets
 
@@ -336,6 +347,119 @@ class InMemoryApprovalStore(ApprovalStore):
             return True, req, "Approval successfully consumed."
 
 
+class _CrossProcessLock:
+    """OS-level advisory file lock for cross-process synchronization.
+
+    Provides cross-process and cross-thread mutual exclusion:
+    - Windows: msvcrt.locking with byte-range locking on an open file descriptor
+    - POSIX: fcntl.flock with LOCK_EX / LOCK_NB
+    - Re-entrant per thread within the same process
+    - Automatic OS cleanup if holding process terminates or crashes
+    - Configurable acquisition timeout and polling backoff
+    """
+
+    def __init__(
+        self,
+        lock_path: Path,
+        timeout: float = 10.0,
+        poll_interval: float = 0.01,
+    ) -> None:
+        self.lock_path = lock_path
+        self.timeout = timeout
+        self.poll_interval = poll_interval
+        self._thread_lock = threading.RLock()
+        self._owner_thread: Optional[int] = None
+        self._depth: int = 0
+        self._file: Optional[Any] = None
+
+    def acquire(self) -> bool:
+        """Acquire the cross-process lock with re-entrancy and timeout."""
+        with self._thread_lock:
+            cur_thread = threading.get_ident()
+            if self._owner_thread == cur_thread:
+                self._depth += 1
+                return True
+
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = open(self.lock_path, "a+b")
+            fd = self._file.fileno()
+            start_time = time.monotonic()
+
+            while True:
+                try:
+                    if msvcrt is not None:
+                        self._file.seek(0)
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    elif fcntl is not None:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (OSError, IOError):
+                    if (time.monotonic() - start_time) >= self.timeout:
+                        if self._file:
+                            try:
+                                self._file.close()
+                            except Exception:
+                                pass
+                            self._file = None
+                        raise TimeoutError(
+                            f"Timed out after {self.timeout}s waiting for lock on {self.lock_path.name}"
+                        )
+                    time.sleep(self.poll_interval)
+
+            self._owner_thread = cur_thread
+            self._depth = 1
+            return True
+
+    def release(self) -> None:
+        """Release the cross-process lock."""
+        with self._thread_lock:
+            cur_thread = threading.get_ident()
+            if self._owner_thread != cur_thread:
+                return
+
+            self._depth -= 1
+            if self._depth > 0:
+                return
+
+            self._owner_thread = None
+            if self._file is not None:
+                try:
+                    fd = self._file.fileno()
+                    if msvcrt is not None:
+                        self._file.seek(0)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    elif fcntl is not None:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        self._file.close()
+                    except Exception:
+                        pass
+                    self._file = None
+
+    def __enter__(self) -> _CrossProcessLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.release()
+
+
+_PROCESS_LOCKS: Dict[str, _CrossProcessLock] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
+
+
+def _get_cross_process_lock(lock_path: Path, timeout: float = 10.0) -> _CrossProcessLock:
+    """Get or create the process-singleton _CrossProcessLock for a given canonical path."""
+    resolved_key = str(lock_path.resolve())
+    with _PROCESS_LOCKS_GUARD:
+        if resolved_key not in _PROCESS_LOCKS:
+            _PROCESS_LOCKS[resolved_key] = _CrossProcessLock(lock_path, timeout=timeout)
+        return _PROCESS_LOCKS[resolved_key]
+
+
 class FileApprovalStore(ApprovalStore):
     """Filesystem-backed persistent approval store (.brainfrog/approvals/).
 
@@ -344,7 +468,7 @@ class FileApprovalStore(ApprovalStore):
     - Complete path traversal immunity
     - Atomic writes via tempfile + os.replace
     - Corruption quarantine to .brainfrog/approvals/corrupt/
-    - Thread-safe atomic consumption with RLock
+    - Cross-process and cross-thread mutual exclusion on claim/consume
     """
 
     def __init__(self, repo_dir: Optional[Path] = None, approvals_dir: Optional[Path] = None) -> None:
@@ -355,6 +479,7 @@ class FileApprovalStore(ApprovalStore):
             self.approvals_dir = base / ".brainfrog" / "approvals"
 
         self.corrupt_dir = self.approvals_dir / "corrupt"
+        self.locks_dir = self.approvals_dir / ".locks"
         self._lock = threading.RLock()
         self._ensure_directories()
 
@@ -362,6 +487,7 @@ class FileApprovalStore(ApprovalStore):
         try:
             self.approvals_dir.mkdir(parents=True, exist_ok=True)
             self.corrupt_dir.mkdir(parents=True, exist_ok=True)
+            self.locks_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.warning(f"Could not create approvals directory {self.approvals_dir}: {e}")
 
@@ -372,6 +498,18 @@ class FileApprovalStore(ApprovalStore):
         if not target_path.is_relative_to(self.approvals_dir):
             raise ValueError(f"Path traversal detected for request_id: {request_id}")
         return target_path
+
+    def _get_lock_path(self, request_id: str) -> Path:
+        """Generate safe deterministic lockfile path from request_id."""
+        raw_hash = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:32]
+        target_path = (self.locks_dir / f"{raw_hash}.lock").resolve()
+        if not target_path.is_relative_to(self.approvals_dir):
+            raise ValueError(f"Path traversal detected for lockfile request_id: {request_id}")
+        return target_path
+
+    def _get_request_lock(self, request_id: str, timeout: float = 10.0) -> _CrossProcessLock:
+        """Obtain the process-singleton cross-process lock for a given request_id."""
+        return _get_cross_process_lock(self._get_lock_path(request_id), timeout=timeout)
 
     def _quarantine_file(self, file_path: Path, reason: str) -> None:
         """Safely quarantine a corrupted approval file."""
@@ -385,26 +523,28 @@ class FileApprovalStore(ApprovalStore):
             logger.error(f"Failed to quarantine corrupt file '{file_path}': {e}")
 
     def save(self, request: ApprovalRequest) -> bool:
+        lock = self._get_request_lock(request.request_id)
         with self._lock:
             try:
-                self._ensure_directories()
-                target_file = self._get_approval_path(request.request_id)
-                data = request.to_dict()
-                content = json.dumps(data, indent=2, ensure_ascii=False)
+                with lock:
+                    self._ensure_directories()
+                    target_file = self._get_approval_path(request.request_id)
+                    data = request.to_dict()
+                    content = json.dumps(data, indent=2, ensure_ascii=False)
 
-                tmp_name = f".tmp_{hashlib.sha256(request.request_id.encode('utf-8')).hexdigest()[:16]}_{uuid.uuid4().hex[:8]}.json"
-                tmp_file = self.approvals_dir / tmp_name
+                    tmp_name = f".tmp_{hashlib.sha256(request.request_id.encode('utf-8')).hexdigest()[:16]}_{uuid.uuid4().hex[:8]}.json"
+                    tmp_file = self.approvals_dir / tmp_name
 
-                with open(tmp_file, "w", encoding="utf-8") as f:
-                    f.write(content)
-                    f.flush()
-                    try:
-                        os.fsync(f.fileno())
-                    except (AttributeError, OSError):
-                        pass
+                    with open(tmp_file, "w", encoding="utf-8") as f:
+                        f.write(content)
+                        f.flush()
+                        try:
+                            os.fsync(f.fileno())
+                        except (AttributeError, OSError):
+                            pass
 
-                os.replace(tmp_file, target_file)
-                return True
+                    os.replace(tmp_file, target_file)
+                    return True
             except Exception as e:
                 logger.error(f"Failed to save approval request '{request.request_id}': {e}")
                 return False
@@ -440,13 +580,15 @@ class FileApprovalStore(ApprovalStore):
                 return None
 
     def delete(self, request_id: str) -> bool:
+        lock = self._get_request_lock(request_id)
         with self._lock:
             try:
-                target_file = self._get_approval_path(request_id)
-                if target_file.exists():
-                    target_file.unlink()
-                    return True
-                return False
+                with lock:
+                    target_file = self._get_approval_path(request_id)
+                    if target_file.exists():
+                        target_file.unlink()
+                        return True
+                    return False
             except Exception as e:
                 logger.warning(f"Failed to delete approval file for '{request_id}': {e}")
                 return False
@@ -476,51 +618,57 @@ class FileApprovalStore(ApprovalStore):
         session_id: str,
         channel: str,
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
+        lock = self._get_request_lock(request_id)
         with self._lock:
-            req = self.get(request_id)
-            if req is None:
-                return False, None, f"Approval request '{request_id}' not found."
+            try:
+                with lock:
+                    req = self.get(request_id)
+                    if req is None:
+                        return False, None, f"Approval request '{request_id}' not found."
 
-            if req.status == ApprovalStatus.CONSUMED:
-                return False, req, f"Approval request '{request_id}' has already been consumed (replay prevented)."
+                    if req.status == ApprovalStatus.CONSUMED:
+                        return False, req, f"Approval request '{request_id}' has already been consumed (replay prevented)."
 
-            if req.status == ApprovalStatus.REJECTED:
-                return False, req, f"Approval request '{request_id}' was rejected."
+                    if req.status == ApprovalStatus.REJECTED:
+                        return False, req, f"Approval request '{request_id}' was rejected."
 
-            if req.status == ApprovalStatus.CANCELLED:
-                return False, req, f"Approval request '{request_id}' was cancelled."
+                    if req.status == ApprovalStatus.CANCELLED:
+                        return False, req, f"Approval request '{request_id}' was cancelled."
 
-            if req.is_expired():
-                req.status = ApprovalStatus.EXPIRED
-                self.save(req)
-                return False, req, f"Approval request '{request_id}' has expired."
+                    if req.is_expired():
+                        req.status = ApprovalStatus.EXPIRED
+                        self.save(req)
+                        return False, req, f"Approval request '{request_id}' has expired."
 
-            if req.status != ApprovalStatus.APPROVED:
-                return False, req, f"Approval request '{request_id}' is not in APPROVED state (current: {req.status.value})."
+                    if req.status != ApprovalStatus.APPROVED:
+                        return False, req, f"Approval request '{request_id}' is not in APPROVED state (current: {req.status.value})."
 
-            if req.operation_digest != expected_digest:
-                return False, req, (
-                    f"Operation digest mismatch: expected '{expected_digest}', "
-                    f"approved '{req.operation_digest}' (operation substitution prevented)."
-                )
+                    if req.operation_digest != expected_digest:
+                        return False, req, (
+                            f"Operation digest mismatch: expected '{expected_digest}', "
+                            f"approved '{req.operation_digest}' (operation substitution prevented)."
+                        )
 
-            if req.session_id != session_id:
-                return False, req, (
-                    f"Session mismatch: request belongs to '{req.session_id}', "
-                    f"attempted execution from '{session_id}'."
-                )
+                    if req.session_id != session_id:
+                        return False, req, (
+                            f"Session mismatch: request belongs to '{req.session_id}', "
+                            f"attempted execution from '{session_id}'."
+                        )
 
-            if req.channel.lower() != channel.lower():
-                return False, req, (
-                    f"Channel mismatch: request belongs to '{req.channel}', "
-                    f"attempted execution from '{channel}'."
-                )
+                    if req.channel.lower() != channel.lower():
+                        return False, req, (
+                            f"Channel mismatch: request belongs to '{req.channel}', "
+                            f"attempted execution from '{channel}'."
+                        )
 
-            # Atomic one-time state transition
-            req.status = ApprovalStatus.CONSUMED
-            req.consumed_at = time.time()
-            self.save(req)
-            return True, req, "Approval successfully consumed."
+                    # Atomic one-time state transition
+                    req.status = ApprovalStatus.CONSUMED
+                    req.consumed_at = time.time()
+                    self.save(req)
+                    return True, req, "Approval successfully consumed."
+            except TimeoutError as te:
+                logger.warning(f"Timeout acquiring lock for request '{request_id}': {te}")
+                return False, None, f"Lock timeout: request '{request_id}' is currently locked by another process."
 
 
 class ApprovalService:
@@ -583,36 +731,42 @@ class ApprovalService:
         session_id: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
         """Transition a request from PENDING -> APPROVED with two-man rule validation."""
-        req = self.store.get(request_id)
-        if req is None:
-            return False, f"Approval request '{request_id}' not found.", None
+        lock_ctx = (
+            self.store._get_request_lock(request_id)
+            if hasattr(self.store, "_get_request_lock")
+            else nullcontext()
+        )
+        with lock_ctx:
+            req = self.store.get(request_id)
+            if req is None:
+                return False, f"Approval request '{request_id}' not found.", None
 
-        if req.is_expired():
-            req.status = ApprovalStatus.EXPIRED
+            if req.is_expired():
+                req.status = ApprovalStatus.EXPIRED
+                self.store.save(req)
+                return False, f"Approval request '{request_id}' has expired.", req
+
+            if req.status != ApprovalStatus.PENDING:
+                return False, f"Cannot approve request '{request_id}' with status {req.status.value}.", req
+
+            # Channel verification
+            if channel.lower().strip() != req.channel.lower():
+                return False, f"Channel mismatch: request belongs to '{req.channel}', cannot approve from '{channel}'.", req
+
+            # Session verification (if enforced)
+            if session_id and session_id != req.session_id:
+                return False, f"Session mismatch: request belongs to session '{req.session_id}'.", req
+
+            # Two-man rule enforcement
+            clean_approver = str(approver_id).strip()
+            if self.two_man_rule_enabled and clean_approver == req.user_id:
+                return False, "Two-man rule violation: Requester cannot approve their own request.", req
+
+            req.status = ApprovalStatus.APPROVED
+            req.approver_id = clean_approver
+            req.approved_at = time.time()
             self.store.save(req)
-            return False, f"Approval request '{request_id}' has expired.", req
-
-        if req.status != ApprovalStatus.PENDING:
-            return False, f"Cannot approve request '{request_id}' with status {req.status.value}.", req
-
-        # Channel verification
-        if channel.lower().strip() != req.channel.lower():
-            return False, f"Channel mismatch: request belongs to '{req.channel}', cannot approve from '{channel}'.", req
-
-        # Session verification (if enforced)
-        if session_id and session_id != req.session_id:
-            return False, f"Session mismatch: request belongs to session '{req.session_id}'.", req
-
-        # Two-man rule enforcement
-        clean_approver = str(approver_id).strip()
-        if self.two_man_rule_enabled and clean_approver == req.user_id:
-            return False, "Two-man rule violation: Requester cannot approve their own request.", req
-
-        req.status = ApprovalStatus.APPROVED
-        req.approver_id = clean_approver
-        req.approved_at = time.time()
-        self.store.save(req)
-        return True, f"Request '{request_id}' has been approved by user '{clean_approver}'.", req
+            return True, f"Request '{request_id}' has been approved by user '{clean_approver}'.", req
 
     def reject(
         self,
@@ -622,19 +776,25 @@ class ApprovalService:
         reason: str = "Rejected by human operator",
     ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
         """Transition a request from PENDING -> REJECTED."""
-        req = self.store.get(request_id)
-        if req is None:
-            return False, f"Approval request '{request_id}' not found.", None
+        lock_ctx = (
+            self.store._get_request_lock(request_id)
+            if hasattr(self.store, "_get_request_lock")
+            else nullcontext()
+        )
+        with lock_ctx:
+            req = self.store.get(request_id)
+            if req is None:
+                return False, f"Approval request '{request_id}' not found.", None
 
-        if req.status != ApprovalStatus.PENDING:
-            return False, f"Cannot reject request '{request_id}' with status {req.status.value}.", req
+            if req.status != ApprovalStatus.PENDING:
+                return False, f"Cannot reject request '{request_id}' with status {req.status.value}.", req
 
-        clean_approver = str(approver_id).strip()
-        req.status = ApprovalStatus.REJECTED
-        req.approver_id = clean_approver
-        req.rejection_reason = reason
-        self.store.save(req)
-        return True, f"Request '{request_id}' has been rejected by user '{clean_approver}'.", req
+            clean_approver = str(approver_id).strip()
+            req.status = ApprovalStatus.REJECTED
+            req.approver_id = clean_approver
+            req.rejection_reason = reason
+            self.store.save(req)
+            return True, f"Request '{request_id}' has been rejected by user '{clean_approver}'.", req
 
     def cancel(
         self,
@@ -642,19 +802,25 @@ class ApprovalService:
         requester_id: str,
     ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
         """Allow the original requester to cancel their own pending request."""
-        req = self.store.get(request_id)
-        if req is None:
-            return False, f"Approval request '{request_id}' not found.", None
+        lock_ctx = (
+            self.store._get_request_lock(request_id)
+            if hasattr(self.store, "_get_request_lock")
+            else nullcontext()
+        )
+        with lock_ctx:
+            req = self.store.get(request_id)
+            if req is None:
+                return False, f"Approval request '{request_id}' not found.", None
 
-        if req.status != ApprovalStatus.PENDING:
-            return False, f"Cannot cancel request '{request_id}' with status {req.status.value}.", req
+            if req.status != ApprovalStatus.PENDING:
+                return False, f"Cannot cancel request '{request_id}' with status {req.status.value}.", req
 
-        if str(requester_id).strip() != req.user_id:
-            return False, "Only the original requester can cancel a pending request.", req
+            if str(requester_id).strip() != req.user_id:
+                return False, "Only the original requester can cancel a pending request.", req
 
-        req.status = ApprovalStatus.CANCELLED
-        self.store.save(req)
-        return True, f"Request '{request_id}' has been cancelled.", req
+            req.status = ApprovalStatus.CANCELLED
+            self.store.save(req)
+            return True, f"Request '{request_id}' has been cancelled.", req
 
     def verify_and_consume(
         self,

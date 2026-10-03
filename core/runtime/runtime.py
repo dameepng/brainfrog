@@ -45,6 +45,7 @@ from .approval import (
     RiskClass,
     extract_canonical_operation,
 )
+from .contract import ApprovedExecutionContract
 
 
 class BrainFrogRuntime:
@@ -291,6 +292,7 @@ class BrainFrogRuntime:
 
         approval_id = message.metadata.get("approval_id") or message.metadata.get("request_id")
         approved_execution = False
+        execution_contract: Optional[ApprovedExecutionContract] = None
 
         if approval_id:
             canonical_op = extract_canonical_operation(raw_text, action, message.metadata)
@@ -311,6 +313,11 @@ class BrainFrogRuntime:
                     error=consume_reason,
                 )
             approved_execution = True
+            if app_req is not None:
+                execution_contract = ApprovedExecutionContract.from_approval_request(
+                    app_req,
+                    repo_dir=Path(message.metadata.get("repo_dir") or self.repo_dir).resolve(),
+                )
             emit("agent.approval.consumed", {
                 "request_id": approval_id,
                 "approver": app_req.approver_id if app_req else None,
@@ -407,7 +414,7 @@ class BrainFrogRuntime:
             return OutgoingMessage(text=f"❌ {err_msg}", events=events, success=False, error=err_msg)
 
         # 5. Load Domains & Prepare Orchestrator Config
-        can_auto_create = bool(effective_mode == "build" and (policy.allow_code_edits or approved_execution))
+        can_auto_create = bool(effective_mode == "build" and policy.allow_code_edits)
         domains = load_module_map(workspace_dir, task=raw_text, auto_create=can_auto_create)
 
         effective_task = raw_text
@@ -433,6 +440,7 @@ class BrainFrogRuntime:
             mode=effective_mode,
             plan_context=plan_context,
             attached_images=list(message.attachments),
+            execution_contract=execution_contract,
         )
 
         def log_runtime(msg: str) -> None:

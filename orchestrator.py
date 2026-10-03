@@ -34,6 +34,7 @@ from security.git_guard import (
     scan_dict_files,
     unstage_staged_changes,
 )
+from core.runtime.contract import ApprovedExecutionContract
 
 
 @dataclass
@@ -60,6 +61,7 @@ class RunConfig:
     mode: str = "build"
     plan_context: Optional[str] = None
     attached_images: List[Any] = field(default_factory=list)
+    execution_contract: Optional[ApprovedExecutionContract] = None
 
 
 @dataclass
@@ -350,16 +352,119 @@ def _read_files(repo_dir: Path, paths: List[str]) -> Dict[str, str]:
     return out
 
 
-def _write_files(repo_dir: Path, files: Dict[str, str], mode: str = "build") -> None:
+def validate_and_stage_files(
+    repo_dir: Path,
+    files: Dict[str, str],
+    contract: Optional[ApprovedExecutionContract] = None,
+) -> List[Tuple[Path, str]]:
+    """Validate all files against path traversal and execution contract before any write.
+
+    Enforces:
+    1. Null byte & empty path rejection
+    2. Path normalization & separator standardization
+    3. Resolution against repo_dir (must not escape repository boundary)
+    4. Directory & root overwrite prevention
+    5. Symlink / junction boundary escape prevention
+    6. ApprovedExecutionContract scope containment (if contract present)
+
+    Fails closed: If ANY file in `files` violates validation, raises PermissionError
+    and returns nothing. Zero partial writes.
+    """
+    if not files:
+        return []
+
+    repo_res = repo_dir.resolve()
+    staged: List[Tuple[Path, str]] = []
+
+    for raw_rel, content in files.items():
+        # 1. Reject invalid or null paths
+        if not isinstance(raw_rel, str) or not raw_rel.strip():
+            raise PermissionError("Path validation denied: file path is empty or not a string.")
+        if "\x00" in raw_rel:
+            raise PermissionError(f"Path validation denied: null byte detected in path '{raw_rel}'.")
+
+        clean = raw_rel.replace("\\", "/").strip()
+
+        # 2. Check for Windows absolute drive path or POSIX root path
+        if re.match(r"^[a-zA-Z]:", clean) or clean.startswith("/"):
+            cand = Path(clean).resolve()
+            if not cand.is_relative_to(repo_res):
+                raise PermissionError(
+                    f"Path traversal denied: absolute path '{raw_rel}' escapes repository boundary."
+                )
+            target_path = cand
+        else:
+            # 3. Strip accidental repo directory name prefix if present
+            norm_rel = _normalize_rel_path(repo_dir, clean)
+            target_path = (repo_res / norm_rel).resolve()
+
+        # 4. Containment check against repo root
+        if not target_path.is_relative_to(repo_res):
+            raise PermissionError(
+                f"Path traversal denied: path '{raw_rel}' escapes repository boundary."
+            )
+        if target_path == repo_res:
+            raise PermissionError(
+                f"Path validation denied: path '{raw_rel}' points to repository root, not a file."
+            )
+
+        # 5. Prevent writing over existing directory
+        if target_path.exists() and target_path.is_dir():
+            raise PermissionError(
+                f"Path validation denied: path '{raw_rel}' references an existing directory."
+            )
+
+        # 6. Check parent hierarchy for symlinks pointing outside
+        curr = target_path.parent
+        while curr != repo_res and curr != curr.parent:
+            if curr.exists() and curr.is_symlink():
+                resolved_parent = curr.resolve()
+                if not resolved_parent.is_relative_to(repo_res):
+                    raise PermissionError(
+                        f"Symlink traversal denied: parent directory '{curr}' escapes repository boundary."
+                    )
+            curr = curr.parent
+
+        # 7. Canonical relative path for contract scope checking
+        canonical_rel = target_path.relative_to(repo_res).as_posix()
+
+        # 8. Execution contract validation (for approved remote execution)
+        if contract is not None:
+            if not contract.is_target_allowed(canonical_rel):
+                allowed_str = ", ".join(f"'{t}'" for t in sorted(contract.approved_targets))
+                raise PermissionError(
+                    f"Execution denied: generated file '{canonical_rel}' is outside the approved scope "
+                    f"(approved: [{allowed_str}], request_id={contract.request_id})."
+                )
+
+        staged.append((target_path, content))
+
+    return staged
+
+
+def _write_files(
+    repo_dir: Path,
+    files: Dict[str, str],
+    mode: str = "build",
+    contract: Optional[ApprovedExecutionContract] = None,
+) -> None:
+    """Safely write files after validating ALL entries against path traversal and scope.
+
+    Atomic application-level write: Validates the entire batch before writing the first file.
+    If any file is unauthorized or invalid, raises PermissionError with zero partial writes.
+    """
     if mode == "plan":
         raise PermissionError(
             "Modifikasi berkas source code dilarang dalam mode Plan. Gunakan mode Build untuk melakukan perubahan."
         )
-    for rel, content in files.items():
-        norm = _normalize_rel_path(repo_dir, rel)
-        f = repo_dir / norm
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(content, encoding="utf-8")
+
+    # Validate all files before writing the first file (Fail-closed, zero partial writes)
+    staged = validate_and_stage_files(repo_dir, files, contract=contract)
+
+    # All files passed validation; proceed with writes
+    for target_path, content in staged:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(content, encoding="utf-8")
 
 
 @dataclass
@@ -688,6 +793,15 @@ class Orchestrator:
             except UnicodeEncodeError:
                 print(msg.encode("ascii", errors="replace").decode("ascii"))
 
+    def _safe_write_files(self, files: Dict[str, str]) -> None:
+        """Safely write files under the active execution contract and path validation rules."""
+        _write_files(
+            repo_dir=self.cfg.repo_dir,
+            files=files,
+            mode=self.cfg.mode,
+            contract=self.cfg.execution_contract,
+        )
+
     def run(self) -> List[StepResult]:
         if self.cfg.mode == "plan":
             self._log("[brainfrog] 🧭 Mode: [bold #4EC9B0]PLAN[/bold #4EC9B0] (Eksplorasi codebase & penyusunan rencana)")
@@ -940,7 +1054,8 @@ class Orchestrator:
                         f"[Active Plan Context to Implement]\n{self.cfg.plan_context}"
                     )
 
-            self._log(f"[system2/{self.s2_tag}] planning task via {self.s2.model} (scoped to '{domain_label}') ...")
+            model_tag = getattr(self.s2, "model", self.s2_tag)
+            self._log(f"[system2/{self.s2_tag}] planning task via {model_tag} (scoped to '{domain_label}') ...")
             try:
                 steps = _safe_s2_call(
                     self.s2.plan_task,
@@ -1085,7 +1200,7 @@ class Orchestrator:
             pinned_files=self.pinned_files,
             images=self.attached_images,
         )
-        _write_files(self.cfg.repo_dir, new_files, mode=self.cfg.mode)
+        self._safe_write_files(new_files)
 
         retries = 0
         while True:
@@ -1161,7 +1276,7 @@ class Orchestrator:
                         self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{mcp_ctx}")
                         current = _read_files(self.cfg.repo_dir, step_files)
                         fixed = self.s2.review_and_fix(effective_task, step, current, mcp_ctx)
-                        _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
+                        self._safe_write_files(fixed)
                         new_files.update(fixed)
                         continue
                     return StepResult(
@@ -1200,7 +1315,7 @@ class Orchestrator:
                 self._log(f"[system2/{self.s2_tag}] reviewing {retry_reason}, attempt {retries}/{self.cfg.max_retries} ...")
                 current = _read_files(self.cfg.repo_dir, step_files)
                 fixed = self.s2.review_and_fix(effective_task, step, current, retry_prompt)
-                _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
+                self._safe_write_files(fixed)
                 new_files.update(fixed)
                 continue
 
@@ -1221,7 +1336,7 @@ class Orchestrator:
                         self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{mcp_ctx}")
                         current = _read_files(self.cfg.repo_dir, step_files)
                         fixed = self.s2.review_and_fix(effective_task, step, current, mcp_ctx)
-                        _write_files(self.cfg.repo_dir, fixed, mode=self.cfg.mode)
+                        self._safe_write_files(fixed)
                         new_files.update(fixed)
                         continue
                     return StepResult(
@@ -1439,7 +1554,7 @@ class Orchestrator:
         if fixed_files:
             fix_names = ", ".join(fixed_files.keys())
             self._log(f"[visual-engine] 🎨 Applying visual polish to: [bold #33D17A]{fix_names}[/bold #33D17A] ...")
-            _write_files(self.cfg.repo_dir, fixed_files, mode=self.cfg.mode)
+            self._safe_write_files(fixed_files)
 
             # Re-verify test suite still passes
             test_proc = _run(self.cfg.test_command, self.cfg.repo_dir)
@@ -1451,7 +1566,7 @@ class Orchestrator:
                 return True
             else:
                 self._log(f"[visual-engine] ⚠️ Visual fixes broke unit tests. Reverting visual changes to preserve functional correctness.")
-                _write_files(self.cfg.repo_dir, current_contents, mode=self.cfg.mode)
+                self._safe_write_files(current_contents)
                 return False
         return False
 
