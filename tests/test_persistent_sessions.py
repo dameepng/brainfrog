@@ -173,8 +173,7 @@ class TestPhase11PersistentSessions(unittest.TestCase):
                 # Filename is strictly the hash of the string, staying inside sessions_dir
                 self.assertEqual(len(safe_path.stem), 32)
                 self.assertTrue(safe_path.resolve().is_relative_to(self.sessions_dir.resolve()))
-                # Target file is not written outside
-                self.assertFalse(Path("/etc/passwd").exists() if os.name != "nt" else False)
+                self.assertNotEqual(safe_path.resolve(), Path("/etc/passwd").resolve())
 
     # -------------------------------------------------------------------------
     # 3. Atomic Writes & State Integrity

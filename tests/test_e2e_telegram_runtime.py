@@ -25,8 +25,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from core.channels.telegram import MockTelegramTransport, TelegramChannel, TELEGRAM_MAX_MSG_LEN
 from core.runtime.gateway import BrainFrogGateway
 from core.runtime.messages import IncomingMessage, OutgoingMessage
@@ -647,21 +645,21 @@ class TestPhase10E2ETelegramRuntime(unittest.TestCase):
     # -------------------------------------------------------------------------
     # PHASE 16 & 17: Optional Live Smoke Tests (Skipped by default)
     # -------------------------------------------------------------------------
-    @pytest.mark.skipif(
+    @unittest.skipIf(
         os.environ.get("BRAINFROG_E2E_PROVIDER") != "1",
-        reason="Live provider smoke test disabled by default (set BRAINFROG_E2E_PROVIDER=1 to enable)",
+        "Live provider smoke test disabled by default (set BRAINFROG_E2E_PROVIDER=1 to enable)",
     )
     def test_phase16_live_provider_smoke(self) -> None:
         """Live provider smoke test with deterministic ping prompt (skipped in CI without credentials)."""
         from system2 import System2Client
         provider = os.environ.get("BRAINFROG_PROVIDER", "claude")
         client = System2Client(provider=provider)
-        response = client.diagnose("Reply with the word OK.", focus_files={})
+        response = client.diagnose("Reply with the word OK.", focus_files={}, domain="unscoped")
         self.assertTrue(len(response.strip()) > 0)
 
-    @pytest.mark.skipif(
+    @unittest.skipIf(
         os.environ.get("BRAINFROG_E2E_TELEGRAM") != "1",
-        reason="Live Telegram smoke test disabled by default (set BRAINFROG_E2E_TELEGRAM=1 to enable)",
+        "Live Telegram smoke test disabled by default (set BRAINFROG_E2E_TELEGRAM=1 to enable)",
     )
     def test_phase17_live_telegram_smoke(self) -> None:
         """Live Telegram smoke test with dedicated bot account (skipped in CI without credentials)."""

@@ -34,8 +34,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from core.channels.whatsapp import (
     MockWhatsAppTransport,
     WhatsAppChannel,
@@ -892,9 +890,9 @@ sys.exit(0)
     # -------------------------------------------------------------------------
     # 25. Optional Live WhatsApp Cloud API Smoke Test (Env-Gated)
     # -------------------------------------------------------------------------
-    @pytest.mark.skipif(
+    @unittest.skipIf(
         not os.environ.get("BRAINFROG_WHATSAPP_LIVE"),
-        reason="Live WhatsApp smoke tests require BRAINFROG_WHATSAPP_LIVE=1 and Meta Cloud API credentials",
+        "Live WhatsApp smoke tests require BRAINFROG_WHATSAPP_LIVE=1 and Meta Cloud API credentials",
     )
     def test_live_whatsapp_cloud_transport_smoke(self) -> None:
         """Live Meta WhatsApp Cloud API smoke test (skipped by default)."""

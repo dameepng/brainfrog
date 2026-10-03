@@ -23,8 +23,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from core.channels.telegram import MockTelegramTransport, TelegramChannel
 from core.channels.whatsapp import MockWhatsAppTransport, WhatsAppChannel
 from core.runtime.approval import (
