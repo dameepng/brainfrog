@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 import uuid
@@ -55,6 +56,7 @@ class SessionState:
     channel: str
     user_id: str
     conversation_id: str
+    session_incarnation_id: str = field(default_factory=lambda: secrets.token_hex(16))
     created_at: float = field(default_factory=time.time)
     last_active_at: float = field(default_factory=time.time)
     active_mode: str = "build"
@@ -80,17 +82,19 @@ class SessionState:
         })
 
     def reset(self) -> None:
-        """Clear conversation history and ephemeral context while preserving identities."""
+        """Clear conversation history and ephemeral context and allocate a new incarnation."""
         self.history.clear()
         self.plan_context = None
         self.metadata.clear()
         self.last_active_at = time.time()
+        self.session_incarnation_id = secrets.token_hex(16)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert session state to JSON-serializable dictionary with schema version."""
         return {
             "schema_version": CURRENT_SESSION_SCHEMA_VERSION,
             "session_id": self.session_id,
+            "session_incarnation_id": self.session_incarnation_id,
             "channel": self.channel,
             "user_id": self.user_id,
             "conversation_id": self.conversation_id,
@@ -119,8 +123,13 @@ class SessionState:
         if "session_id" not in data:
             raise ValueError("Missing required 'session_id' in session payload.")
 
+        incarnation = data.get("session_incarnation_id")
+        if not incarnation or not str(incarnation).strip():
+            incarnation = secrets.token_hex(16)
+
         return cls(
             session_id=str(data["session_id"]),
+            session_incarnation_id=str(incarnation),
             channel=str(data.get("channel", "cli")),
             user_id=str(data.get("user_id", "local")),
             conversation_id=str(data.get("conversation_id", "default")),

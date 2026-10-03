@@ -48,6 +48,23 @@ class ApprovedExecutionContract:
     approved_targets: FrozenSet[str]
     operation_digest: str
     channel: str
+    allow_remote_git_push: bool = False
+
+    @property
+    def is_remote(self) -> bool:
+        """True if the contract originates from a remote channel (e.g. telegram, whatsapp)."""
+        return self.channel.lower().strip() not in ("cli", "local", "terminal")
+
+    def allows_remote_git_push(self) -> bool:
+        """Deterministic check whether remote Git push is authorized.
+
+        Security Invariant:
+        An approval for a local file operation must never authorize a remote Git side effect.
+        Remote channels (telegram, whatsapp) NEVER allow remote Git push.
+        """
+        if self.is_remote:
+            return False
+        return bool(self.allow_remote_git_push)
 
     @classmethod
     def from_approval_request(
@@ -84,6 +101,7 @@ class ApprovedExecutionContract:
             approved_targets=frozenset(normalized_targets),
             operation_digest=str(app_req.operation_digest),
             channel=str(app_req.channel).strip().lower(),
+            allow_remote_git_push=False,
         )
 
     def is_target_allowed(self, rel_path: str) -> bool:

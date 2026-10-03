@@ -35,8 +35,14 @@ except ImportError:
 
 try:
     import fcntl
+    _HAS_FCNTL = hasattr(fcntl, "flock")
 except ImportError:
     fcntl = None
+    _HAS_FCNTL = False
+
+_LOCK_EX = getattr(fcntl, "LOCK_EX", 2)
+_LOCK_NB = getattr(fcntl, "LOCK_NB", 4)
+_LOCK_UN = getattr(fcntl, "LOCK_UN", 8)
 
 from core.runtime.session import scrub_secrets
 
@@ -83,10 +89,10 @@ class CanonicalOperation:
         clean_params: Dict[str, Any] = {}
         for k in sorted(self.parameters.keys()):
             val = self.parameters[k]
-            clean_params[str(k)] = val
+            clean_params[k] = val
         return {
-            "action_type": str(self.action_type).strip().lower(),
-            "target": str(self.target).strip(),
+            "action_type": self.action_type.strip().lower(),
+            "target": self.target.strip(),
             "parameters": clean_params,
         }
 
@@ -165,6 +171,7 @@ class ApprovalRequest:
     approved_at: Optional[float] = None
     consumed_at: Optional[float] = None
     rejection_reason: Optional[str] = None
+    session_incarnation_id: Optional[str] = None
     schema_version: int = CURRENT_APPROVAL_SCHEMA_VERSION
 
     def is_expired(self, now: Optional[float] = None) -> bool:
@@ -178,6 +185,7 @@ class ApprovalRequest:
             "schema_version": self.schema_version,
             "request_id": self.request_id,
             "session_id": self.session_id,
+            "session_incarnation_id": self.session_incarnation_id,
             "channel": self.channel,
             "user_id": self.user_id,
             "conversation_id": self.conversation_id,
@@ -233,6 +241,7 @@ class ApprovalRequest:
             approved_at=float(data["approved_at"]) if data.get("approved_at") else None,
             consumed_at=float(data["consumed_at"]) if data.get("consumed_at") else None,
             rejection_reason=data.get("rejection_reason"),
+            session_incarnation_id=data.get("session_incarnation_id"),
             schema_version=version,
         )
 
@@ -263,6 +272,8 @@ class ApprovalStore(ABC):
         expected_digest: str,
         session_id: str,
         channel: str,
+        session_incarnation_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
         """Atomically verify and consume an approved request in a single step."""
         raise NotImplementedError
@@ -301,6 +312,8 @@ class InMemoryApprovalStore(ApprovalStore):
         expected_digest: str,
         session_id: str,
         channel: str,
+        session_incarnation_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
         with self._lock:
             req = self._requests.get(request_id)
@@ -341,6 +354,29 @@ class InMemoryApprovalStore(ApprovalStore):
                     f"attempted execution from '{channel}'."
                 )
 
+            if requester_id is not None and req.user_id != requester_id.strip():
+                return False, req, (
+                    f"Requester mismatch: request belongs to user '{req.user_id}', "
+                    f"attempted execution by '{requester_id}'."
+                )
+
+            # Session incarnation validation (HIGH-02)
+            if session_incarnation_id is not None:
+                if not req.session_incarnation_id:
+                    return False, req, (
+                        f"Legacy approval '{request_id}' lacks session incarnation binding (execution rejected)."
+                    )
+                if req.session_incarnation_id != session_incarnation_id:
+                    return False, req, (
+                        f"Session incarnation mismatch: request belongs to incarnation '{req.session_incarnation_id}', "
+                        f"attempted execution in '{session_incarnation_id}' (stale approval rejected)."
+                    )
+            elif req.session_incarnation_id is not None:
+                return False, req, (
+                    f"Session incarnation mismatch: request requires incarnation binding '{req.session_incarnation_id}', "
+                    f"but no session incarnation was provided."
+                )
+
             # Atomic one-time state transition
             req.status = ApprovalStatus.CONSUMED
             req.consumed_at = time.time()
@@ -374,24 +410,30 @@ class _CrossProcessLock:
 
     def acquire(self) -> bool:
         """Acquire the cross-process lock with re-entrancy and timeout."""
-        with self._thread_lock:
-            cur_thread = threading.get_ident()
-            if self._owner_thread == cur_thread:
-                self._depth += 1
-                return True
+        cur_thread = threading.get_ident()
+        if self._owner_thread == cur_thread:
+            self._depth += 1
+            return True
 
+        start_time = time.monotonic()
+        acquired = self._thread_lock.acquire(timeout=self.timeout)
+        if not acquired:
+            raise TimeoutError(
+                f"Timed out after {self.timeout}s waiting for thread lock on {self.lock_path.name}"
+            )
+
+        try:
             self.lock_path.parent.mkdir(parents=True, exist_ok=True)
             self._file = open(self.lock_path, "a+b")
             fd = self._file.fileno()
-            start_time = time.monotonic()
 
             while True:
                 try:
                     if msvcrt is not None:
                         self._file.seek(0)
                         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                    elif fcntl is not None:
-                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    elif _HAS_FCNTL:
+                        getattr(fcntl, "flock")(fd, _LOCK_EX | _LOCK_NB)
                     break
                 except (OSError, IOError):
                     if (time.monotonic() - start_time) >= self.timeout:
@@ -409,27 +451,36 @@ class _CrossProcessLock:
             self._owner_thread = cur_thread
             self._depth = 1
             return True
+        except Exception:
+            if self._file:
+                try:
+                    self._file.close()
+                except Exception:
+                    pass
+                self._file = None
+            self._thread_lock.release()
+            raise
 
     def release(self) -> None:
         """Release the cross-process lock."""
-        with self._thread_lock:
-            cur_thread = threading.get_ident()
-            if self._owner_thread != cur_thread:
-                return
+        cur_thread = threading.get_ident()
+        if self._owner_thread != cur_thread:
+            return
 
-            self._depth -= 1
-            if self._depth > 0:
-                return
+        self._depth -= 1
+        if self._depth > 0:
+            return
 
-            self._owner_thread = None
+        self._owner_thread = None
+        try:
             if self._file is not None:
                 try:
                     fd = self._file.fileno()
                     if msvcrt is not None:
                         self._file.seek(0)
                         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                    elif fcntl is not None:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    elif _HAS_FCNTL:
+                        getattr(fcntl, "flock")(fd, _LOCK_UN)
                 except Exception:
                     pass
                 finally:
@@ -438,6 +489,8 @@ class _CrossProcessLock:
                     except Exception:
                         pass
                     self._file = None
+        finally:
+            self._thread_lock.release()
 
     def __enter__(self) -> _CrossProcessLock:
         self.acquire()
@@ -524,9 +577,9 @@ class FileApprovalStore(ApprovalStore):
 
     def save(self, request: ApprovalRequest) -> bool:
         lock = self._get_request_lock(request.request_id)
-        with self._lock:
-            try:
-                with lock:
+        try:
+            with lock:
+                with self._lock:
                     self._ensure_directories()
                     target_file = self._get_approval_path(request.request_id)
                     data = request.to_dict()
@@ -545,12 +598,13 @@ class FileApprovalStore(ApprovalStore):
 
                     os.replace(tmp_file, target_file)
                     return True
-            except Exception as e:
-                logger.error(f"Failed to save approval request '{request.request_id}': {e}")
-                return False
+        except Exception as e:
+            logger.error(f"Failed to save approval request '{request.request_id}': {e}")
+            return False
 
     def get(self, request_id: str) -> Optional[ApprovalRequest]:
         with self._lock:
+            target_file: Optional[Path] = None
             try:
                 target_file = self._get_approval_path(request_id)
                 if not target_file.exists():
@@ -573,7 +627,8 @@ class FileApprovalStore(ApprovalStore):
 
                 return ApprovalRequest.from_dict(data)
             except json.JSONDecodeError as jde:
-                self._quarantine_file(target_file, f"Invalid JSON: {jde}")
+                if target_file is not None:
+                    self._quarantine_file(target_file, f"Invalid JSON: {jde}")
                 return None
             except Exception as e:
                 logger.error(f"Error loading approval request '{request_id}': {e}")
@@ -581,17 +636,17 @@ class FileApprovalStore(ApprovalStore):
 
     def delete(self, request_id: str) -> bool:
         lock = self._get_request_lock(request_id)
-        with self._lock:
-            try:
-                with lock:
+        try:
+            with lock:
+                with self._lock:
                     target_file = self._get_approval_path(request_id)
                     if target_file.exists():
                         target_file.unlink()
                         return True
                     return False
-            except Exception as e:
-                logger.warning(f"Failed to delete approval file for '{request_id}': {e}")
-                return False
+        except Exception as e:
+            logger.warning(f"Failed to delete approval file for '{request_id}': {e}")
+            return False
 
     def list_requests(self) -> List[ApprovalRequest]:
         with self._lock:
@@ -617,11 +672,13 @@ class FileApprovalStore(ApprovalStore):
         expected_digest: str,
         session_id: str,
         channel: str,
+        session_incarnation_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
         lock = self._get_request_lock(request_id)
-        with self._lock:
-            try:
-                with lock:
+        try:
+            with lock:
+                with self._lock:
                     req = self.get(request_id)
                     if req is None:
                         return False, None, f"Approval request '{request_id}' not found."
@@ -661,14 +718,37 @@ class FileApprovalStore(ApprovalStore):
                             f"attempted execution from '{channel}'."
                         )
 
+                    if requester_id is not None and req.user_id != requester_id.strip():
+                        return False, req, (
+                            f"Requester mismatch: request belongs to user '{req.user_id}', "
+                            f"attempted execution by '{requester_id}'."
+                        )
+
+                    # Session incarnation validation (HIGH-02)
+                    if session_incarnation_id is not None:
+                        if not req.session_incarnation_id:
+                            return False, req, (
+                                f"Legacy approval '{request_id}' lacks session incarnation binding (execution rejected)."
+                            )
+                        if req.session_incarnation_id != session_incarnation_id:
+                            return False, req, (
+                                f"Session incarnation mismatch: request belongs to incarnation '{req.session_incarnation_id}', "
+                                f"attempted execution in '{session_incarnation_id}' (stale approval rejected)."
+                            )
+                    elif req.session_incarnation_id is not None:
+                        return False, req, (
+                            f"Session incarnation mismatch: request requires incarnation binding '{req.session_incarnation_id}', "
+                            f"but no session incarnation was provided."
+                        )
+
                     # Atomic one-time state transition
                     req.status = ApprovalStatus.CONSUMED
                     req.consumed_at = time.time()
                     self.save(req)
                     return True, req, "Approval successfully consumed."
-            except TimeoutError as te:
-                logger.warning(f"Timeout acquiring lock for request '{request_id}': {te}")
-                return False, None, f"Lock timeout: request '{request_id}' is currently locked by another process."
+        except TimeoutError as te:
+            logger.warning(f"Timeout acquiring lock for request '{request_id}': {te}")
+            return False, None, f"Lock timeout: request '{request_id}' is currently locked by another process."
 
 
 class ApprovalService:
@@ -694,6 +774,7 @@ class ApprovalService:
         canonical_operation: CanonicalOperation,
         risk_class: str = RiskClass.MEDIUM.value,
         ttl_seconds: Optional[float] = None,
+        session_incarnation_id: Optional[str] = None,
     ) -> ApprovalRequest:
         """Create and persist a new PENDING approval request with secure nonce."""
         now = time.time()
@@ -709,8 +790,8 @@ class ApprovalService:
             request_id=request_id,
             session_id=session_id,
             channel=channel.lower().strip(),
-            user_id=str(user_id).strip(),
-            conversation_id=str(conversation_id).strip(),
+            user_id=user_id.strip(),
+            conversation_id=conversation_id.strip(),
             operation_type=operation_type,
             canonical_operation=canonical_operation,
             operation_digest=digest,
@@ -719,6 +800,7 @@ class ApprovalService:
             expires_at=expires_at,
             nonce=nonce,
             status=ApprovalStatus.PENDING,
+            session_incarnation_id=session_incarnation_id,
         )
         self.store.save(request)
         return request
@@ -758,7 +840,7 @@ class ApprovalService:
                 return False, f"Session mismatch: request belongs to session '{req.session_id}'.", req
 
             # Two-man rule enforcement
-            clean_approver = str(approver_id).strip()
+            clean_approver = approver_id.strip()
             if self.two_man_rule_enabled and clean_approver == req.user_id:
                 return False, "Two-man rule violation: Requester cannot approve their own request.", req
 
@@ -789,7 +871,7 @@ class ApprovalService:
             if req.status != ApprovalStatus.PENDING:
                 return False, f"Cannot reject request '{request_id}' with status {req.status.value}.", req
 
-            clean_approver = str(approver_id).strip()
+            clean_approver = approver_id.strip()
             req.status = ApprovalStatus.REJECTED
             req.approver_id = clean_approver
             req.rejection_reason = reason
@@ -815,12 +897,42 @@ class ApprovalService:
             if req.status != ApprovalStatus.PENDING:
                 return False, f"Cannot cancel request '{request_id}' with status {req.status.value}.", req
 
-            if str(requester_id).strip() != req.user_id:
+            if requester_id.strip() != req.user_id:
                 return False, "Only the original requester can cancel a pending request.", req
 
             req.status = ApprovalStatus.CANCELLED
             self.store.save(req)
             return True, f"Request '{request_id}' has been cancelled.", req
+
+    def invalidate_session_approvals(
+        self,
+        session_id: str,
+        session_incarnation_id: Optional[str] = None,
+        reason: str = "Session reset",
+    ) -> int:
+        """Cancel/invalidate all outstanding (PENDING and APPROVED) approvals for a session."""
+        invalidated = 0
+        for req in self.store.list_requests():
+            if req.session_id != session_id:
+                continue
+            if session_incarnation_id is not None and req.session_incarnation_id != session_incarnation_id:
+                continue
+            if req.status not in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
+                continue
+
+            lock_ctx = (
+                self.store._get_request_lock(req.request_id)
+                if hasattr(self.store, "_get_request_lock")
+                else nullcontext()
+            )
+            with lock_ctx:
+                current = self.store.get(req.request_id)
+                if current and current.status in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
+                    current.status = ApprovalStatus.CANCELLED
+                    current.rejection_reason = f"Cancelled due to {reason}"
+                    self.store.save(current)
+                    invalidated += 1
+        return invalidated
 
     def verify_and_consume(
         self,
@@ -828,6 +940,8 @@ class ApprovalService:
         expected_digest: str,
         session_id: str,
         channel: str,
+        session_incarnation_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[ApprovalRequest], str]:
         """Atomically verify and consume an approved request."""
         return self.store.claim_and_consume(
@@ -835,6 +949,8 @@ class ApprovalService:
             expected_digest=expected_digest,
             session_id=session_id,
             channel=channel,
+            session_incarnation_id=session_incarnation_id,
+            requester_id=requester_id,
         )
 
     def format_approval_prompt(self, request: ApprovalRequest) -> str:

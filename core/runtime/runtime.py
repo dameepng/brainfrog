@@ -197,7 +197,14 @@ class BrainFrogRuntime:
                 return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
 
             if cmd in ("/reset", "/new"):
+                old_incarnation = session.session_incarnation_id
+                self.approval_service.invalidate_session_approvals(
+                    session_id=session.session_id,
+                    session_incarnation_id=old_incarnation,
+                    reason=f"session reset ({cmd})",
+                )
                 self.sessions.reset(session.session_id)
+                emit("agent.session.reset", {"session_id": session.session_id, "command": cmd})
                 return OutgoingMessage(text="🔄 Session context has been reset.", events=events, success=True, status="completed")
 
             if cmd == "/approve":
@@ -249,6 +256,7 @@ class BrainFrogRuntime:
                 pending = [
                     r for r in self.approval_service.store.list_requests()
                     if r.session_id == session.session_id
+                    and (r.session_incarnation_id is None or r.session_incarnation_id == session.session_incarnation_id)
                     and r.status == ApprovalStatus.PENDING
                     and not r.is_expired()
                 ]
@@ -302,6 +310,8 @@ class BrainFrogRuntime:
                 expected_digest=digest,
                 session_id=session.session_id,
                 channel=effective_channel,
+                session_incarnation_id=session.session_incarnation_id,
+                requester_id=message.user_id,
             )
             if not is_valid:
                 emit("agent.approval.invalid", {"request_id": approval_id, "reason": consume_reason})
@@ -340,6 +350,7 @@ class BrainFrogRuntime:
                     operation_type=action.value if hasattr(action, "value") else str(action),
                     canonical_operation=canonical_op,
                     risk_class=risk,
+                    session_incarnation_id=session.session_incarnation_id,
                 )
                 emit("agent.approval.requested", {
                     "request_id": app_req.request_id,
@@ -429,6 +440,14 @@ class BrainFrogRuntime:
             if history_lines:
                 effective_task = f"{raw_text}\n\n[Previous Conversation Context]\n" + "\n---\n".join(history_lines)
 
+        is_remote_channel = (
+            policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value
+            or effective_channel.lower().strip() not in ("cli", "local", "terminal")
+        )
+        allow_remote_git_push = False if is_remote_channel else (
+            execution_contract.allows_remote_git_push() if execution_contract else True
+        )
+
         cfg = RunConfig(
             repo_dir=workspace_dir,
             task=effective_task,
@@ -441,6 +460,8 @@ class BrainFrogRuntime:
             plan_context=plan_context,
             attached_images=list(message.attachments),
             execution_contract=execution_contract,
+            origin_channel=effective_channel,
+            allow_remote_git_push=allow_remote_git_push,
         )
 
         def log_runtime(msg: str) -> None:

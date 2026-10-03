@@ -137,6 +137,7 @@ def publish_proof_to_assets_branch(
     desktop_bytes: bytes,
     mobile_bytes: bytes,
     assets_branch: str = "pr-proof-assets",
+    allow_remote_push: bool = True,
 ) -> Optional[Tuple[str, str, str]]:
     """Store screenshots in append-only orphan branch pr-proof-assets using an isolated git worktree.
 
@@ -146,10 +147,14 @@ def publish_proof_to_assets_branch(
         desktop_bytes: Binary PNG content for desktop viewport.
         mobile_bytes: Binary PNG content for mobile viewport.
         assets_branch: Asset branch name (defaults to 'pr-proof-assets').
+        allow_remote_push: Whether pushing to remote Git origin is allowed.
 
     Returns:
         (commit_sha, desktop_rel_path, mobile_rel_path) on success, or None on failure.
     """
+    if not allow_remote_push:
+        return None
+
     repo = Path(repo_dir).resolve()
     timestamp = int(time.time())
     safe_target = re.sub(r"[^a-zA-Z0-9_.-]", "-", str(target_identifier)).strip("-")
@@ -246,6 +251,7 @@ def attach_pr_proof_to_body(
     gate_result: Optional[QualityGateResult] = None,
     changed_files: Optional[List[str]] = None,
     pr_number: Optional[str] = None,
+    allow_remote_push: bool = True,
 ) -> Tuple[str, bool]:
     """Check if PR touches frontend files; if so, generate proof and append to body.
 
@@ -255,6 +261,10 @@ def attach_pr_proof_to_body(
     Returns:
         (updated_body, was_attached)
     """
+    # Deterministic check: SKIP if remote Git push is disallowed
+    if not allow_remote_push:
+        return pr_body, False
+
     repo = Path(repo_dir).resolve()
     files = changed_files if changed_files is not None else get_pr_changed_files(repo)
 

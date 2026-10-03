@@ -34,7 +34,9 @@ from security.git_guard import (
     scan_dict_files,
     unstage_staged_changes,
 )
-from core.runtime.contract import ApprovedExecutionContract
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from core.runtime.contract import ApprovedExecutionContract
 
 
 @dataclass
@@ -62,6 +64,8 @@ class RunConfig:
     plan_context: Optional[str] = None
     attached_images: List[Any] = field(default_factory=list)
     execution_contract: Optional[ApprovedExecutionContract] = None
+    origin_channel: str = "cli"
+    allow_remote_git_push: bool = True
 
 
 @dataclass
@@ -801,6 +805,75 @@ class Orchestrator:
             mode=self.cfg.mode,
             contract=self.cfg.execution_contract,
         )
+
+    def _can_push_to_remote(self) -> bool:
+        """Deterministic authority boundary check for remote Git push operations.
+
+        Enforces HIGH-03 security invariant:
+        An approval for a local file operation must never authorize a remote Git side effect.
+        Remote channels (Telegram, WhatsApp) and untrusted execution contexts default to NO remote Git side effects.
+        """
+        # 1. Mode check: Plan mode strictly prohibits remote side effects
+        if self.cfg.mode == "plan":
+            return False
+
+        # 2. Execution Contract check: If an approved contract exists, it is the authoritative boundary
+        if self.cfg.execution_contract is not None:
+            if not self.cfg.execution_contract.allows_remote_git_push():
+                return False
+
+        # 3. Origin channel provenance check: Remote channels are never permitted to push
+        origin_ch = (getattr(self.cfg, "origin_channel", "cli") or "").lower().strip()
+        if origin_ch not in ("cli", "local", "terminal"):
+            return False
+
+        # 4. Explicit configuration flag check
+        if not getattr(self.cfg, "allow_remote_git_push", True):
+            return False
+
+        return True
+
+    def _push_to_remote(
+        self,
+        branch: str,
+        remote: str = "origin",
+        set_upstream: bool = True,
+        force: bool = False,
+        tags: bool = False,
+    ) -> subprocess.CompletedProcess:
+        """Push git branch or tags to remote repository with boundary enforcement.
+
+        Strictly blocks remote push if execution provenance does not authorize remote git side effects.
+        """
+        if not self._can_push_to_remote():
+            origin_ch = getattr(self.cfg, "origin_channel", "unknown")
+            msg = f"Remote Git push blocked: execution context (channel: '{origin_ch}') is not authorized to push to Git remotes."
+            self._log(f"[git/security] 🛡️ {msg}")
+            raise PermissionError(msg)
+
+        cmd = ["git", "push"]
+        if force:
+            cmd.append("--force-with-lease")
+        if set_upstream:
+            cmd.extend(["-u", remote, branch])
+        elif tags:
+            cmd.extend([remote, "--tags"])
+        else:
+            cmd.extend([remote, branch])
+
+        res = _run(cmd, self.cfg.repo_dir)
+        if res.returncode == 0:
+            self._log(f"[git] ✅ Successfully pushed to {remote}/{branch}")
+        else:
+            if set_upstream:
+                fallback_cmd = ["git", "push", remote, branch]
+                fallback_res = _run(fallback_cmd, self.cfg.repo_dir)
+                if fallback_res.returncode == 0:
+                    self._log(f"[git] ✅ Successfully pushed to {remote}/{branch}")
+                    return fallback_res
+            push_err = res.stderr.strip()
+            self._log(f"[git] ⚠️ Push notice: {push_err}")
+        return res
 
     def run(self) -> List[StepResult]:
         if self.cfg.mode == "plan":
@@ -1771,31 +1844,26 @@ class Orchestrator:
         except Exception as e:
             self._log(f"[git] Commit error: {e}")
 
-        # Automatically push changes to remote origin if configured
-        try:
-            remotes = _run(["git", "remote"], self.cfg.repo_dir).stdout.split()
-            if "origin" in remotes:
-                # Sanitize and auto-repair corrupted remote URL in git config if needed
-                cur_url = get_git_remote_url(self.cfg.repo_dir, "origin")
-                cleaned_url = clean_git_remote_url(cur_url)
-                if cleaned_url and cleaned_url != cur_url:
-                    configure_git_remote(self.cfg.repo_dir, cleaned_url, "origin")
+        # Automatically push changes to remote origin if configured and permitted
+        if not self._can_push_to_remote():
+            origin_ch = getattr(self.cfg, "origin_channel", "remote")
+            self._log(f"[git/security] 🛡️ Remote Git push skipped: remote push is disabled for execution context (channel: {origin_ch})")
+        else:
+            try:
+                remotes = _run(["git", "remote"], self.cfg.repo_dir).stdout.split()
+                if "origin" in remotes:
+                    # Sanitize and auto-repair corrupted remote URL in git config if needed
+                    cur_url = get_git_remote_url(self.cfg.repo_dir, "origin")
+                    cleaned_url = clean_git_remote_url(cur_url)
+                    if cleaned_url and cleaned_url != cur_url:
+                        configure_git_remote(self.cfg.repo_dir, cleaned_url, "origin")
 
-                cur_branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], self.cfg.repo_dir).stdout.strip()
-                if cur_branch and cur_branch != "HEAD":
-                    self._log(f"[git] 🚀 Pushing changes to origin/{cur_branch} ...")
-                    push_res = _run(["git", "push", "-u", "origin", cur_branch], self.cfg.repo_dir)
-                    if push_res.returncode == 0:
-                        self._log(f"[git] ✅ Successfully pushed to origin/{cur_branch}")
-                    else:
-                        push_fallback = _run(["git", "push", "origin", cur_branch], self.cfg.repo_dir)
-                        if push_fallback.returncode == 0:
-                            self._log(f"[git] ✅ Successfully pushed to origin/{cur_branch}")
-                        else:
-                            push_err = push_res.stderr.strip() or push_fallback.stderr.strip()
-                            self._log(f"[git] ⚠️ Push notice: {push_err}")
-        except Exception as e:
-            self._log(f"[git] Push error: {e}")
+                    cur_branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], self.cfg.repo_dir).stdout.strip()
+                    if cur_branch and cur_branch != "HEAD":
+                        self._log(f"[git] 🚀 Pushing changes to origin/{cur_branch} ...")
+                        self._push_to_remote(cur_branch, "origin", set_upstream=True)
+            except Exception as e:
+                self._log(f"[git] Push error: {e}")
 
         ceiling = "low" if sensitive else self.cfg.pr_risk_ceiling
         safety_bar = 0.9 if sensitive else 0.7
@@ -1808,6 +1876,7 @@ class Orchestrator:
 
         auto_ok = (
             self.cfg.auto_pr
+            and self._can_push_to_remote()
             and not sensitive
             and within_ceiling
             and safe.noul is not None
@@ -1825,6 +1894,7 @@ class Orchestrator:
                 repo_dir=self.cfg.repo_dir,
                 branch=branch,
                 gate_result=gate_result,
+                allow_remote_push=self._can_push_to_remote(),
             )
             if proof_attached:
                 pr_copy["body"] = new_body
@@ -1847,6 +1917,9 @@ class Orchestrator:
     ) -> None:
         if self.cfg.mode == "plan":
             raise PermissionError("Pembuatan pull request dilarang dalam mode Plan.")
+        if not self._can_push_to_remote():
+            self._log("[git/security] 🛡️ Remote PR creation / push blocked: execution is bounded to local modifications.")
+            return
         branch = f"{self.cfg.branch_prefix}{step.id}"
         _run(["git", "checkout", "-b", branch], self.cfg.repo_dir)
 
@@ -1857,6 +1930,7 @@ class Orchestrator:
             repo_dir=self.cfg.repo_dir,
             branch=branch,
             gate_result=gate_result,
+            allow_remote_push=self._can_push_to_remote(),
         )
         if proof_attached:
             pr_copy["body"] = new_body
@@ -1888,10 +1962,15 @@ class Orchestrator:
         if cleaned_url and cleaned_url != cur_url:
             configure_git_remote(self.cfg.repo_dir, cleaned_url, "origin")
 
-        push = _run(["git", "push", "-u", "origin", branch], self.cfg.repo_dir)
-        if push.returncode != 0:
-            self._log(f"[orchestrator] push failed (no remote configured?): {push.stderr}")
+        try:
+            push = self._push_to_remote(branch, "origin", set_upstream=True)
+            if push.returncode != 0:
+                self._log(f"[orchestrator] push failed (no remote configured?): {push.stderr}")
+                return
+        except Exception as e:
+            self._log(f"[orchestrator] push failed: {e}")
             return
+
         gh = _run(
             ["gh", "pr", "create", "--title", pr_copy["title"], "--body", pr_copy["body"]],
             self.cfg.repo_dir,
