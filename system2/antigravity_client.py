@@ -18,6 +18,7 @@ from system2.claude_client import PlanStep, usage_tracker
 from system2.json_utils import extract_json, _extract_json, repair_json_content
 
 DEFAULT_ANTIGRAVITY_MODEL = os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
+DEFAULT_ANTIGRAVITY_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TIMEOUT", "240.0"))
 
 
 def find_antigravity_bin() -> Optional[str]:
@@ -86,11 +87,14 @@ class AntigravitySystem2Client:
         images: Optional[List[Any]] = None,
     ) -> str:
         full_system = self._apply_guidelines(system)
-        tool_guard = (
-            "IMPORTANT: Do NOT execute any external tools, scripts, or terminal commands. "
-            "You are operating in structured output mode. Respond ONLY with the requested JSON format."
+        tool_guard_top = (
+            "CRITICAL INSTRUCTION: You are operating strictly as a stateless, non-interactive JSON generator. "
+            "ABSOLUTELY DO NOT call, invoke, or trigger ANY external tools, scripts, terminal commands, or file viewers "
+            "(such as run_command, view_file, grep_search, edit_file). "
+            "You MUST respond ONLY with the requested JSON object in your immediate first turn. "
+            "DO NOT attempt to inspect the workspace or execute tests yourself."
         )
-        full_system = f"{full_system}\n\n{tool_guard}"
+        full_system = f"{full_system}\n\n{tool_guard_top}"
 
         user_content = user
         if images:
@@ -108,9 +112,17 @@ class AntigravitySystem2Client:
                 + "\n".join(image_refs)
             )
 
+        tool_guard_bottom = (
+            "\n\n[CRITICAL FINAL CONSTRAINT]\n"
+            "REMINDER: ABSOLUTELY DO NOT CALL ANY TOOLS OR COMMANDS. "
+            "Respond immediately with ONLY the final JSON object matching the requested schema. "
+            "No tool calls. No markdown prose outside JSON."
+        )
+
         prompt = sanitize_surrogates(
             f"[SYSTEM INSTRUCTIONS]\n{full_system}\n\n"
             f"[TASK]\n{user_content}"
+            f"{tool_guard_bottom}"
         )
 
         cmd = [
@@ -118,7 +130,10 @@ class AntigravitySystem2Client:
             "--model", self.model,
             "--output-format", "json",
             "--dangerously-skip-permissions",
+            "--disable-slash-commands",
         ]
+
+        timeout_seconds = float(os.environ.get("ANTIGRAVITY_TIMEOUT", str(DEFAULT_ANTIGRAVITY_TIMEOUT)))
 
         # Retry up to 2 times on transient "empty model output" errors
         # (Gemini occasionally returns an empty response on first attempt)
@@ -137,7 +152,7 @@ class AntigravitySystem2Client:
                 errors="replace",
             )
             try:
-                stdout, stderr = proc.communicate(input=prompt, timeout=180.0)
+                stdout, stderr = proc.communicate(input=prompt, timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 try:
                     proc.kill()
@@ -147,7 +162,10 @@ class AntigravitySystem2Client:
                 if attempt < max_attempts - 1:
                     time.sleep(1.0)
                     continue
-                raise RuntimeError("Antigravity process timed out after 180s.")
+                raise RuntimeError(
+                    f"Antigravity process timed out after {int(timeout_seconds)}s. "
+                    "If this persists, check ANTIGRAVITY_TIMEOUT or switch models/providers with /models or /provider."
+                )
 
             if proc.returncode != 0:
                 err_msg = (stderr.strip() or stdout.strip() or

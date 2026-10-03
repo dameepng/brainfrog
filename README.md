@@ -1,73 +1,80 @@
-# BrainFrog CLI 🐸
+# BrainFrog 🐸 — General Agent Runtime & Multi-Channel Platform
 
-> Agentic coding CLI powered by a hybrid System 1 (Jev / fast structured decisions) + System 2 (Generative LLM), equipped with automated browser verification before code is considered complete.
+> Dual-system agent runtime powered by a hybrid System 1 (Jev / deterministic fast decisions) + System 2 (Generative LLM reasoning), featuring multi-channel messaging (CLI, Telegram, WhatsApp), strict security trust boundaries, session isolation, and automated browser verification.
 
 ---
 
 ## What Makes BrainFrog Different
 
-BrainFrog is not just an LLM wrapper that blindly spits out code in your terminal. It is built with rigorous oversight and end-to-end automated verification:
+BrainFrog is not just an LLM wrapper that blindly spits out code in your terminal. It is a single, coherent, dual-system agent runtime designed for high reliability across local and remote interfaces:
 
-- **Automated Browser Verification (MCP Quality Gate)** — For every frontend change, BrainFrog automatically builds the project (`npm run build`), launches a local dev server, opens a real Chromium browser via Model Context Protocol (MCP), inspects console errors, detects failed network requests (404/500), and captures page screenshots before work is declared complete.
-- **Hybrid Decision-Making (Dual-System)** — Adopts a cognitive dual-process architecture: **System 1 (Jev / TypeSafe)** serves as a fast, deterministically typed gatekeeper for domain routing, failure branch triage, and diff risk assessment; **System 2 (Generative Brain)** handles deep reasoning, plan decomposition, and code synthesis.
-- **Permanent PR Proofs (Immutable Screenshot Storage)** — Desktop and mobile visual screenshots are automatically embedded in the Pull Request body for every frontend modification. Screenshots are stored on a dedicated orphan branch (`pr-proof-assets`) linked by exact commit SHA — ensuring image links remain permanently accessible (`200 OK`) and never break even after PR branches are deleted upon merge.
-- **Hardened Infrastructure & Strict Protection** — Enforces mandatory branch protection on `main`, automated CI pipelines (`lint-typecheck-test`) pinned to exact 40-character commit SHAs (immune to supply-chain attacks), secret leak prevention (GitGuardian + internal Git Guard), and automated cleanup of ephemeral verification PRs (`stale.yml`) without disrupting active work.
+- **Single Coherent Agent Runtime** — `CHANNEL != AGENT`. Whether messages arrive from the local CLI, Telegram, or WhatsApp, they flow through a unified runtime pipeline (`BrainFrogRuntime`) without duplicating reasoning, orchestrator loops, or tools.
+- **Strict Channel Trust Boundaries** — Remote messaging channels (`REMOTE_CHANNEL`) are treated as untrusted input. Authentication and strict allowlisting happen before messages reach the agent. Privileged actions (arbitrary shell execution, destructive git, credential access) are unconditionally blocked for remote channels while preserved for the high-trust `LOCAL_CLI`.
+- **Session Isolation** — Sessions are strictly isolated using three-part composite keys (`channel:user_id:conversation_id`). User A in Telegram can never access or pollute User B's state, memory, or history.
+- **Hybrid Decision-Making (Dual-System)** — **System 1 (Jev / TypeSafe)** serves as a fast, deterministically typed gatekeeper for domain routing, risk evaluation, failure triage, and loop oversight with zero prompt drift. **System 2 (Generative Brain)** decomposes plans, analyzes code, and executes steps via Antigravity, Claude, OpenAI, OpenRouter, or custom OpenAI-compatible endpoints.
+- **Automated Browser Verification (MCP Quality Gate)** — For frontend changes, BrainFrog automatically builds projects (`npm run build`), launches dev servers, drives Chromium via Model Context Protocol (MCP), inspects console errors, catches network failures (404/500), and records visual screenshots.
+- **Permanent PR Proofs (Immutable Screenshot Storage)** — Visual verification screenshots are committed to an isolated orphan branch (`pr-proof-assets`) linked by exact commit SHA — ensuring PR visual evidence remains accessible forever without link rot.
+- **Diagnostics & Self-Inspection** — Built-in `doctor` command validates System 1, System 2, MCP servers, memory banks, skills, and channel configurations without ever exposing API secrets.
 
 ---
 
 ## Architecture
 
 ```
-                                  [User Prompt]
-                                        │
-                                        ▼
-                          ┌───────────────────────────┐
-                          │   System 1: Scope Gate    │
-                          │ (Domain Routing & Typing) │
-                          └───────────────────────────┘
-                                        │
-                ┌───────────────────────┴───────────────────────┐
-                ▼                                               ▼
-         [Question Only]                                [Code Mutation]
-    System 2 diagnoses &                           System 2 formulates a
-    answers the user prompt.                       multi-step execution plan.
-    (No file modifications)                                     │
-                                                                ▼
-                                                  ┌───────────────────────────┐
-                                            ┌───► │ Step N: Code Synthesis    │
-                                            │     └───────────────────────────┘
-                                            │                   │
-                                            │                   ▼
-                                            │     ┌───────────────────────────┐
-                                            │     │ Run Local Unit Tests      │
-                                            │     └───────────────────────────┘
-                                            │                   │
-                                            │                   ▼
-                                            │     ┌───────────────────────────┐
-                                            │     │  Frontend Quality Gate    │
-                                            │     │  (MCP Browser Verify)     │
-                                            │     └───────────────────────────┘
-                                            │                   │
-                                            │                   ▼
-                                            │     ┌───────────────────────────┐
-                                            │     │    System 1: Loop Gate    │
-                                            │     │  (Evaluate & Next Step)   │
-                                            │     └───────────────────────────┘
-                                            │       ├── open_pr ──► [Auto-Attach PR Proof]
-                                            └── retry_fix          ├── escalate_human
-                                                                   └── abandon
+Incoming Channel (CLI / Telegram / WhatsApp)
+                     │
+                     ▼
+          Authentication & Allowlist
+                     │
+                     ▼
+             Session Resolution
+       (channel:user_id:conversation_id)
+                     │
+                     ▼
+              BrainFrogRuntime
+        (Thin Facade & Trust Policy)
+                     │
+                     ▼
+                  System 1
+          (Jev / TypeSafe Scope Gate)
+                     │
+                     ▼
+          Existing Orchestrator
+          (State Machine & Retry Loop)
+                     │
+                     ▼
+                  System 2
+    (Antigravity / Claude / OpenAI / OpenRouter)
+                     │
+        ┌────────────┼────────────┐
+        │            │            │
+       MCP         Tools        Memory & Skills
+        │            │            │
+        └────────────┼────────────┘
+                     │
+                     ▼
+             Verification Gate
+                     │
+                     ▼
+         Outgoing Channel Response
 ```
 
 ### Core Components
 
 | Component | File Path | Role & Responsibilities |
 | :--- | :--- | :--- |
+| **BrainFrogRuntime** | [`core/runtime/runtime.py`](core/runtime/runtime.py) | Thin runtime facade: resolves sessions, enforces channel trust permissions, delegates to Orchestrator, and normalizes events. |
+| **Session Manager** | [`core/runtime/session.py`](core/runtime/session.py) | Isolates conversational history and state strictly by `channel:user_id:conversation_id`. |
+| **Permission Policy** | [`core/runtime/permissions.py`](core/runtime/permissions.py) | Evaluates trust levels (`LOCAL_CLI` vs `REMOTE_CHANNEL`); blocks remote shell execution, destructive git, and secret access. |
+| **Multi-Channel Gateway** | [`core/runtime/gateway.py`](core/runtime/gateway.py) | Manages channel lifecycles, health reporting, and graceful shutdown across CLI, Telegram, and WhatsApp. |
+| **Doctor Diagnostics** | [`core/runtime/doctor.py`](core/runtime/doctor.py) | Comprehensive system diagnostics inspecting auth, System 1, System 2, MCP, channels, and skills with automated secret redaction. |
+| **Channel Layer** | [`core/channels/`](core/channels/) | Extensible channel adapters (`base.py`, `telegram.py`, `whatsapp.py`) converting incoming/outgoing messages to normalized models. |
 | **Orchestrator** | [`orchestrator.py`](orchestrator.py) | Central state machine: orchestrates execution cycles, manages subprocesses with process-tree termination, atomic file writing, self-healing retry loops, and reporting. |
 | **Frontend Quality Gate** | [`core/frontend_quality_gate.py`](core/frontend_quality_gate.py) | 7-step automated browser verification pipeline (build → dev server → navigate → console → network → screenshot → verdict) executed via MCP servers. |
 | **PR Proof Generator** | [`core/pr_proof.py`](core/pr_proof.py) | Automated desktop & mobile screenshots uploaded to the orphan branch `pr-proof-assets` using isolated worktrees and formatted with permanent commit SHAs. |
 | **MCP Client (Layer 1)** | [`core/mcp_client.py`](core/mcp_client.py) | Generic stdio JSON-RPC 2.0 client for communicating with MCP servers; manages handshakes, process lifecycles, and tool invocations. |
 | **System 1 (Jev)** | [`system1/`](system1/) | Strongly typed, structured decision layer (`ChoiceQuestion`, `ScoreQuestion`, `NoulQuestion`) powered by the TypeSafe Jev API with zero risk of prompt drift. |
-| **System 2 (Generative)** | [`system2/`](system2/) | Generative reasoning engine. Supports **Google Antigravity** (`agy` CLI with free Google Auth sessions) and **Anthropic Claude** (Claude Sonnet / Opus via API Key). |
+| **System 2 (Generative)** | [`system2/`](system2/) | Generative reasoning engine supporting **Google Antigravity**, **Anthropic Claude**, **OpenAI**, **OpenRouter**, and **generic OpenAI-compatible APIs**. |
 | **Security & Git Guard** | [`security/`](security/) | Pre-stage scanning engine preventing accidental leaks of sensitive files (`.env`, tokens, private keys) along with auth key rotation utilities. |
 | **Stale PR Lifecycle** | [`.github/workflows/stale.yml`](.github/workflows/stale.yml) & [`.github/scripts/protect_active_prs.py`](.github/scripts/protect_active_prs.py) | Automated cleanup of ephemeral testing PRs with automated `keep-open` label protection for active development PRs. |
 
@@ -110,7 +117,7 @@ Configure the variables inside `.env`:
 
 ```ini
 # --- System 2 Provider ---
-# Options: antigravity (Google Auth) or claude (Anthropic API Key)
+# Options: antigravity (Google Auth), claude, openai, openrouter, or custom
 SYSTEM2_PROVIDER=antigravity
 ANTIGRAVITY_MODEL=gemini-3.8-flash-high
 
@@ -118,8 +125,35 @@ ANTIGRAVITY_MODEL=gemini-3.8-flash-high
 # ANTHROPIC_API_KEY=your_anthropic_api_key_here
 # ANTHROPIC_MODEL=claude-sonnet-5
 
+# If using OpenAI:
+# OPENAI_API_KEY=sk-...
+# OPENAI_MODEL=gpt-4o
+
+# If using OpenRouter:
+# OPENROUTER_API_KEY=sk-or-...
+# OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
+
+# If using Generic / Custom OpenAI-compatible endpoint:
+# BRAINFROG_MODEL_PROVIDER=custom
+# CUSTOM_BASE_URL=https://my-llm-host.internal/v1
+# CUSTOM_API_KEY=secret_or_empty
+# CUSTOM_MODEL=llama-3.3-70b-instruct
+
 # --- System 1 Provider (Jev / TypeSafe) ---
 TYPESAFE_API_KEY=your_typesafe_api_key_here
+
+# --- Messaging Channels (Optional) ---
+# Telegram:
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
+TELEGRAM_ALLOWED_USERS=12345678,98765432
+TELEGRAM_ENABLED=false
+
+# WhatsApp (Transport interface / Mock or Cloud API):
+WHATSAPP_TRANSPORT=mock
+WHATSAPP_ALLOWED_USERS=+1234567890,+1987654321
+WHATSAPP_ENABLED=false
+# WHATSAPP_API_TOKEN=your_cloud_api_token
+# WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
 
 # --- Quality Gate & Browser Verification (Optional) ---
 # BRAINFROG_VERIFY_MCP_PATH=/path/to/brainfrog-verify-mcp/dist/index.js
@@ -147,7 +181,9 @@ Quick in-REPL commands:
 - `/diff` — Review current Git diff changes
 - `/undo` — Cleanly revert uncommitted changes or the latest commit via Git
 - `/status` — View current repository status, branch, provider, active model, and test command
-- `/provider` — Switch System 2 AI provider (`antigravity` or `claude`)
+- `/doctor` — Run comprehensive runtime self-diagnostics with safe secret masking
+- `/gateway` — View active multi-channel gateway status and registered adapters
+- `/provider` — Switch System 2 AI provider (`antigravity`, `claude`, `openai`, `openrouter`, `custom`)
 - `/model` / `/models` — Select or switch active AI models
 - `/preview [target]` — Capture and inspect headless visual screenshots of HTML/web UI
 - `/rules` — Display active project guidelines loaded from `BRAINFROG.md`
@@ -184,6 +220,223 @@ brainfrog \
   --test-cmd "npm test" \
   --auto-pr
 ```
+
+#### Multi-Channel Gateway Commands
+```bash
+# Check status of all messaging channels and gateway health
+brainfrog gateway status
+
+# Start the gateway daemon with specific or all enabled channels
+brainfrog gateway start --channels telegram,whatsapp
+brainfrog gateway start --repo /path/to/project
+```
+
+#### Doctor Self-Inspection
+```bash
+# Run comprehensive runtime self-diagnostics
+brainfrog doctor
+```
+Inspects:
+- Active Google authentication and API credentials
+- System 1 (TypeSafe / Jev) connectivity
+- System 2 active provider and model
+- MCP servers and JSON-RPC readiness
+- Memory banks and custom skills
+- Telegram and WhatsApp transport configurations
+- Active channel security policies
+*Note: All secret keys, auth tokens, and session identifiers are automatically redacted (`sk-...XXXX`).*
+
+---
+
+## Multi-Channel Trust Boundary & Security
+
+BrainFrog enforces a strict distinction between **Local** and **Remote** channels:
+
+```
+Channel Type     Trust Level        Permissions Allowed
+────────────     ───────────        ─────────────────────────────────────────────────
+LOCAL_CLI        HIGH_TRUST         Full capability: shell commands, file edits, git,
+                                    testing, memory, skills, MCP tools.
+
+REMOTE_CHANNEL   RESTRICTED         Safe execution only: queries, memory reads, read-only
+(Telegram /                         inspections. Blocked unconditionally:
+ WhatsApp)                          - Arbitrary shell commands
+                                    - Destructive git operations (reset, force-push)
+                                    - Unrestricted file mutations
+                                    - Credential or secret inspection
+                                    - Deployment / production commands
+```
+
+### Pre-Runtime Gate & Session Isolation
+1. **Pre-Runtime Allowlist**: Every remote channel requires explicit allowlisting (`TELEGRAM_ALLOWED_USERS`, `WHATSAPP_ALLOWED_USERS`). If the allowlist is empty or the sender is not on the list, incoming messages are discarded with a security audit event before entering the runtime.
+2. **Session Scoping**: Sessions are strictly keyed by `channel:user_id:conversation_id` (e.g., `telegram:12345678:12345678`, `whatsapp:1234567890:1234567890`, `cli:local:default`). Cross-session context leakage is architecturally prohibited.
+3. **System 1 Intent Triage**: System 1 evaluates intent risk before delegating execution to the Orchestrator. Remote actions that violate permission boundaries return clear, non-leaking rejection messages.
+4. **WhatsApp Channel Parity (Phase 12)**:
+   - **Pluggable Transports**: Supports deterministic `MockWhatsAppTransport` (for offline unit/E2E testing) and `WhatsAppCloudTransport` (official Meta Graph API).
+   - **Delivery & Chunking**: Long responses exceeding 4,000 characters are automatically split and delivered as sequentially ordered messages without content truncation.
+   - **Deterministic Security**: WhatsApp remote execution is constrained by the same runtime security boundary used by other remote channels and covered by automated E2E regression tests.
+   - **Offline & Live Testing**: The test suite executes 100% offline without requiring credentials. Optional live WhatsApp smoke tests can be enabled with `BRAINFROG_WHATSAPP_LIVE=1`.
+
+---
+
+## Persistent Runtime State & Session Recovery
+
+BrainFrog provides deterministic, filesystem-backed session persistence so conversation continuity survives daemon restarts and process termination without requiring any external database services.
+
+```
+Incoming Message
+      │
+      ▼
+   Channel (Telegram / WhatsApp / CLI)
+      │
+      ▼
+BrainFrogRuntime
+      │
+      ▼
+SessionManager (Thread-safe with RLock)
+      │
+      ▼
+SessionStore (FileSessionStore / InMemorySessionStore)
+      │
+      ▼
+.brainfrog/sessions/<sha256_hash>.json
+```
+
+### 1. Storage Location & Naming
+- **Session Files**: Stored within the repository at `.brainfrog/sessions/`.
+- **Safe Filenames**: Session IDs (`<channel>:<user_id>:<conversation_id>`) are hashed using SHA-256 (`hashlib.sha256(session_id).hexdigest()[:32] + ".json"`). Raw user/channel inputs never touch the filesystem directly, making path traversal (`../../evil`, drive letters, control characters) mathematically impossible.
+- **Git Guard Defense**: `.brainfrog/sessions/` is protected in `security/git_guard.py`, automatically ensured in `.gitignore`, and purged from git tracking if accidentally staged.
+
+### 2. Schema Specification (Version 1)
+```json
+{
+  "schema_version": 1,
+  "session_id": "telegram:12345678:12345678",
+  "channel": "telegram",
+  "user_id": "12345678",
+  "conversation_id": "12345678",
+  "created_at": 1790968179.698,
+  "last_active_at": 1790968185.120,
+  "active_mode": "build",
+  "active_skill": null,
+  "active_model": "claude-3-7-sonnet-20250219",
+  "active_provider": "claude",
+  "plan_context": null,
+  "metadata": {},
+  "history": [
+    {
+      "role": "user",
+      "content": "My name for this conversation is BrainFrog.",
+      "timestamp": 1790968179.700
+    },
+    {
+      "role": "assistant",
+      "content": "Understood! I will remember that.",
+      "timestamp": 1790968185.120
+    }
+  ]
+}
+```
+
+### 3. Atomic Writes & Platform Compatibility
+- Writes are executed via a temporary file in the same directory (`.tmp_<hash>_<uuid>.json`), flushed, fsynced to disk, and atomically swapped into place using `os.replace`.
+- Fully compatible with POSIX and Windows filesystem semantics (preventing race conditions and zero-byte file states during unexpected process termination).
+
+### 4. Crash & Corruption Recovery
+- **Quarantine Policy**: If a session file contains truncated data, invalid JSON, or missing required fields, it is safely moved to `.brainfrog/sessions/corrupt/<timestamp>_<filename>` for post-mortem analysis.
+- **Zero Daemon Crash**: The runtime logs an audit warning and transparently initializes a clean session state. Corrupted files never crash the gateway or expose error internals to remote users.
+- **Schema Safety**: If a file has an unsupported schema version (`> CURRENT_SESSION_SCHEMA_VERSION`), it is safely preserved and ignored rather than overwritten or misparsed.
+
+### 5. Multi-Session Isolation & Security
+- **Strict Isolation**: Distinct channel/user/chat identifiers produce distinct hashes and files. User A on Chat 1 cannot access User B or User A's Chat 2 history.
+- **Secret Scrubbing on Disk**: Even if sensitive tokens or keys appear in user prompts or tool responses, `scrub_secrets()` redacts them (`sk-...XXXX`, bot tokens, bearer headers) before data is serialized to disk.
+- **Remote Read-Only Invariant**: Persistence operates strictly on internal runtime metadata files in `.brainfrog/sessions/`. It cannot be leveraged by remote commands to modify workspace code or project files.
+
+### 6. Reset & Lifecycle Behavior
+- **Reset Command (`/reset`, `/new`)**: Purges the active session state from memory and deletes the persisted `.json` file from disk. The next message starts with a clean slate.
+- **Channel Defaults**:
+  - **Telegram & WhatsApp Gateway**: Persistent by default (`persist_sessions=True`). Full conversation continuity across daemon restarts.
+  - **Interactive CLI**: Ephemeral by default (each fresh terminal invocation starts with a clean context, while in-session REPL turns are preserved until `/reset`, `/new`, or terminal exit).
+
+---
+
+## Remote Approval & Two-Man Rule (Phase 13)
+
+BrainFrog introduces a secure, channel-agnostic authorization mechanism for remote operations requiring explicit human authorization without creating a second orchestrator or weakening underlying security controls.
+
+```
+Remote Request (Telegram / WhatsApp)
+               │
+               ▼
+       Normalized Message
+               │
+               ▼
+       BrainFrogRuntime
+               │
+               ▼
+   Permission / Risk Evaluation
+               │
+               ▼
+       Approval Required?
+      ┌────────┴────────┐
+     NO                YES
+     │                  │
+     ▼                  ▼
+Normal Path      ApprovalRequest (Cryptographic Nonce, TTL, SHA-256 Digest)
+                        │
+                        ▼
+                Telegram / WhatsApp
+                        │
+                        ▼
+             Explicit Slash Command (/approve <id> by Peer)
+                        │
+                        ▼
+             Approval Verification (Bound to Session, Channel, Digest)
+                        │
+                        ▼
+             Atomic One-Time Consumption (APPROVED -> CONSUMED)
+                        │
+                        ▼
+               Existing Orchestrator (Single Authoritative Engine)
+                        │
+                        ▼
+                    Execution
+```
+
+### Core Security Invariants
+1. **Cryptographic & Scoped Operation Binding**:
+   - Operations are serialized deterministically into a `CanonicalOperation` (sorted parameters, normalized action, sanitized target).
+   - A SHA-256 `operation_digest` is calculated over the canonical JSON representation.
+   - Any modification in security-relevant parameters (e.g. target path `config.py` vs `.env`, or environment `staging` vs `prod`) yields a digest mismatch and causes immediate rejection.
+2. **Two-Man Rule Enforcement**:
+   - When enabled (`two_man_rule_enabled = True`), the requester cannot approve their own request (`requester != approver`).
+   - Self-approvals are strictly rejected with an explicit policy violation message.
+   - Identity is verified from authenticated channel transport headers, never from forgeable user-supplied display names or payload metadata.
+3. **Session & Channel Binding**:
+   - An approval request generated for `telegram:userA:conv1` can only execute in that exact session.
+   - Cross-channel authorization is impossible: Telegram approvals cannot authorize WhatsApp execution, and vice versa.
+4. **Single-Use Atomic Consumption & TOCTOU Immunity**:
+   - Approvals are strictly one-time: `PENDING -> APPROVED -> CONSUMED`.
+   - The transition to `CONSUMED` occurs atomically under an `RLock` prior to privileged execution.
+   - Concurrent race conditions are eliminated: in multi-threaded execution attempts, exactly one consumer succeeds and all other callers are rejected with replay prevention errors.
+   - Execution failure does NOT restore the approval: failed operations require a new approval request.
+5. **No Second Orchestrator**:
+   - `core/orchestrator.py` remains the single, canonical state-machine and execution engine.
+   - `ApprovalService` is an authorization state manager only.
+6. **Natural Language Approval Defense**:
+   - Natural language phrases (e.g. *"I approve this"*, *"yes execute it"*, *"approved"*, *"I am the admin"*) are strictly rejected. Natural language is NOT authentication.
+   - Authorization requires an authenticated slash command (`/approve <id>`).
+7. **Filesystem Persistence & Security**:
+   - Stored in `.brainfrog/approvals/` with safe SHA-256 hashed filenames.
+   - Atomic writes via temporary files and `os.replace`.
+   - Corrupt files are quarantined safely to `.brainfrog/approvals/corrupt/`.
+   - `.brainfrog/approvals/` is protected by `Git Guard` and ignored in `.gitignore`.
+8. **Commands**:
+   - `/approve <request_id>` — Authorize a pending request (requires peer approver under Two-Man Rule).
+   - `/reject <request_id>` — Reject a pending request (permanently non-executable).
+   - `/cancel <request_id>` — Cancel a pending request (requester only).
+   - `/approvals` — List active pending approvals for the current session.
+   - `/exec <request_id>` — Execute an approved operation once.
 
 ---
 
