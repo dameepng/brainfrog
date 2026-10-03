@@ -324,7 +324,7 @@ class BrainFrogRuntime:
         if approval_id:
             digest = message.metadata.get("expected_digest")
             if not digest:
-                canonical_op = extract_canonical_operation(raw_text, action, message.metadata)
+                canonical_op = extract_canonical_operation(raw_text, action, message.metadata, repo_dir=Path(self.repo_dir))
                 digest = canonical_op.compute_digest()
             is_valid, app_req, consume_reason = self.approval_service.verify_and_consume(
                 request_id=approval_id,
@@ -357,7 +357,36 @@ class BrainFrogRuntime:
         if not allowed and not approved_execution:
             should_request_approval = bool(self.require_approval or message.metadata.get("require_approval"))
             if should_request_approval:
-                canonical_op = extract_canonical_operation(raw_text, action, message.metadata)
+                canonical_op = extract_canonical_operation(raw_text, action, message.metadata, repo_dir=Path(self.repo_dir))
+
+                # M-02 Remediation: Fail-closed on invalid or ambiguous filesystem targets
+                is_fs_action = action in (
+                    PermissionAction.WRITE_CODE,
+                    PermissionAction.WRITE_FILES,
+                    PermissionAction.READ_CODE,
+                ) or canonical_op.action_type in ("write_code", "write_files", "write_file", "delete_file", "read_code")
+
+                if is_fs_action:
+                    if canonical_op.parameters.get("invalid_path"):
+                        fail_reason = "Invalid target path: Path must be a safe, workspace-relative path."
+                        emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": fail_reason})
+                        return OutgoingMessage(
+                            text=f"❌ {fail_reason}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=fail_reason,
+                        )
+                    if not canonical_op.target or canonical_op.parameters.get("ambiguous"):
+                        fail_reason = "Target is ambiguous or non-filesystem token. Please specify an exact workspace-relative path."
+                        emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": fail_reason})
+                        return OutgoingMessage(
+                            text=f"⚠️ {fail_reason}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=fail_reason,
+                        )
                 risk = (
                     RiskClass.CRITICAL.value
                     if action in (PermissionAction.SHELL_EXECUTION, PermissionAction.GIT_DESTRUCTIVE, PermissionAction.DEPLOYMENT)

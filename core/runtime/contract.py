@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, FrozenSet, Optional, Set
 
+from core.runtime.targets import classify_target_candidate
+
 
 def normalize_target_rel_path(repo_dir: Path, target: str) -> str:
     """Normalize an approved target path relative to repo_dir.
@@ -88,13 +90,15 @@ class ApprovedExecutionContract:
                 if t and str(t).strip():
                     raw_targets.add(str(t).strip())
 
-        # Normalize approved targets
+        # Normalize approved targets — validate every target candidate deterministically
         normalized_targets: Set[str] = set()
         rdir = repo_dir.resolve() if repo_dir else Path.cwd().resolve()
         for t in raw_targets:
-            norm = normalize_target_rel_path(rdir, t)
-            if norm:
-                normalized_targets.add(norm)
+            cand = classify_target_candidate(t, repo_dir=rdir)
+            if cand.is_valid:
+                norm = normalize_target_rel_path(rdir, cand.normalized)
+                if norm:
+                    normalized_targets.add(norm)
 
         return cls(
             request_id=str(app_req.request_id),

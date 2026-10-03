@@ -28,6 +28,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.runtime.targets import (
+    TargetCandidate,
+    TargetClassification,
+    classify_target_candidate,
+    extract_deterministic_targets,
+)
+
 try:
     import msvcrt
 except ImportError:
@@ -114,34 +121,100 @@ def extract_canonical_operation(
     text: str,
     action: Any = None,
     metadata: Optional[Dict[str, Any]] = None,
+    repo_dir: Optional[Path] = None,
 ) -> CanonicalOperation:
-    """Deterministically extract a CanonicalOperation from raw text and action."""
+    """Deterministically extract a CanonicalOperation from raw text and action.
+
+    Remediates M-02 (Heuristic Target Extraction):
+    - Rejects version numbers, URLs, packages, issue references, and numbers from filesystem targets.
+    - Deterministically validates metadata targets against workspace filesystem rules.
+    - Detects ambiguous or non-filesystem tokens and fails closed (target='').
+    - Disallows path traversal, drive letters, and UNC paths.
+    """
     import re
 
     meta = metadata or {}
+    rdir = repo_dir
+    if not rdir and "repo_dir" in meta and meta["repo_dir"]:
+        try:
+            rdir = Path(meta["repo_dir"])
+        except Exception:
+            rdir = None
+
     action_type = meta.get("action_type") or (
         action.value if hasattr(action, "value") else str(action or "generic_action")
     )
     action_type = str(action_type).strip().lower()
 
-    target = meta.get("target") or meta.get("path")
-    if not target:
-        # Detect file paths in text (e.g. config.py, src/main.py, /path/to/file)
-        match = re.search(r"([a-zA-Z0-9_\-\.\/\\]+\.[a-zA-Z0-9_\-]+)", text)
-        if match:
-            target = match.group(1).replace("\\", "/")
-        else:
-            # Detect environment or target keywords (e.g. production, staging)
-            env_match = re.search(r"\b(production|prod|staging|test)\b", text, re.IGNORECASE)
-            if env_match:
-                target = env_match.group(1).lower()
-            else:
-                target = text.strip()
-
     params: Dict[str, Any] = {}
     for k in ("environment", "branch", "force", "mode", "command"):
         if k in meta:
             params[k] = meta[k]
+
+    # Non-filesystem action types have their own explicit target extraction
+    if action_type in ("deployment", "deploy_project"):
+        raw_target = meta.get("target") or meta.get("path")
+        if not raw_target:
+            env_match = re.search(r"\b(production|prod|staging|test)\b", text, re.IGNORECASE)
+            target = env_match.group(1).lower() if env_match else ""
+        else:
+            target = str(raw_target).strip().lower()
+        return CanonicalOperation(
+            action_type=action_type,
+            target=target,
+            parameters=params,
+        )
+
+    if action_type in ("shell_execution", "run_shell_command"):
+        raw_target = meta.get("target") or meta.get("command") or text.strip()
+        return CanonicalOperation(
+            action_type=action_type,
+            target=str(raw_target).strip(),
+            parameters=params,
+        )
+
+    # For filesystem actions (write_code, write_files, read_code, etc.) and generic actions:
+    # 1. Check if metadata provided explicit target/path
+    meta_target = meta.get("target") or meta.get("path")
+    if meta_target:
+        cand = classify_target_candidate(str(meta_target).strip(), repo_dir=rdir)
+        if cand.is_valid:
+            target = cand.normalized
+        else:
+            # Metadata target is invalid or non-filesystem token -> fail closed
+            target = ""
+            if cand.classification == TargetClassification.INVALID_PATH:
+                params["invalid_path"] = True
+            elif cand.classification in (TargetClassification.AMBIGUOUS, TargetClassification.NON_FILESYSTEM_TOKEN):
+                params["ambiguous"] = True
+            params["target_classification"] = cand.classification.value
+            params["target_reason"] = cand.reason
+    else:
+        # 2. Extract deterministically from text
+        valid_targets, candidates = extract_deterministic_targets(text, repo_dir=rdir)
+        if valid_targets:
+            target = valid_targets[0]
+            if len(valid_targets) > 1:
+                params["targets"] = valid_targets
+        else:
+            target = ""
+            if any(c.classification == TargetClassification.INVALID_PATH for c in candidates):
+                params["invalid_path"] = True
+            else:
+                params["ambiguous"] = True
+
+    # Multi-targets in metadata
+    multi = meta.get("targets") or meta.get("files")
+    if isinstance(multi, (list, tuple, set)):
+        verified_multi: List[str] = []
+        for t in multi:
+            tc = classify_target_candidate(str(t).strip(), repo_dir=rdir)
+            if tc.is_valid and tc.normalized not in verified_multi:
+                verified_multi.append(tc.normalized)
+        if verified_multi:
+            params["targets"] = verified_multi
+            if not target:
+                target = verified_multi[0]
 
     return CanonicalOperation(
         action_type=action_type,
