@@ -34,6 +34,17 @@ from .session import (
     scrub_secrets,
     session_manager,
 )
+from .approval import (
+    ApprovalRequest,
+    ApprovalService,
+    ApprovalStatus,
+    ApprovalStore,
+    CanonicalOperation,
+    FileApprovalStore,
+    InMemoryApprovalStore,
+    RiskClass,
+    extract_canonical_operation,
+)
 
 
 class BrainFrogRuntime:
@@ -57,6 +68,10 @@ class BrainFrogRuntime:
         system1_factory: Optional[Callable[[str], Any]] = None,
         system2_factory: Optional[Callable[..., Any]] = None,
         persist_sessions: bool = True,
+        approval_service: Optional[ApprovalService] = None,
+        approval_store: Optional[ApprovalStore] = None,
+        require_approval: bool = False,
+        two_man_rule_enabled: bool = True,
     ) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
         self.default_backend = default_backend
@@ -76,6 +91,17 @@ class BrainFrogRuntime:
         self.policy_provider = policy_provider or get_default_policy
         self.system1_factory = system1_factory or get_system1
         self.system2_factory = system2_factory or System2Client
+
+        if approval_service is not None:
+            self.approval_service = approval_service
+        elif approval_store is not None:
+            self.approval_service = ApprovalService(store=approval_store, two_man_rule_enabled=two_man_rule_enabled)
+        else:
+            self.approval_service = ApprovalService(
+                store=FileApprovalStore(repo_dir=self.repo_dir),
+                two_man_rule_enabled=two_man_rule_enabled,
+            )
+        self.require_approval = require_approval
 
     def _resolve_test_cmd(self, custom_cmd: Optional[str]) -> List[str]:
         if custom_cmd:
@@ -173,6 +199,79 @@ class BrainFrogRuntime:
                 self.sessions.reset(session.session_id)
                 return OutgoingMessage(text="🔄 Session context has been reset.", events=events, success=True, status="completed")
 
+            if cmd == "/approve":
+                if len(parts) < 2 or not parts[1].strip():
+                    return OutgoingMessage(text="⚠️ Usage: `/approve <request_id>`", events=events, success=False, status="rejected")
+                req_id = parts[1].strip()
+                ok, resp_msg, req_obj = self.approval_service.approve(
+                    request_id=req_id,
+                    approver_id=message.user_id,
+                    channel=effective_channel,
+                )
+                if ok:
+                    emit("agent.approved", {"request_id": req_id, "approver": message.user_id})
+                    return OutgoingMessage(text=f"✅ {resp_msg}", events=events, success=True, status="completed")
+                else:
+                    emit("agent.approval.failed", {"request_id": req_id, "reason": resp_msg})
+                    return OutgoingMessage(text=f"❌ {resp_msg}", events=events, success=False, status="rejected", error=resp_msg)
+
+            if cmd == "/reject":
+                if len(parts) < 2 or not parts[1].strip():
+                    return OutgoingMessage(text="⚠️ Usage: `/reject <request_id>`", events=events, success=False, status="rejected")
+                req_id = parts[1].strip()
+                ok, resp_msg, req_obj = self.approval_service.reject(
+                    request_id=req_id,
+                    approver_id=message.user_id,
+                    channel=effective_channel,
+                )
+                if ok:
+                    emit("agent.rejected", {"request_id": req_id, "approver": message.user_id})
+                    return OutgoingMessage(text=f"🚫 {resp_msg}", events=events, success=True, status="completed")
+                else:
+                    return OutgoingMessage(text=f"❌ {resp_msg}", events=events, success=False, status="rejected", error=resp_msg)
+
+            if cmd == "/cancel":
+                if len(parts) < 2 or not parts[1].strip():
+                    return OutgoingMessage(text="⚠️ Usage: `/cancel <request_id>`", events=events, success=False, status="rejected")
+                req_id = parts[1].strip()
+                ok, resp_msg, req_obj = self.approval_service.cancel(
+                    request_id=req_id,
+                    requester_id=message.user_id,
+                )
+                if ok:
+                    emit("agent.cancelled", {"request_id": req_id, "requester": message.user_id})
+                    return OutgoingMessage(text=f"🛑 {resp_msg}", events=events, success=True, status="completed")
+                else:
+                    return OutgoingMessage(text=f"❌ {resp_msg}", events=events, success=False, status="rejected", error=resp_msg)
+
+            if cmd == "/approvals":
+                pending = [
+                    r for r in self.approval_service.store.list_requests()
+                    if r.session_id == session.session_id
+                    and r.status == ApprovalStatus.PENDING
+                    and not r.is_expired()
+                ]
+                if not pending:
+                    return OutgoingMessage(text="ℹ️ No pending approvals for this session.", events=events, success=True, status="completed")
+                lines = ["📋 **Pending Approvals:**\n"]
+                for r in pending:
+                    lines.append(f"• `{r.request_id}` — {r.operation_type} (`{r.canonical_operation.target}`) [Risk: {r.risk_class}]")
+                return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
+
+            if cmd in ("/exec", "/run"):
+                if len(parts) < 2 or not parts[1].strip():
+                    return OutgoingMessage(text="⚠️ Usage: `/exec <request_id>`", events=events, success=False, status="rejected")
+                exec_req_id = parts[1].strip()
+                target_req = self.approval_service.store.get(exec_req_id)
+                if not target_req:
+                    return OutgoingMessage(text=f"❌ Request '{exec_req_id}' not found.", events=events, success=False, status="rejected")
+                raw_text = f"{target_req.canonical_operation.action_type} {target_req.canonical_operation.target}"
+                message.metadata["approval_id"] = exec_req_id
+                message.metadata["action_type"] = target_req.canonical_operation.action_type
+                message.metadata["target"] = target_req.canonical_operation.target
+                for k, v in target_req.canonical_operation.parameters.items():
+                    message.metadata[k] = v
+
             if cmd in ("/undo", "/diff", "/preview", "/screenshot", "/paste", "/attach", "/images", "/clear-images"):
                 reason = f"Command '{cmd}' is only available in the local CLI interface."
                 emit("agent.rejected", {"command": cmd, "reason": reason})
@@ -189,7 +288,68 @@ class BrainFrogRuntime:
         allowed, reason = evaluate_channel_action(
             effective_channel, action, policy
         )
-        if not allowed:
+
+        approval_id = message.metadata.get("approval_id") or message.metadata.get("request_id")
+        approved_execution = False
+
+        if approval_id:
+            canonical_op = extract_canonical_operation(raw_text, action, message.metadata)
+            digest = canonical_op.compute_digest()
+            is_valid, app_req, consume_reason = self.approval_service.verify_and_consume(
+                request_id=approval_id,
+                expected_digest=digest,
+                session_id=session.session_id,
+                channel=effective_channel,
+            )
+            if not is_valid:
+                emit("agent.approval.invalid", {"request_id": approval_id, "reason": consume_reason})
+                return OutgoingMessage(
+                    text=f"⚠️ Approval Verification Failed: {consume_reason}",
+                    events=events,
+                    success=False,
+                    status="rejected",
+                    error=consume_reason,
+                )
+            approved_execution = True
+            emit("agent.approval.consumed", {
+                "request_id": approval_id,
+                "approver": app_req.approver_id if app_req else None,
+            })
+
+        if not allowed and not approved_execution:
+            should_request_approval = bool(self.require_approval or message.metadata.get("require_approval"))
+            if should_request_approval:
+                canonical_op = extract_canonical_operation(raw_text, action, message.metadata)
+                risk = (
+                    RiskClass.CRITICAL.value
+                    if action in (PermissionAction.SHELL_EXECUTION, PermissionAction.GIT_DESTRUCTIVE, PermissionAction.DEPLOYMENT)
+                    else (RiskClass.HIGH.value if action == PermissionAction.CREDENTIAL_ACCESS else RiskClass.MEDIUM.value)
+                )
+                app_req = self.approval_service.create_request(
+                    session_id=session.session_id,
+                    channel=effective_channel,
+                    user_id=message.user_id,
+                    conversation_id=message.conversation_id,
+                    operation_type=action.value if hasattr(action, "value") else str(action),
+                    canonical_operation=canonical_op,
+                    risk_class=risk,
+                )
+                emit("agent.approval.requested", {
+                    "request_id": app_req.request_id,
+                    "operation": canonical_op.to_canonical_dict(),
+                })
+                prompt_text = self.approval_service.format_approval_prompt(app_req)
+                return OutgoingMessage(
+                    text=prompt_text,
+                    events=events,
+                    success=False,
+                    status="pending_approval",
+                    metadata={
+                        "request_id": app_req.request_id,
+                        "operation_digest": app_req.operation_digest,
+                    },
+                )
+
             emit("agent.rejected", {"action": action.value, "reason": reason})
             return OutgoingMessage(
                 text=f"⚠️ Permission Denied: {reason}",
@@ -201,7 +361,10 @@ class BrainFrogRuntime:
 
         # For remote channels, enforce read-only / plan mode if code editing is not permitted
         effective_mode = requested_mode
-        if policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value:
+        if approved_execution:
+            if action in (PermissionAction.WRITE_CODE, PermissionAction.WRITE_FILES):
+                effective_mode = "build"
+        elif policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value:
             if not policy.allow_code_edits and requested_mode == "build":
                 # Fallback to plan mode so remote users get safe architectural analysis & PRD
                 effective_mode = "plan"
@@ -244,7 +407,7 @@ class BrainFrogRuntime:
             return OutgoingMessage(text=f"❌ {err_msg}", events=events, success=False, error=err_msg)
 
         # 5. Load Domains & Prepare Orchestrator Config
-        can_auto_create = bool(effective_mode == "build" and policy.allow_code_edits)
+        can_auto_create = bool(effective_mode == "build" and (policy.allow_code_edits or approved_execution))
         domains = load_module_map(workspace_dir, task=raw_text, auto_create=can_auto_create)
 
         effective_task = raw_text
@@ -348,3 +511,6 @@ class BrainFrogRuntime:
                 "steps_count": len(results),
             },
         )
+
+    # Backward compatibility and usability alias
+    process_message = handle_message

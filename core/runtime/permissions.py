@@ -225,7 +225,7 @@ def classify_request_action(
 
     # 5. File modifications / code mutation / deletions
     write_patterns = [
-        r"\b(?:modify|edit|update|rewrite|create|write|delete|remove|ubah|hapus|ganti)\s+(?:the\s+)?(?:file|files|src\/|app\/|code|temporary\s+files|temp\s+files|[a-zA-Z0-9_\-\.\/]+\.(?:py|js|ts|json|html|css|yaml|yml|md|txt))\b",
+        r"\b(?:modify|edit|update|rewrite|create|write|delete|remove|ubah|hapus|ganti|write_file|write_files|delete_file)\s+(?:the\s+)?(?:file|files|src\/|app\/|code|temporary\s+files|temp\s+files|[a-zA-Z0-9_\-\.\/]+\.(?:py|js|ts|json|html|css|yaml|yml|md|txt))\b",
         r"\b(?:create\s+a\s+new\s+file|rewrite\s+this\s+configuration|apply\s+the\s+requested\s+code\s+changes|delete\s+the\s+temporary\s+files)\b",
     ]
     for pat in write_patterns:

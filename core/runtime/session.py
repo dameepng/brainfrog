@@ -40,9 +40,10 @@ def scrub_secrets(text: str) -> str:
         if val and len(val) >= 6:
             scrubbed = scrubbed.replace(val, f"[{var}_REDACTED]")
 
-    scrubbed = re.sub(r"sk-[a-zA-Z0-9_\-]{20,}", "[REDACTED_API_KEY]", scrubbed)
+    scrubbed = re.sub(r"sk-(?:proj-)?[a-zA-Z0-9_\-]{20,}", "[REDACTED_API_KEY]", scrubbed)
     scrubbed = re.sub(r"\b\d{8,11}:[A-Za-z0-9_-]{30,40}\b", "[REDACTED_BOT_TOKEN]", scrubbed)
     scrubbed = re.sub(r"(?i)\bBearer\s+[a-zA-Z0-9_\-\.]{8,}\b", "Bearer [REDACTED_TOKEN]", scrubbed)
+    scrubbed = re.sub(r"(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{30,}", "[REDACTED_TOKEN]", scrubbed)
     return scrubbed
 
 

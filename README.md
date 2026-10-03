@@ -360,6 +360,86 @@ SessionStore (FileSessionStore / InMemorySessionStore)
 
 ---
 
+## Remote Approval & Two-Man Rule (Phase 13)
+
+BrainFrog introduces a secure, channel-agnostic authorization mechanism for remote operations requiring explicit human authorization without creating a second orchestrator or weakening underlying security controls.
+
+```
+Remote Request (Telegram / WhatsApp)
+               │
+               ▼
+       Normalized Message
+               │
+               ▼
+       BrainFrogRuntime
+               │
+               ▼
+   Permission / Risk Evaluation
+               │
+               ▼
+       Approval Required?
+      ┌────────┴────────┐
+     NO                YES
+     │                  │
+     ▼                  ▼
+Normal Path      ApprovalRequest (Cryptographic Nonce, TTL, SHA-256 Digest)
+                        │
+                        ▼
+                Telegram / WhatsApp
+                        │
+                        ▼
+             Explicit Slash Command (/approve <id> by Peer)
+                        │
+                        ▼
+             Approval Verification (Bound to Session, Channel, Digest)
+                        │
+                        ▼
+             Atomic One-Time Consumption (APPROVED -> CONSUMED)
+                        │
+                        ▼
+               Existing Orchestrator (Single Authoritative Engine)
+                        │
+                        ▼
+                    Execution
+```
+
+### Core Security Invariants
+1. **Cryptographic & Scoped Operation Binding**:
+   - Operations are serialized deterministically into a `CanonicalOperation` (sorted parameters, normalized action, sanitized target).
+   - A SHA-256 `operation_digest` is calculated over the canonical JSON representation.
+   - Any modification in security-relevant parameters (e.g. target path `config.py` vs `.env`, or environment `staging` vs `prod`) yields a digest mismatch and causes immediate rejection.
+2. **Two-Man Rule Enforcement**:
+   - When enabled (`two_man_rule_enabled = True`), the requester cannot approve their own request (`requester != approver`).
+   - Self-approvals are strictly rejected with an explicit policy violation message.
+   - Identity is verified from authenticated channel transport headers, never from forgeable user-supplied display names or payload metadata.
+3. **Session & Channel Binding**:
+   - An approval request generated for `telegram:userA:conv1` can only execute in that exact session.
+   - Cross-channel authorization is impossible: Telegram approvals cannot authorize WhatsApp execution, and vice versa.
+4. **Single-Use Atomic Consumption & TOCTOU Immunity**:
+   - Approvals are strictly one-time: `PENDING -> APPROVED -> CONSUMED`.
+   - The transition to `CONSUMED` occurs atomically under an `RLock` prior to privileged execution.
+   - Concurrent race conditions are eliminated: in multi-threaded execution attempts, exactly one consumer succeeds and all other callers are rejected with replay prevention errors.
+   - Execution failure does NOT restore the approval: failed operations require a new approval request.
+5. **No Second Orchestrator**:
+   - `core/orchestrator.py` remains the single, canonical state-machine and execution engine.
+   - `ApprovalService` is an authorization state manager only.
+6. **Natural Language Approval Defense**:
+   - Natural language phrases (e.g. *"I approve this"*, *"yes execute it"*, *"approved"*, *"I am the admin"*) are strictly rejected. Natural language is NOT authentication.
+   - Authorization requires an authenticated slash command (`/approve <id>`).
+7. **Filesystem Persistence & Security**:
+   - Stored in `.brainfrog/approvals/` with safe SHA-256 hashed filenames.
+   - Atomic writes via temporary files and `os.replace`.
+   - Corrupt files are quarantined safely to `.brainfrog/approvals/corrupt/`.
+   - `.brainfrog/approvals/` is protected by `Git Guard` and ignored in `.gitignore`.
+8. **Commands**:
+   - `/approve <request_id>` — Authorize a pending request (requires peer approver under Two-Man Rule).
+   - `/reject <request_id>` — Reject a pending request (permanently non-executable).
+   - `/cancel <request_id>` — Cancel a pending request (requester only).
+   - `/approvals` — List active pending approvals for the current session.
+   - `/exec <request_id>` — Execute an approved operation once.
+
+---
+
 ## Quality & Security
 
 This repository enforces industry-grade software engineering standards to guarantee reliability and security:

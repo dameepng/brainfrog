@@ -126,6 +126,7 @@ SENSITIVE_FILE_PATTERNS: List[re.Pattern] = [
     re.compile(r"(^|[/\\])node_modules([/\\]|$)", re.IGNORECASE),
     re.compile(r"(^|[/\\])\.brainfrog[/\\]scratch([/\\]|$)", re.IGNORECASE),
     re.compile(r"(^|[/\\])\.brainfrog[/\\]sessions([/\\]|$)", re.IGNORECASE),
+    re.compile(r"(^|[/\\])\.brainfrog[/\\]approvals([/\\]|$)", re.IGNORECASE),
     re.compile(r"server-reference-manifest\.json$", re.IGNORECASE),
     re.compile(r"(^|[/\\])(dist|build|out)[/\\]", re.IGNORECASE),
 ]
@@ -335,6 +336,7 @@ def ensure_gitignore_security(repo_dir: Path) -> bool:
         ".next/",
         ".brainfrog/scratch/",
         ".brainfrog/sessions/",
+        ".brainfrog/approvals/",
         "node_modules/",
         "dist/",
         "build/",
@@ -362,7 +364,7 @@ def ensure_gitignore_security(repo_dir: Path) -> bool:
 
 def purge_tracked_sensitive_files(repo_dir: Path) -> List[str]:
     """Untrack known sensitive or build directories (.next, .brainfrog/scratch, node_modules) if tracked in Git index."""
-    patterns_to_check = [".next", ".brainfrog/scratch", ".brainfrog/sessions", "node_modules"]
+    patterns_to_check = [".next", ".brainfrog/scratch", ".brainfrog/sessions", ".brainfrog/approvals", "node_modules"]
     untracked: List[str] = []
     for pattern in patterns_to_check:
         proc = subprocess.run(

@@ -11,6 +11,15 @@ from .permissions import (
     get_default_policy,
     resolve_channel_trust_level,
 )
+from .approval import (
+    ApprovalRequest,
+    ApprovalService,
+    ApprovalStatus,
+    CanonicalOperation,
+    FileApprovalStore,
+    InMemoryApprovalStore,
+    RiskClass,
+)
 from .runtime import BrainFrogRuntime
 from .session import SessionManager, SessionState, session_manager
 
@@ -29,4 +38,11 @@ __all__ = [
     "SessionState",
     "SessionManager",
     "session_manager",
+    "ApprovalRequest",
+    "ApprovalService",
+    "ApprovalStatus",
+    "CanonicalOperation",
+    "FileApprovalStore",
+    "InMemoryApprovalStore",
+    "RiskClass",
 ]
