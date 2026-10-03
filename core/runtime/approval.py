@@ -57,6 +57,24 @@ logger = logging.getLogger(__name__)
 
 CURRENT_APPROVAL_SCHEMA_VERSION = 1
 DEFAULT_APPROVAL_TTL_SECONDS = 300.0  # 5 minutes
+DEFAULT_MAX_PENDING_PER_SESSION = 20
+DEFAULT_MAX_PENDING_PER_REQUESTER = 200
+DEFAULT_MAX_PENDING_GLOBAL = 1000
+DEFAULT_MAX_TERMINAL_RETENTION = 200
+DEFAULT_MAX_PAYLOAD_BYTES = 64 * 1024  # 64 KB
+DEFAULT_MAX_CLEANUP_BATCH = 50
+
+
+class ApprovalQuotaExceededError(ValueError):
+    """Raised when an approval request exceeds session, user, or global quota."""
+
+    pass
+
+
+class ApprovalPayloadTooLargeError(ValueError):
+    """Raised when an approval request payload exceeds maximum permitted byte size."""
+
+    pass
 
 
 class ApprovalStatus(str, Enum):
@@ -68,6 +86,15 @@ class ApprovalStatus(str, Enum):
     EXPIRED = "EXPIRED"
     CONSUMED = "CONSUMED"
     CANCELLED = "CANCELLED"
+
+
+ACTIVE_APPROVAL_STATUSES = frozenset({ApprovalStatus.PENDING, ApprovalStatus.APPROVED})
+TERMINAL_APPROVAL_STATUSES = frozenset({
+    ApprovalStatus.REJECTED,
+    ApprovalStatus.EXPIRED,
+    ApprovalStatus.CONSUMED,
+    ApprovalStatus.CANCELLED,
+})
 
 
 class RiskClass(str, Enum):
@@ -335,7 +362,14 @@ class ApprovalStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_requests(self) -> List[ApprovalRequest]:
+    def list_requests(
+        self,
+        session_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        limit: Optional[int] = None,
+        active_only: bool = True,
+    ) -> List[ApprovalRequest]:
         raise NotImplementedError
 
     @abstractmethod
@@ -355,13 +389,37 @@ class ApprovalStore(ABC):
 class InMemoryApprovalStore(ApprovalStore):
     """Thread-safe in-memory approval store for unit testing."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_terminal_retention: int = DEFAULT_MAX_TERMINAL_RETENTION) -> None:
         self._requests: Dict[str, ApprovalRequest] = {}
         self._lock = threading.RLock()
+        self.max_terminal_retention = max_terminal_retention
+
+    def _get_quota_lock(self, timeout: float = 10.0) -> Any:
+        return self._lock
+
+    def cleanup_expired(self, max_items: int = DEFAULT_MAX_CLEANUP_BATCH) -> int:
+        with self._lock:
+            now = time.time()
+            cleaned = 0
+            for req in list(self._requests.values()):
+                if cleaned >= max_items:
+                    break
+                if req.status in ACTIVE_APPROVAL_STATUSES and req.is_expired(now):
+                    req.status = ApprovalStatus.EXPIRED
+                    cleaned += 1
+            return cleaned
 
     def save(self, request: ApprovalRequest) -> bool:
         with self._lock:
             self._requests[request.request_id] = request
+            terminal_keys = [
+                k for k, r in self._requests.items()
+                if r.status in TERMINAL_APPROVAL_STATUSES
+            ]
+            if len(terminal_keys) > self.max_terminal_retention:
+                excess = len(terminal_keys) - self.max_terminal_retention
+                for k in terminal_keys[:excess]:
+                    del self._requests[k]
             return True
 
     def get(self, request_id: str) -> Optional[ApprovalRequest]:
@@ -375,9 +433,30 @@ class InMemoryApprovalStore(ApprovalStore):
                 return True
             return False
 
-    def list_requests(self) -> List[ApprovalRequest]:
+    def list_requests(
+        self,
+        session_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        limit: Optional[int] = None,
+        active_only: bool = True,
+    ) -> List[ApprovalRequest]:
         with self._lock:
-            return list(self._requests.values())
+            results: List[ApprovalRequest] = []
+            for req in list(self._requests.values()):
+                if limit is not None and len(results) >= limit:
+                    break
+                if session_id is not None and req.session_id != session_id:
+                    continue
+                if requester_id is not None and req.user_id != requester_id.strip():
+                    continue
+                if channel is not None and req.channel.lower() != channel.lower().strip():
+                    continue
+                if active_only:
+                    if req.status not in ACTIVE_APPROVAL_STATUSES or req.is_expired():
+                        continue
+                results.append(req)
+            return results
 
     def claim_and_consume(
         self,
@@ -595,32 +674,60 @@ class FileApprovalStore(ApprovalStore):
     - Atomic writes via tempfile + os.replace
     - Corruption quarantine to .brainfrog/approvals/corrupt/
     - Cross-process and cross-thread mutual exclusion on claim/consume
+    - Physical partitioning between active/ and terminal/ approvals
+    - Deterministic bounded terminal retention and expired cleanup
     """
 
-    def __init__(self, repo_dir: Optional[Path] = None, approvals_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        repo_dir: Optional[Path] = None,
+        approvals_dir: Optional[Path] = None,
+        max_terminal_retention: int = DEFAULT_MAX_TERMINAL_RETENTION,
+    ) -> None:
         if approvals_dir is not None:
             self.approvals_dir = Path(approvals_dir).resolve()
         else:
             base = Path(repo_dir).resolve() if repo_dir else Path.cwd().resolve()
             self.approvals_dir = base / ".brainfrog" / "approvals"
 
+        self.terminal_dir = self.approvals_dir / "terminal"
         self.corrupt_dir = self.approvals_dir / "corrupt"
         self.locks_dir = self.approvals_dir / ".locks"
+        self.max_terminal_retention = max_terminal_retention
         self._lock = threading.RLock()
         self._ensure_directories()
+        self._clean_stale_tmp_files()
 
     def _ensure_directories(self) -> None:
         try:
             self.approvals_dir.mkdir(parents=True, exist_ok=True)
+            self.terminal_dir.mkdir(parents=True, exist_ok=True)
             self.corrupt_dir.mkdir(parents=True, exist_ok=True)
             self.locks_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             logger.warning(f"Could not create approvals directory {self.approvals_dir}: {e}")
 
-    def _get_approval_path(self, request_id: str) -> Path:
+    def _clean_stale_tmp_files(self) -> None:
+        """Remove any abandoned temporary files older than 60 seconds."""
+        try:
+            now = time.time()
+            for d in (self.approvals_dir, self.terminal_dir):
+                if not d.exists():
+                    continue
+                for f in d.glob(".tmp_*.json"):
+                    try:
+                        if (now - f.stat().st_mtime) > 60:
+                            f.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    def _get_approval_path(self, request_id: str, terminal: bool = False) -> Path:
         """Generate safe deterministic hashed filename from request_id."""
         raw_hash = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:32]
-        target_path = (self.approvals_dir / f"{raw_hash}.json").resolve()
+        base_dir = self.terminal_dir if terminal else self.approvals_dir
+        target_path = (base_dir / f"{raw_hash}.json").resolve()
         if not target_path.is_relative_to(self.approvals_dir):
             raise ValueError(f"Path traversal detected for request_id: {request_id}")
         return target_path
@@ -637,6 +744,11 @@ class FileApprovalStore(ApprovalStore):
         """Obtain the process-singleton cross-process lock for a given request_id."""
         return _get_cross_process_lock(self._get_lock_path(request_id), timeout=timeout)
 
+    def _get_quota_lock(self, timeout: float = 10.0) -> _CrossProcessLock:
+        """Obtain the process-singleton cross-process lock for store-wide quota operations."""
+        quota_lock_path = (self.locks_dir / "__store_quota__.lock").resolve()
+        return _get_cross_process_lock(quota_lock_path, timeout=timeout)
+
     def _quarantine_file(self, file_path: Path, reason: str) -> None:
         """Safely quarantine a corrupted approval file."""
         try:
@@ -648,18 +760,83 @@ class FileApprovalStore(ApprovalStore):
         except Exception as e:
             logger.error(f"Failed to quarantine corrupt file '{file_path}': {e}")
 
+    def _prune_terminal_records(self) -> int:
+        """Bounded pruning of terminal approval records to prevent unbounded disk growth."""
+        try:
+            if not self.terminal_dir.exists():
+                return 0
+            terminal_files = [f for f in self.terminal_dir.glob("*.json") if not f.name.startswith(".tmp_")]
+            if len(terminal_files) <= self.max_terminal_retention:
+                return 0
+            terminal_files.sort(key=lambda p: p.stat().st_mtime)
+            excess = len(terminal_files) - self.max_terminal_retention
+            pruned = 0
+            for f in terminal_files[:excess]:
+                try:
+                    f.unlink(missing_ok=True)
+                    lock_file = self.locks_dir / f"{f.stem}.lock"
+                    if lock_file.exists():
+                        try:
+                            lock_file.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    pruned += 1
+                except OSError:
+                    pass
+            return pruned
+        except Exception as e:
+            logger.warning(f"Error during terminal records pruning: {e}")
+            return 0
+
+    def cleanup_expired(self, max_items: int = DEFAULT_MAX_CLEANUP_BATCH) -> int:
+        """Bounded garbage collection of expired active approvals.
+
+        Inspects active approvals, transitions expired requests to EXPIRED (which moves them
+        to the terminal directory), and caps total work per invocation at max_items.
+        """
+        with self._lock:
+            if not self.approvals_dir.exists():
+                return 0
+            now = time.time()
+            cleaned = 0
+            for f in self.approvals_dir.glob("*.json"):
+                if f.name.startswith(".tmp_"):
+                    continue
+                if cleaned >= max_items:
+                    break
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    data = json.loads(content)
+                    expires_at = float(data.get("expires_at", 0))
+                    if expires_at and expires_at < now:
+                        req_id = data.get("request_id")
+                        if req_id:
+                            req = self.get(req_id)
+                            if req and req.is_expired(now):
+                                req.status = ApprovalStatus.EXPIRED
+                                self.save(req)
+                                cleaned += 1
+                except Exception:
+                    pass
+            return cleaned
+
     def save(self, request: ApprovalRequest) -> bool:
         lock = self._get_request_lock(request.request_id)
         try:
             with lock:
                 with self._lock:
                     self._ensure_directories()
-                    target_file = self._get_approval_path(request.request_id)
+                    raw_hash = hashlib.sha256(request.request_id.encode("utf-8")).hexdigest()[:32]
+                    is_terminal = request.status in TERMINAL_APPROVAL_STATUSES
+                    dest_dir = self.terminal_dir if is_terminal else self.approvals_dir
+                    target_file = dest_dir / f"{raw_hash}.json"
+                    other_file = (self.approvals_dir if is_terminal else self.terminal_dir) / f"{raw_hash}.json"
+
                     data = request.to_dict()
                     content = json.dumps(data, indent=2, ensure_ascii=False)
 
-                    tmp_name = f".tmp_{hashlib.sha256(request.request_id.encode('utf-8')).hexdigest()[:16]}_{uuid.uuid4().hex[:8]}.json"
-                    tmp_file = self.approvals_dir / tmp_name
+                    tmp_name = f".tmp_{raw_hash[:16]}_{uuid.uuid4().hex[:8]}.json"
+                    tmp_file = dest_dir / tmp_name
 
                     with open(tmp_file, "w", encoding="utf-8") as f:
                         f.write(content)
@@ -669,7 +846,18 @@ class FileApprovalStore(ApprovalStore):
                         except (AttributeError, OSError):
                             pass
 
+                    # Unlink from other directory if transitioning
+                    if other_file.exists():
+                        try:
+                            other_file.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+
                     os.replace(tmp_file, target_file)
+
+                    if is_terminal:
+                        self._prune_terminal_records()
+
                     return True
         except Exception as e:
             logger.error(f"Failed to save approval request '{request.request_id}': {e}")
@@ -677,12 +865,15 @@ class FileApprovalStore(ApprovalStore):
 
     def get(self, request_id: str) -> Optional[ApprovalRequest]:
         with self._lock:
-            target_file: Optional[Path] = None
-            try:
-                target_file = self._get_approval_path(request_id)
+            # Check active first
+            target_file = self._get_approval_path(request_id, terminal=False)
+            if not target_file.exists():
+                # Check terminal
+                target_file = self._get_approval_path(request_id, terminal=True)
                 if not target_file.exists():
                     return None
 
+            try:
                 content = target_file.read_text(encoding="utf-8")
                 if not content.strip():
                     self._quarantine_file(target_file, "Empty approval file")
@@ -700,8 +891,7 @@ class FileApprovalStore(ApprovalStore):
 
                 return ApprovalRequest.from_dict(data)
             except json.JSONDecodeError as jde:
-                if target_file is not None:
-                    self._quarantine_file(target_file, f"Invalid JSON: {jde}")
+                self._quarantine_file(target_file, f"Invalid JSON: {jde}")
                 return None
             except Exception as e:
                 logger.error(f"Error loading approval request '{request_id}': {e}")
@@ -712,31 +902,65 @@ class FileApprovalStore(ApprovalStore):
         try:
             with lock:
                 with self._lock:
-                    target_file = self._get_approval_path(request_id)
-                    if target_file.exists():
-                        target_file.unlink()
-                        return True
-                    return False
+                    deleted = False
+                    active_file = self._get_approval_path(request_id, terminal=False)
+                    if active_file.exists():
+                        active_file.unlink(missing_ok=True)
+                        deleted = True
+                    terminal_file = self._get_approval_path(request_id, terminal=True)
+                    if terminal_file.exists():
+                        terminal_file.unlink(missing_ok=True)
+                        deleted = True
+                    return deleted
         except Exception as e:
             logger.warning(f"Failed to delete approval file for '{request_id}': {e}")
             return False
 
-    def list_requests(self) -> List[ApprovalRequest]:
+    def list_requests(
+        self,
+        session_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
+        channel: Optional[str] = None,
+        limit: Optional[int] = None,
+        active_only: bool = True,
+    ) -> List[ApprovalRequest]:
         with self._lock:
-            requests = []
+            requests: List[ApprovalRequest] = []
             if not self.approvals_dir.exists():
                 return requests
 
-            for f in sorted(self.approvals_dir.glob("*.json")):
-                if f.name.startswith(".tmp_"):
-                    continue
+            # Active requests reside in self.approvals_dir (non-recursive glob)
+            candidate_files = [f for f in sorted(self.approvals_dir.glob("*.json")) if not f.name.startswith(".tmp_")]
+            if not active_only and self.terminal_dir.exists():
+                candidate_files.extend(
+                    [f for f in sorted(self.terminal_dir.glob("*.json")) if not f.name.startswith(".tmp_")]
+                )
+
+            for f in candidate_files:
+                if limit is not None and len(requests) >= limit:
+                    break
                 try:
                     content = f.read_text(encoding="utf-8")
                     data = json.loads(content)
-                    if isinstance(data, dict) and "request_id" in data:
-                        requests.append(ApprovalRequest.from_dict(data))
+                    if not isinstance(data, dict) or "request_id" not in data:
+                        continue
+
+                    if session_id is not None and data.get("session_id") != session_id:
+                        continue
+                    if requester_id is not None and data.get("user_id") != requester_id.strip():
+                        continue
+                    if channel is not None and str(data.get("channel", "")).lower() != channel.lower().strip():
+                        continue
+
+                    req = ApprovalRequest.from_dict(data)
+                    if active_only:
+                        if req.status not in ACTIVE_APPROVAL_STATUSES or req.is_expired():
+                            continue
+
+                    requests.append(req)
                 except Exception:
                     pass
+
             return requests
 
     def claim_and_consume(
@@ -832,10 +1056,18 @@ class ApprovalService:
         store: Optional[ApprovalStore] = None,
         default_ttl_seconds: float = DEFAULT_APPROVAL_TTL_SECONDS,
         two_man_rule_enabled: bool = True,
+        max_pending_per_session: int = DEFAULT_MAX_PENDING_PER_SESSION,
+        max_pending_per_requester: int = DEFAULT_MAX_PENDING_PER_REQUESTER,
+        max_pending_global: int = DEFAULT_MAX_PENDING_GLOBAL,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
     ) -> None:
         self.store = store or FileApprovalStore()
         self.default_ttl_seconds = default_ttl_seconds
         self.two_man_rule_enabled = two_man_rule_enabled
+        self.max_pending_per_session = max_pending_per_session
+        self.max_pending_per_requester = max_pending_per_requester
+        self.max_pending_global = max_pending_global
+        self.max_payload_bytes = max_payload_bytes
 
     def create_request(
         self,
@@ -849,7 +1081,7 @@ class ApprovalService:
         ttl_seconds: Optional[float] = None,
         session_incarnation_id: Optional[str] = None,
     ) -> ApprovalRequest:
-        """Create and persist a new PENDING approval request with secure nonce."""
+        """Create and persist a new PENDING approval request with secure nonce and quota bounds."""
         now = time.time()
         ttl = ttl_seconds or self.default_ttl_seconds
         expires_at = now + ttl
@@ -875,7 +1107,56 @@ class ApprovalService:
             status=ApprovalStatus.PENDING,
             session_incarnation_id=session_incarnation_id,
         )
-        self.store.save(request)
+
+        # 1. Deterministic Payload Size Bound (serialized JSON)
+        serialized_bytes = len(json.dumps(request.to_dict(), ensure_ascii=False).encode("utf-8"))
+        if serialized_bytes > self.max_payload_bytes:
+            raise ApprovalPayloadTooLargeError(
+                f"Approval payload size ({serialized_bytes} bytes) exceeds limit "
+                f"({self.max_payload_bytes} bytes)."
+            )
+
+        # 2. Atomic Quota Enforcement under store quota lock
+        quota_lock_ctx = (
+            self.store._get_quota_lock()
+            if hasattr(self.store, "_get_quota_lock")
+            else nullcontext()
+        )
+        with quota_lock_ctx:
+            # Perform bounded expired cleanup to release stale quota slots
+            if hasattr(self.store, "cleanup_expired"):
+                self.store.cleanup_expired(max_items=DEFAULT_MAX_CLEANUP_BATCH)
+
+            active_requests = self.store.list_requests(active_only=True)
+
+            # Global quota check
+            global_count = len(active_requests)
+            if global_count >= self.max_pending_global:
+                raise ApprovalQuotaExceededError(
+                    f"Global pending approval quota exceeded "
+                    f"({global_count}/{self.max_pending_global})."
+                )
+
+            # Session quota check
+            session_count = sum(1 for r in active_requests if r.session_id == session_id and not r.is_expired())
+            if session_count >= self.max_pending_per_session:
+                raise ApprovalQuotaExceededError(
+                    f"Pending approval quota exceeded for session '{session_id}' "
+                    f"({session_count}/{self.max_pending_per_session})."
+                )
+
+            # Requester quota check
+            clean_user = user_id.strip()
+            requester_count = sum(1 for r in active_requests if r.user_id == clean_user and not r.is_expired())
+            if requester_count >= self.max_pending_per_requester:
+                raise ApprovalQuotaExceededError(
+                    f"Pending approval quota exceeded for requester '{clean_user}' "
+                    f"({requester_count}/{self.max_pending_per_requester})."
+                )
+
+            if not self.store.save(request):
+                raise IOError(f"Failed to persist approval request '{request.request_id}'")
+
         return request
 
     def approve(
@@ -985,12 +1266,12 @@ class ApprovalService:
     ) -> int:
         """Cancel/invalidate all outstanding (PENDING and APPROVED) approvals for a session."""
         invalidated = 0
-        for req in self.store.list_requests():
+        for req in self.store.list_requests(session_id=session_id, active_only=True):
             if req.session_id != session_id:
                 continue
-            if session_incarnation_id is not None and req.session_incarnation_id != session_incarnation_id:
+            if session_incarnation_id is not None and req.session_incarnation_id and req.session_incarnation_id != session_incarnation_id:
                 continue
-            if req.status not in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
+            if req.status not in ACTIVE_APPROVAL_STATUSES:
                 continue
 
             lock_ctx = (
@@ -1000,7 +1281,7 @@ class ApprovalService:
             )
             with lock_ctx:
                 current = self.store.get(req.request_id)
-                if current and current.status in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED):
+                if current and current.status in ACTIVE_APPROVAL_STATUSES:
                     current.status = ApprovalStatus.CANCELLED
                     current.rejection_reason = f"Cancelled due to {reason}"
                     self.store.save(current)

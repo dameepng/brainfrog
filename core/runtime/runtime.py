@@ -35,6 +35,8 @@ from .session import (
     session_manager,
 )
 from .approval import (
+    ApprovalPayloadTooLargeError,
+    ApprovalQuotaExceededError,
     ApprovalRequest,
     ApprovalService,
     ApprovalStatus,
@@ -73,6 +75,11 @@ class BrainFrogRuntime:
         approval_store: Optional[ApprovalStore] = None,
         require_approval: bool = False,
         two_man_rule_enabled: bool = True,
+        max_pending_per_session: Optional[int] = None,
+        max_pending_per_requester: Optional[int] = None,
+        max_pending_global: Optional[int] = None,
+        max_payload_bytes: Optional[int] = None,
+        max_terminal_retention: Optional[int] = None,
     ) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
         self.default_backend = default_backend
@@ -96,12 +103,31 @@ class BrainFrogRuntime:
         if approval_service is not None:
             self.approval_service = approval_service
         elif approval_store is not None:
-            self.approval_service = ApprovalService(store=approval_store, two_man_rule_enabled=two_man_rule_enabled)
+            svc_kwargs: Dict[str, Any] = {"store": approval_store, "two_man_rule_enabled": two_man_rule_enabled}
+            if max_pending_per_session is not None:
+                svc_kwargs["max_pending_per_session"] = max_pending_per_session
+            if max_pending_per_requester is not None:
+                svc_kwargs["max_pending_per_requester"] = max_pending_per_requester
+            if max_pending_global is not None:
+                svc_kwargs["max_pending_global"] = max_pending_global
+            if max_payload_bytes is not None:
+                svc_kwargs["max_payload_bytes"] = max_payload_bytes
+            self.approval_service = ApprovalService(**svc_kwargs)
         else:
-            self.approval_service = ApprovalService(
-                store=FileApprovalStore(repo_dir=self.repo_dir),
-                two_man_rule_enabled=two_man_rule_enabled,
-            )
+            store_kwargs: Dict[str, Any] = {"repo_dir": self.repo_dir}
+            if max_terminal_retention is not None:
+                store_kwargs["max_terminal_retention"] = max_terminal_retention
+            store = FileApprovalStore(**store_kwargs)
+            svc_kwargs = {"store": store, "two_man_rule_enabled": two_man_rule_enabled}
+            if max_pending_per_session is not None:
+                svc_kwargs["max_pending_per_session"] = max_pending_per_session
+            if max_pending_per_requester is not None:
+                svc_kwargs["max_pending_per_requester"] = max_pending_per_requester
+            if max_pending_global is not None:
+                svc_kwargs["max_pending_global"] = max_pending_global
+            if max_payload_bytes is not None:
+                svc_kwargs["max_payload_bytes"] = max_payload_bytes
+            self.approval_service = ApprovalService(**svc_kwargs)
         self.require_approval = require_approval
 
     def _resolve_test_cmd(self, custom_cmd: Optional[str]) -> List[str]:
@@ -253,13 +279,17 @@ class BrainFrogRuntime:
                     return OutgoingMessage(text=f"❌ {resp_msg}", events=events, success=False, status="rejected", error=resp_msg)
 
             if cmd == "/approvals":
+                pending = self.approval_service.store.list_requests(
+                    session_id=session.session_id,
+                    active_only=True,
+                    limit=20,
+                )
                 pending = [
-                    r for r in self.approval_service.store.list_requests()
-                    if r.session_id == session.session_id
-                    and (r.session_incarnation_id is None or r.session_incarnation_id == session.session_incarnation_id)
+                    r for r in pending
+                    if (r.session_incarnation_id is None or r.session_incarnation_id == session.session_incarnation_id)
                     and r.status == ApprovalStatus.PENDING
                     and not r.is_expired()
-                ]
+                ][:20]
                 if not pending:
                     return OutgoingMessage(text="ℹ️ No pending approvals for this session.", events=events, success=True, status="completed")
                 lines = ["📋 **Pending Approvals:**\n"]
@@ -392,16 +422,35 @@ class BrainFrogRuntime:
                     if action in (PermissionAction.SHELL_EXECUTION, PermissionAction.GIT_DESTRUCTIVE, PermissionAction.DEPLOYMENT)
                     else (RiskClass.HIGH.value if action == PermissionAction.CREDENTIAL_ACCESS else RiskClass.MEDIUM.value)
                 )
-                app_req = self.approval_service.create_request(
-                    session_id=session.session_id,
-                    channel=effective_channel,
-                    user_id=message.user_id,
-                    conversation_id=message.conversation_id,
-                    operation_type=action.value if hasattr(action, "value") else str(action),
-                    canonical_operation=canonical_op,
-                    risk_class=risk,
-                    session_incarnation_id=session.session_incarnation_id,
-                )
+                try:
+                    app_req = self.approval_service.create_request(
+                        session_id=session.session_id,
+                        channel=effective_channel,
+                        user_id=message.user_id,
+                        conversation_id=message.conversation_id,
+                        operation_type=action.value if hasattr(action, "value") else str(action),
+                        canonical_operation=canonical_op,
+                        risk_class=risk,
+                        session_incarnation_id=session.session_incarnation_id,
+                    )
+                except ApprovalQuotaExceededError as qe:
+                    emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": str(qe)})
+                    return OutgoingMessage(
+                        text=f"⚠️ Approval quota exceeded: {qe}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=str(qe),
+                    )
+                except ApprovalPayloadTooLargeError as pe:
+                    emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": str(pe)})
+                    return OutgoingMessage(
+                        text=f"❌ Approval payload too large: {pe}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=str(pe),
+                    )
                 emit("agent.approval.requested", {
                     "request_id": app_req.request_id,
                     "operation": canonical_op.to_canonical_dict(),
