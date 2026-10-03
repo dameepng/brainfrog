@@ -80,6 +80,10 @@ class BrainFrogRuntime:
         max_pending_global: Optional[int] = None,
         max_payload_bytes: Optional[int] = None,
         max_terminal_retention: Optional[int] = None,
+        max_history_entries: Optional[int] = None,
+        max_history_bytes: Optional[int] = None,
+        max_message_bytes: Optional[int] = None,
+        session_ttl_seconds: Optional[float] = None,
     ) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
         self.default_backend = default_backend
@@ -87,12 +91,22 @@ class BrainFrogRuntime:
         self.default_model = default_model
         self.default_test_cmd = default_test_cmd
 
+        session_mgr_kwargs: Dict[str, Any] = {}
+        if max_history_entries is not None:
+            session_mgr_kwargs["max_history_entries"] = max_history_entries
+        if max_history_bytes is not None:
+            session_mgr_kwargs["max_history_bytes"] = max_history_bytes
+        if max_message_bytes is not None:
+            session_mgr_kwargs["max_message_bytes"] = max_message_bytes
+        if session_ttl_seconds is not None:
+            session_mgr_kwargs["session_ttl_seconds"] = session_ttl_seconds
+
         if sessions is not None:
             self.sessions = sessions
         elif session_store is not None:
-            self.sessions = SessionManager(store=session_store)
+            self.sessions = SessionManager(store=session_store, **session_mgr_kwargs)
         elif persist_sessions:
-            self.sessions = SessionManager(store=FileSessionStore(repo_dir=self.repo_dir))
+            self.sessions = SessionManager(store=FileSessionStore(repo_dir=self.repo_dir), **session_mgr_kwargs)
         else:
             self.sessions = session_manager
 
