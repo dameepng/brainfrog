@@ -692,6 +692,7 @@ class FileSessionStore(SessionStore):
         with self._lock:
             lock = self._get_session_lock(session.session_id)
             with lock:
+                temp_file: Optional[Path] = None
                 try:
                     if not self.sessions_dir.exists():
                         self._ensure_dirs()
@@ -759,7 +760,7 @@ class FileSessionStore(SessionStore):
                             "user": scrub_secrets(str(entry.get("user", ""))),
                             "assistant": scrub_secrets(str(entry.get("assistant", ""))),
                             "metadata": {
-                                k: scrub_secrets(str(v)) if isinstance(v, str) else v
+                                k: scrub_secrets(v) if isinstance(v, str) else v
                                 for k, v in entry.get("metadata", {}).items()
                             },
                         })
@@ -801,7 +802,7 @@ class FileSessionStore(SessionStore):
                 except Exception as e:
                     logger.warning(f"Failed to persist session '{session.session_id}': {e}")
                     try:
-                        if "temp_file" in locals() and temp_file.exists():
+                        if temp_file is not None and temp_file.exists():
                             temp_file.unlink()
                     except Exception:
                         pass
