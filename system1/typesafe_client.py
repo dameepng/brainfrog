@@ -81,6 +81,7 @@ class TypeSafeSystemOne(SystemOneClient):
             "model": self.model,
             "questions": {k: _question_to_json(q) for k, q in questions.items()},
         }
+        resp: Optional[requests.Response] = None
         try:
             resp = requests.post(
                 self.api_url,
@@ -93,13 +94,23 @@ class TypeSafeSystemOne(SystemOneClient):
             )
             resp.raise_for_status()
         except requests.exceptions.HTTPError as exc:
-            try:
-                err_detail = resp.json()
-            except Exception:
-                err_detail = resp.text
+            err_resp = exc.response if getattr(exc, "response", None) is not None else resp
+            err_detail: Any = ""
+            status_code: Any = "unknown"
+            if err_resp is not None:
+                status_code = err_resp.status_code
+                try:
+                    err_detail = err_resp.json()
+                except Exception:
+                    err_detail = err_resp.text
+            else:
+                err_detail = str(exc)
             raise RuntimeError(
-                f"TypeSafe/Jev API error ({resp.status_code}): {err_detail}"
+                f"TypeSafe/Jev API error ({status_code}): {err_detail}"
             ) from exc
+
+        if resp is None:
+            raise RuntimeError("TypeSafe/Jev API returned no response")
         data = resp.json()
 
         answers: Dict[str, Answer] = {}
