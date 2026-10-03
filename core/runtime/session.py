@@ -41,6 +41,13 @@ logger = logging.getLogger(__name__)
 
 CURRENT_SESSION_SCHEMA_VERSION = 1
 
+
+class StaleSessionStateError(RuntimeError):
+    """Raised when an attempt to persist session state conflicts with concurrent state changes or reset."""
+
+    pass
+
+
 # Production History Policy Defaults (L-01 Hard Bounds)
 DEFAULT_MAX_HISTORY_ENTRIES = 50
 DEFAULT_MAX_HISTORY_BYTES = 256 * 1024  # 256 KB
@@ -251,6 +258,7 @@ class SessionState:
     user_id: str
     conversation_id: str
     session_incarnation_id: str = field(default_factory=lambda: secrets.token_hex(16))
+    revision: int = 1
     created_at: float = field(default_factory=time.time)
     last_active_at: float = field(default_factory=time.time)
     active_mode: str = "build"
@@ -263,6 +271,8 @@ class SessionState:
     max_history_entries: int = field(default_factory=get_max_history_entries)
     max_history_bytes: int = field(default_factory=get_max_history_bytes)
     max_message_bytes: int = field(default_factory=get_max_message_bytes)
+    _persisted_revision: Optional[int] = field(default=None, repr=False, compare=False)
+    _persisted_incarnation: Optional[str] = field(default=None, repr=False, compare=False)
 
     def _enforce_history_bounds(self) -> None:
         """Enforce hard upper bounds on history length and total serialized bytes (FIFO eviction)."""
@@ -346,6 +356,9 @@ class SessionState:
         self.metadata.clear()
         self.last_active_at = time.time()
         self.session_incarnation_id = secrets.token_hex(16)
+        self.revision = 1
+        self._persisted_revision = None
+        self._persisted_incarnation = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert session state to JSON-serializable dictionary with schema version and policy bounds."""
@@ -354,6 +367,7 @@ class SessionState:
             "schema_version": CURRENT_SESSION_SCHEMA_VERSION,
             "session_id": self.session_id,
             "session_incarnation_id": self.session_incarnation_id,
+            "revision": self.revision,
             "channel": self.channel,
             "user_id": self.user_id,
             "conversation_id": self.conversation_id,
@@ -389,6 +403,11 @@ class SessionState:
         if not incarnation or not str(incarnation).strip():
             incarnation = secrets.token_hex(16)
 
+        try:
+            revision = int(data.get("revision", 1))
+        except (ValueError, TypeError):
+            revision = 1
+
         max_entries = int(data.get("max_history_entries") or get_max_history_entries())
         max_bytes = int(data.get("max_history_bytes") or get_max_history_bytes())
         max_msg_bytes = int(data.get("max_message_bytes") or get_max_message_bytes())
@@ -412,6 +431,7 @@ class SessionState:
         session = cls(
             session_id=str(data["session_id"]),
             session_incarnation_id=str(incarnation),
+            revision=revision,
             channel=str(data.get("channel", "cli")),
             user_id=str(data.get("user_id", "local")),
             conversation_id=str(data.get("conversation_id", "default")),
@@ -427,6 +447,8 @@ class SessionState:
             max_history_entries=max_entries,
             max_history_bytes=max_bytes,
             max_message_bytes=max_msg_bytes,
+            _persisted_revision=revision,
+            _persisted_incarnation=str(incarnation),
         )
         session._enforce_history_bounds()
         return session
@@ -441,7 +463,7 @@ class SessionStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def save(self, session: SessionState) -> bool:
+    def save(self, session: SessionState, force: bool = False) -> bool:
         """Atomically persist a session state."""
         raise NotImplementedError
 
@@ -449,6 +471,10 @@ class SessionStore(ABC):
     def delete(self, session_id: str) -> bool:
         """Delete persisted session state."""
         raise NotImplementedError
+
+    def reset(self, session_id: str, new_incarnation: Optional[str] = None) -> bool:
+        """Reset session storage, establishing an authoritative post-reset boundary."""
+        return self.delete(session_id)
 
     @abstractmethod
     def list_sessions(self) -> List[str]:
@@ -466,20 +492,66 @@ class InMemorySessionStore(SessionStore):
 
     def __init__(self) -> None:
         self._storage: Dict[str, SessionState] = {}
+        self._reset_incarnations: Dict[str, str] = {}
         self._lock = threading.RLock()
 
     def load(self, session_id: str) -> Optional[SessionState]:
         with self._lock:
-            return self._storage.get(session_id)
+            cached = self._storage.get(session_id)
+            if cached is None:
+                return None
+            return SessionState.from_dict(cached.to_dict())
 
-    def save(self, session: SessionState) -> bool:
+    def save(self, session: SessionState, force: bool = False) -> bool:
         with self._lock:
             session._enforce_history_bounds()
+            if not force:
+                # 1. Reset boundary verification (F02 Guard)
+                if session.session_id in self._reset_incarnations:
+                    active_inc = self._reset_incarnations[session.session_id]
+                    if active_inc != session.session_incarnation_id:
+                        raise StaleSessionStateError(
+                            f"Stale session incarnation: session '{session.session_id}' was reset. "
+                            f"Authoritative incarnation is '{active_inc}', attempted save with '{session.session_incarnation_id}'."
+                        )
+
+                # 2. Existing session guard (F01 & F02 Guard)
+                if session.session_id in self._storage:
+                    current = self._storage[session.session_id]
+                    if current.session_incarnation_id != session.session_incarnation_id:
+                        raise StaleSessionStateError(
+                            f"Stale session incarnation: current incarnation '{current.session_incarnation_id}' != '{session.session_incarnation_id}'"
+                        )
+                    expected_rev = session._persisted_revision if session._persisted_revision is not None else session.revision
+                    if current.revision != expected_rev:
+                        raise StaleSessionStateError(
+                            f"Stale session revision: current revision {current.revision} != expected {expected_rev}"
+                        )
+                    session.revision = current.revision + 1
+                else:
+                    if session._persisted_incarnation is not None:
+                        raise StaleSessionStateError(
+                            f"Session '{session.session_id}' was deleted or reset while request was in flight."
+                        )
+                    if session.revision <= 0:
+                        session.revision = 1
+
             self._storage[session.session_id] = session
+            session._persisted_revision = session.revision
+            session._persisted_incarnation = session.session_incarnation_id
+            self._reset_incarnations.pop(session.session_id, None)
+            return True
+
+    def reset(self, session_id: str, new_incarnation: Optional[str] = None) -> bool:
+        with self._lock:
+            self._storage.pop(session_id, None)
+            inc = new_incarnation or secrets.token_hex(16)
+            self._reset_incarnations[session_id] = inc
             return True
 
     def delete(self, session_id: str) -> bool:
         with self._lock:
+            self._reset_incarnations.pop(session_id, None)
             return bool(self._storage.pop(session_id, None))
 
     def list_sessions(self) -> List[str]:
@@ -563,6 +635,14 @@ class FileSessionStore(SessionStore):
             raise PermissionError(f"Path traversal detected in session lock: {session_id}")
         return target
 
+    def _get_reset_meta_path(self, session_id: str) -> Path:
+        """Derive safe path for session reset metadata/tombstone."""
+        safe_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
+        target = (self.locks_dir / f"{safe_hash}.reset").resolve()
+        if not str(target).startswith(str(self.sessions_dir)):
+            raise PermissionError(f"Path traversal detected in session reset meta: {session_id}")
+        return target
+
     def _get_session_lock(self, session_id: str, timeout: float = 10.0) -> _CrossProcessLock:
         return _get_cross_process_session_lock(self._get_lock_path(session_id), timeout=timeout)
 
@@ -580,8 +660,35 @@ class FileSessionStore(SessionStore):
         except Exception as e:
             logger.warning(f"Failed to quarantine corrupted file '{file_path}': {e}")
 
-    def save(self, session: SessionState) -> bool:
-        """Atomically persist session state with credential scrubbing, fsync, and process lock."""
+    def reset(self, session_id: str, new_incarnation: Optional[str] = None) -> bool:
+        """Reset persisted session, establishing an authoritative post-reset boundary."""
+        with self._lock:
+            lock = self._get_session_lock(session_id)
+            with lock:
+                try:
+                    target_file = self._get_session_path(session_id)
+                    if target_file.exists():
+                        target_file.unlink()
+
+                    inc = new_incarnation or secrets.token_hex(16)
+                    meta_path = self._get_reset_meta_path(session_id)
+                    meta_payload = {
+                        "session_id": session_id,
+                        "current_incarnation": inc,
+                        "reset_at": time.time(),
+                        "revision": 1,
+                    }
+                    safe_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
+                    meta_temp = self.locks_dir / f".tmp_reset_{safe_hash}_{uuid.uuid4().hex[:8]}.json"
+                    meta_temp.write_text(json.dumps(meta_payload), encoding="utf-8")
+                    os.replace(meta_temp, meta_path)
+                    return True
+                except Exception as e:
+                    logger.warning(f"Failed to reset session storage for '{session_id}': {e}")
+                    return False
+
+    def save(self, session: SessionState, force: bool = False) -> bool:
+        """Atomically persist session state with OCC freshness verification, credential scrubbing, fsync, and process lock."""
         with self._lock:
             lock = self._get_session_lock(session.session_id)
             with lock:
@@ -590,7 +697,59 @@ class FileSessionStore(SessionStore):
                         self._ensure_dirs()
                     session._enforce_history_bounds()
                     target_file = self._get_session_path(session.session_id)
+                    meta_path = self._get_reset_meta_path(session.session_id)
+
+                    if not force:
+                        # 1. Reset boundary verification (F02 Guard)
+                        if meta_path.exists():
+                            try:
+                                meta_content = json.loads(meta_path.read_text(encoding="utf-8"))
+                                active_inc = meta_content.get("current_incarnation")
+                                if active_inc and active_inc != session.session_incarnation_id:
+                                    raise StaleSessionStateError(
+                                        f"Stale session incarnation: session '{session.session_id}' was reset. "
+                                        f"Authoritative incarnation is '{active_inc}', attempted save with '{session.session_incarnation_id}'."
+                                    )
+                            except json.JSONDecodeError:
+                                pass
+
+                        # 2. Disk freshness and optimistic concurrency verification (F01 & F02 Guard)
+                        if target_file.exists() and target_file.is_file():
+                            try:
+                                disk_content = target_file.read_text(encoding="utf-8")
+                                if disk_content.strip():
+                                    disk_data = json.loads(disk_content)
+                                    if isinstance(disk_data, dict):
+                                        disk_inc = str(disk_data.get("session_incarnation_id", ""))
+                                        if disk_inc and disk_inc != session.session_incarnation_id:
+                                            raise StaleSessionStateError(
+                                                f"Stale session incarnation: current disk incarnation '{disk_inc}' != '{session.session_incarnation_id}'"
+                                            )
+                                        disk_rev = int(disk_data.get("revision", 1))
+                                        expected_rev = session._persisted_revision if session._persisted_revision is not None else session.revision
+                                        if disk_rev != expected_rev:
+                                            raise StaleSessionStateError(
+                                                f"Stale session revision: current disk revision {disk_rev} != expected {expected_rev}"
+                                            )
+                                        # Monotonically advance revision
+                                        session.revision = disk_rev + 1
+                            except (json.JSONDecodeError, ValueError) as e:
+                                if isinstance(e, StaleSessionStateError):
+                                    raise
+                                self._quarantine(target_file, "corrupt_on_save")
+                                session.revision = (session.revision or 1) + 1
+                        else:
+                            # Target file does not exist on disk
+                            if session._persisted_incarnation is not None:
+                                # Session was previously persisted, but is now missing (reset or deleted)
+                                raise StaleSessionStateError(
+                                    f"Session '{session.session_id}' was reset or deleted while request was in flight."
+                                )
+                            if session.revision <= 0:
+                                session.revision = 1
+
                     data = session.to_dict()
+                    data["revision"] = session.revision
 
                     # Security invariant: Scrub credentials from persisted history and metadata
                     clean_history = []
@@ -624,7 +783,21 @@ class FileSessionStore(SessionStore):
                             pass
 
                     os.replace(temp_file, target_file)
+
+                    # Update internal tracking
+                    session._persisted_revision = session.revision
+                    session._persisted_incarnation = session.session_incarnation_id
+
+                    # Clean up reset tombstone once new state is committed to disk
+                    if meta_path.exists():
+                        try:
+                            meta_path.unlink()
+                        except Exception:
+                            pass
+
                     return True
+                except StaleSessionStateError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Failed to persist session '{session.session_id}': {e}")
                     try:
@@ -655,10 +828,14 @@ class FileSessionStore(SessionStore):
                         return None
 
                     session = SessionState.from_dict(data)
+                    session._persisted_revision = session.revision
+                    session._persisted_incarnation = session.session_incarnation_id
+
                     # Auto-compact legacy oversized files immediately upon load
                     if len(data.get("history", [])) > session.max_history_entries:
                         try:
                             data_compact = session.to_dict()
+                            data_compact["revision"] = session.revision
                             json_content = json.dumps(data_compact, indent=2, ensure_ascii=False)
                             temp_file = self.sessions_dir / f".tmp_{target_file.stem}_{uuid.uuid4().hex[:8]}.json"
                             with open(temp_file, "w", encoding="utf-8") as f:
@@ -686,16 +863,20 @@ class FileSessionStore(SessionStore):
                     return None
 
     def delete(self, session_id: str) -> bool:
-        """Remove persisted session file from disk."""
+        """Remove persisted session file and any reset markers from disk."""
         with self._lock:
             lock = self._get_session_lock(session_id)
             with lock:
                 try:
                     target_file = self._get_session_path(session_id)
+                    deleted = False
                     if target_file.exists():
                         target_file.unlink()
-                        return True
-                    return False
+                        deleted = True
+                    meta_path = self._get_reset_meta_path(session_id)
+                    if meta_path.exists():
+                        meta_path.unlink()
+                    return deleted
                 except Exception as e:
                     logger.warning(f"Failed to delete session file for '{session_id}': {e}")
                     return False
@@ -835,6 +1016,20 @@ class SessionManager:
                 max_history_bytes=self.max_history_bytes,
                 max_message_bytes=self.max_message_bytes,
             )
+            # Adopt active reset incarnation if present in store
+            if isinstance(self.store, FileSessionStore):
+                meta_path = self.store._get_reset_meta_path(session_id)
+                if meta_path.exists():
+                    try:
+                        meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+                        if meta_data.get("current_incarnation"):
+                            session.session_incarnation_id = meta_data["current_incarnation"]
+                    except Exception:
+                        pass
+            elif isinstance(self.store, InMemorySessionStore):
+                if session_id in self.store._reset_incarnations:
+                    session.session_incarnation_id = self.store._reset_incarnations[session_id]
+
             self._sessions[session_id] = session
             if self.store is not None:
                 self.store.save(session)
@@ -851,10 +1046,15 @@ class SessionManager:
                     return loaded
             return None
 
-    def save(self, session: SessionState) -> bool:
+    def save(self, session: SessionState, force: bool = False) -> bool:
         with self._lock:
             self._sessions[session.session_id] = session
             if self.store is not None:
+                if force:
+                    try:
+                        return self.store.save(session, force=True)
+                    except TypeError:
+                        return self.store.save(session)
                 return self.store.save(session)
             return True
 
@@ -863,8 +1063,11 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session:
                 session.reset()
+                new_inc = session.session_incarnation_id
+            else:
+                new_inc = secrets.token_hex(16)
             if self.store is not None:
-                self.store.delete(session_id)
+                self.store.reset(session_id, new_incarnation=new_inc)
             return True
 
     def delete(self, session_id: str) -> bool:

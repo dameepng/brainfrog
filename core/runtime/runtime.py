@@ -31,6 +31,7 @@ from .session import (
     SessionManager,
     SessionState,
     SessionStore,
+    StaleSessionStateError,
     scrub_secrets,
     session_manager,
 )
@@ -191,6 +192,8 @@ class BrainFrogRuntime:
             conversation_id=message.conversation_id,
             default_mode=message.metadata.get("mode", "build"),
         )
+        initial_incarnation = session.session_incarnation_id
+        initial_revision = session.revision
 
         # 2. Deterministic Permission Gate
         policy = self.policy_provider(effective_channel)
@@ -642,9 +645,50 @@ class BrainFrogRuntime:
 
         final_text = scrub_secrets("\n\n".join(reply_texts).strip() or "Task completed.")
 
-        # Record in isolated session history and persist
+        # Check if session was reset while request was in-flight (F02 Guard)
+        if session.session_incarnation_id != initial_incarnation:
+            emit("agent.session.stale", {
+                "session_id": session.session_id,
+                "initial_incarnation": initial_incarnation,
+                "current_incarnation": session.session_incarnation_id,
+                "reason": "in_flight_reset",
+            })
+            stale_msg = "⚠️ Session state changed while this request was executing; result was not persisted."
+            return OutgoingMessage(
+                text=stale_msg,
+                events=events,
+                success=False,
+                status="rejected",
+                error=stale_msg,
+                metadata={
+                    "session_id": session.session_id,
+                    "mode": effective_mode,
+                    "stale_session": True,
+                },
+            )
+
+        # Record in isolated session history and persist under optimistic concurrency control
         session.record_interaction(user_text=raw_text, assistant_text=final_text)
-        self.sessions.save(session)
+        try:
+            self.sessions.save(session)
+        except StaleSessionStateError as se:
+            emit("agent.session.stale", {
+                "session_id": session.session_id,
+                "error": str(se),
+            })
+            stale_msg = "⚠️ Session state changed while this request was executing; result was not persisted."
+            return OutgoingMessage(
+                text=stale_msg,
+                events=events,
+                success=False,
+                status="rejected",
+                error=stale_msg,
+                metadata={
+                    "session_id": session.session_id,
+                    "mode": effective_mode,
+                    "stale_session": True,
+                },
+            )
 
         return OutgoingMessage(
             text=final_text,
