@@ -912,9 +912,12 @@ class Orchestrator:
         domain_label = scope.domain.key if scope.domain else "unscoped"
         self._log(f"[system1/jev:{self.s1.name}] scope gate: domain='{domain_label}' change_type='{scope.change_type}'")
 
-        _is_exec_trigger = any(
-            kw in self.cfg.task.lower()
-            for kw in ("execute", "jalankan", "eksekusi", "implement", "build", "bangun", "kerjakan", "gass", "gas")
+        _is_exec_trigger = (
+            self.cfg.execution_contract is not None
+            or any(
+                kw in self.cfg.task.lower()
+                for kw in ("execute", "jalankan", "eksekusi", "implement", "build", "bangun", "kerjakan", "gass", "gas")
+            )
         )
         if scope.change_type == "question_only" and not _is_exec_trigger:
             tree = scope.focus_tree or _repo_tree(self.cfg.repo_dir)
@@ -1076,7 +1079,7 @@ class Orchestrator:
 
         # BUILD mode: planning with plan_context handoff
         latest_plan = None
-        if self.cfg.mode == "build":
+        if self.cfg.mode == "build" and self.cfg.execution_contract is None:
             from core.plans import get_latest_plan, format_plan_handoff
             latest_plan = get_latest_plan(self.cfg.repo_dir)
             if not self.cfg.plan_context and latest_plan:
@@ -1095,7 +1098,7 @@ class Orchestrator:
         )
 
         steps: List[PlanStep] = []
-        if is_direct_plan_exec and latest_plan and latest_plan.steps:
+        if is_direct_plan_exec and latest_plan and latest_plan.steps and self.cfg.execution_contract is None:
             self._log(f"[brainfrog] 📋 Executing directly from plan: [bold #4EC9B0]{latest_plan.title}[/bold #4EC9B0]")
             for i, s in enumerate(latest_plan.steps):
                 if isinstance(s, dict):
@@ -1112,7 +1115,7 @@ class Orchestrator:
             # If task is short/ambiguous and plan_context is available, enrich the task
             # with the plan goal so the AI has enough context to generate concrete steps.
             effective_task = self.cfg.task
-            if self.cfg.plan_context:
+            if self.cfg.plan_context and self.cfg.execution_contract is None:
                 _execute_keywords = {
                     "execute", "eksekusi", "jalankan", "lakukan", "implement", "implementasikan",
                     "build", "bangun", "kerjakan", "do it", "gass", "gas", "mulai", "start",
@@ -1162,7 +1165,7 @@ class Orchestrator:
 
     def _scope_gate(self) -> ScopeDecision:
         if not self.cfg.domains:
-            change_type = "question_only" if is_question_task(self.cfg.task) else "unclear"
+            change_type = "question_only" if (self.cfg.execution_contract is None and is_question_task(self.cfg.task)) else "unclear"
             return ScopeDecision(domain=None, change_type=change_type, focus_tree=_repo_tree(self.cfg.repo_dir))
 
         criteria = {key: d.description for key, d in self.cfg.domains.items()}
@@ -1198,7 +1201,7 @@ class Orchestrator:
 
         domain_answer = answers["likely_domain"]
         change_type = answers["change_type"].choice or "unclear"
-        if is_question_task(self.cfg.task, change_type):
+        if self.cfg.execution_contract is None and is_question_task(self.cfg.task, change_type):
             change_type = "question_only"
 
         # Tiered confidence logging for debugging and threshold tuning
@@ -1261,7 +1264,11 @@ class Orchestrator:
         file_contents = _read_files(self.cfg.repo_dir, step.files)
 
         effective_task = self.cfg.task
-        if self.cfg.plan_context and (len(self.cfg.task.split()) <= 10 or any(kw in self.cfg.task.lower() for kw in ("plan", "execute", "jalankan", "eksekusi", "build", "gass"))):
+        if (
+            self.cfg.execution_contract is None
+            and self.cfg.plan_context
+            and (len(self.cfg.task.split()) <= 10 or any(kw in self.cfg.task.lower() for kw in ("plan", "execute", "jalankan", "eksekusi", "build", "gass")))
+        ):
             effective_task = f"{self.cfg.task}\n\n[Active Plan Context]\n{self.cfg.plan_context}"
 
         self._log(f"[system2/{self.s2_tag}] writing code ...")

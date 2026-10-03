@@ -268,18 +268,37 @@ class BrainFrogRuntime:
                 return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
 
             if cmd in ("/exec", "/run"):
-                if len(parts) < 2 or not parts[1].strip():
+                tokens = raw_text.strip().split()
+                if len(tokens) < 2 or not tokens[1].strip():
                     return OutgoingMessage(text="⚠️ Usage: `/exec <request_id>`", events=events, success=False, status="rejected")
-                exec_req_id = parts[1].strip()
+                if len(tokens) > 2:
+                    reason = "Additional arguments in /exec command are not permitted."
+                    emit("agent.rejected", {"command": cmd, "reason": reason})
+                    return OutgoingMessage(
+                        text=f"⚠️ Usage: `/exec <request_id>` ({reason})",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=reason,
+                    )
+                exec_req_id = tokens[1].strip()
                 target_req = self.approval_service.store.get(exec_req_id)
                 if not target_req:
                     return OutgoingMessage(text=f"❌ Request '{exec_req_id}' not found.", events=events, success=False, status="rejected")
                 raw_text = f"{target_req.canonical_operation.action_type} {target_req.canonical_operation.target}"
-                message.metadata["approval_id"] = exec_req_id
-                message.metadata["action_type"] = target_req.canonical_operation.action_type
-                message.metadata["target"] = target_req.canonical_operation.target
+
+                # Sanitize metadata: discard untrusted incoming payload, use only approved canonical parameters
+                trusted_meta = {}
+                if "repo_dir" in message.metadata:
+                    trusted_meta["repo_dir"] = message.metadata["repo_dir"]
+                trusted_meta["approval_id"] = exec_req_id
+                trusted_meta["expected_digest"] = target_req.operation_digest
+                trusted_meta["action_type"] = target_req.canonical_operation.action_type
+                trusted_meta["target"] = target_req.canonical_operation.target
                 for k, v in target_req.canonical_operation.parameters.items():
-                    message.metadata[k] = v
+                    trusted_meta[k] = v
+                message.metadata.clear()
+                message.metadata.update(trusted_meta)
 
             if cmd in ("/undo", "/diff", "/preview", "/screenshot", "/paste", "/attach", "/images", "/clear-images"):
                 reason = f"Command '{cmd}' is only available in the local CLI interface."
@@ -303,8 +322,10 @@ class BrainFrogRuntime:
         execution_contract: Optional[ApprovedExecutionContract] = None
 
         if approval_id:
-            canonical_op = extract_canonical_operation(raw_text, action, message.metadata)
-            digest = canonical_op.compute_digest()
+            digest = message.metadata.get("expected_digest")
+            if not digest:
+                canonical_op = extract_canonical_operation(raw_text, action, message.metadata)
+                digest = canonical_op.compute_digest()
             is_valid, app_req, consume_reason = self.approval_service.verify_and_consume(
                 request_id=approval_id,
                 expected_digest=digest,
@@ -400,14 +421,18 @@ class BrainFrogRuntime:
         test_cmd_list = self._resolve_test_cmd(message.metadata.get("test_cmd"))
 
         # Plan context resolution
-        plan_context = message.metadata.get("plan_context") or session.plan_context
-        if effective_mode == "build" and not plan_context:
-            try:
-                lp = get_latest_plan(workspace_dir)
-                if lp:
-                    plan_context = format_plan_handoff(lp, workspace_dir)
-            except Exception:
-                pass
+        if approved_execution:
+            # Under approved execution, plan_context is only trusted if explicitly authorized in the approval request
+            plan_context = message.metadata.get("plan_context")
+        else:
+            plan_context = message.metadata.get("plan_context") or session.plan_context
+            if effective_mode == "build" and not plan_context:
+                try:
+                    lp = get_latest_plan(workspace_dir)
+                    if lp:
+                        plan_context = format_plan_handoff(lp, workspace_dir)
+                except Exception:
+                    pass
 
         # 4. Instantiate System 1 & System 2 Clients
         try:
@@ -429,7 +454,7 @@ class BrainFrogRuntime:
         domains = load_module_map(workspace_dir, task=raw_text, auto_create=can_auto_create)
 
         effective_task = raw_text
-        if session.history:
+        if not approved_execution and session.history:
             history_lines = []
             for turn in session.history[-3:]:
                 u_text = turn.get("user", "").strip()

@@ -49,6 +49,7 @@ class ApprovedExecutionContract:
     operation_digest: str
     channel: str
     allow_remote_git_push: bool = False
+    canonical_operation: Optional[Any] = None
 
     @property
     def is_remote(self) -> bool:
@@ -102,6 +103,7 @@ class ApprovedExecutionContract:
             operation_digest=str(app_req.operation_digest),
             channel=str(app_req.channel).strip().lower(),
             allow_remote_git_push=False,
+            canonical_operation=canon_op,
         )
 
     def is_target_allowed(self, rel_path: str) -> bool:
