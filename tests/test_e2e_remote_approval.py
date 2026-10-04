@@ -42,7 +42,7 @@ from core.runtime.permissions import ChannelTrustLevel, PermissionAction, Permis
 from core.runtime.runtime import BrainFrogRuntime, scrub_secrets
 from core.runtime.session import SessionManager
 from orchestrator import PlanStep, StepResult
-from security.git_guard import scan_file_path
+from security.git_guard import scan_file_path  # pyright: ignore[reportMissingImports]
 from system1.base import Answer, SystemOneClient
 
 
@@ -329,6 +329,7 @@ class TestApprovalStorePersistence(unittest.TestCase):
         # Retrieve and verify round-trip fidelity
         loaded = store.get("req_abc123")
         self.assertIsNotNone(loaded)
+        assert loaded is not None
         self.assertEqual(loaded.request_id, req.request_id)
         self.assertEqual(loaded.operation_digest, req.operation_digest)
         self.assertEqual(loaded.nonce, req.nonce)
@@ -391,6 +392,7 @@ class TestApprovalStorePersistence(unittest.TestCase):
 
         recovered = store_2.get(req.request_id)
         self.assertIsNotNone(recovered)
+        assert recovered is not None
         self.assertEqual(recovered.status, ApprovalStatus.APPROVED)
 
         # Consume via store 2
@@ -407,6 +409,7 @@ class TestApprovalStorePersistence(unittest.TestCase):
         store_3 = FileApprovalStore(approvals_dir=self.approvals_dir)
         reloaded_consumed = store_3.get(req.request_id)
         self.assertIsNotNone(reloaded_consumed)
+        assert reloaded_consumed is not None
         self.assertEqual(reloaded_consumed.status, ApprovalStatus.CONSUMED)
 
         # Attempt replay on reloaded consumed request must fail
@@ -986,6 +989,7 @@ class TestEndToEndRuntimeIntegration(unittest.TestCase):
         # Check approval state: MUST remain CONSUMED
         consumed_req = self.service.store.get(req_id)
         self.assertIsNotNone(consumed_req)
+        assert consumed_req is not None
         self.assertEqual(consumed_req.status, ApprovalStatus.CONSUMED)
 
         # Attempt to run again -> Must be rejected because it was already consumed
