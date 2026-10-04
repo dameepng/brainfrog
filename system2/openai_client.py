@@ -137,7 +137,15 @@ class OpenAISystem2Client:
 
         endpoint = f"{self.base_url}/chat/completions"
         try:
-            resp = requests.post(endpoint, headers=headers, json=payload, timeout=120)
+            resp = requests.post(
+                endpoint, headers=headers, json=payload, timeout=120, allow_redirects=False,
+            )
+            if resp.status_code in (301, 302, 303, 307, 308) or resp.is_redirect is True:
+                location = resp.headers.get("Location", "")
+                raise RuntimeError(
+                    f"OpenAI-compatible provider redirected to '{location}' "
+                    f"({resp.status_code}): transport-level redirects are prohibited for model APIs."
+                )
             resp.raise_for_status()
         except requests.exceptions.HTTPError as exc:
             try:

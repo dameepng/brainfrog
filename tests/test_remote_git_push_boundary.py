@@ -143,7 +143,7 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
     # =========================================================================
 
     def test_approved_telegram_file_modification_does_not_invoke_remote_push(self):
-        """Telegram approved file modification commits locally but DOES NOT push to origin."""
+        """Telegram file approval authorizes neither a local commit nor a remote push."""
         mock_s1, mock_s2 = self._make_mock_systems({"component.py": "def foo(): return 42\n"})
         logs: list[str] = []
 
@@ -174,9 +174,9 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
 
         res = orch._finalize_pr(step, retries=0, test_output="PASS")
 
-        # 1. Local file and commit must exist
+        # 1. Local file exists; Phase 15A does not authorize a commit
         self.assertTrue((self.work_dir / "component.py").exists())
-        self.assertEqual(res.outcome, "drafted_pr")
+        self.assertEqual(res.outcome, "unverified")
 
         # 2. Remote bare repository MUST NOT have received any push
         current_remote_sha = self._get_remote_head_sha()
@@ -190,7 +190,7 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
         self.assertTrue(any("Remote Git push skipped" in l for l in logs))
 
     def test_approved_whatsapp_file_modification_does_not_invoke_remote_push(self):
-        """WhatsApp approved file modification commits locally but DOES NOT push to origin."""
+        """WhatsApp file approval authorizes neither a local commit nor a remote push."""
         mock_s1, mock_s2 = self._make_mock_systems({"wa_service.py": "# whatsapp service\n"})
         logs: list[str] = []
 
@@ -308,7 +308,7 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
         res = orch._finalize_pr(step, retries=0, test_output="PASS")
 
         # Must not be "opened_pr" because remote execution cannot push or open PR
-        self.assertEqual(res.outcome, "drafted_pr")
+        self.assertEqual(res.outcome, "unverified")
         self.assertEqual(
             self._get_remote_head_sha(),
             self.initial_remote_sha,
@@ -488,6 +488,11 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
         self.assertIn("operation substitution prevented", str(err).lower())
 
         # 3. Contract created from the write_file approval strictly disallows remote git push
+        ok, req_obj, _ = approval_service.verify_and_consume(
+            req_id, req_obj.operation_digest, req_obj.session_id, "telegram",
+            session_incarnation_id=req_obj.session_incarnation_id, requester_id="user_123",
+        )
+        self.assertTrue(ok)
         contract = ApprovedExecutionContract.from_approval_request(req_obj, repo_dir=self.work_dir)
         self.assertFalse(contract.allows_remote_git_push())
         self.assertTrue(contract.is_remote)
@@ -563,7 +568,7 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
 
         res = orch._finalize_pr(step, retries=0, test_output="PASS")
 
-        self.assertEqual(res.outcome, "drafted_pr")
+        self.assertEqual(res.outcome, "unverified")
         self.assertEqual(self._get_remote_head_sha(), self.initial_remote_sha)
 
     # =========================================================================
@@ -643,7 +648,8 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
             text=True,
             check=True,
         ).stdout.strip()
-        self.assertIn("lib_tg.py", local_log)
+        self.assertNotIn("lib_tg.py", local_log)
+        self.assertTrue((self.work_dir / "lib_tg.py").exists())
 
         # 6. CRITICAL INVARIANT: Bare remote repository received ZERO new commits!
         remote_sha_after = self._get_remote_head_sha()

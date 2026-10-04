@@ -595,7 +595,7 @@ class TestApprovalSessionInvalidation(unittest.TestCase):
         )
         res_exec = self.runtime.process_message(exec_msg)
         self.assertFalse(res_exec.success)
-        self.assertIn("lacks session incarnation binding", res_exec.text)
+        self.assertIn("integrity mismatch", res_exec.text)
 
     # -------------------------------------------------------------------------
     # Test 15 — Multiple outstanding approvals

@@ -17,6 +17,8 @@ import unittest
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.runtime.capabilities import Capabilities, FilesystemPolicy
+from core.runtime.approval import ApprovalService, CanonicalOperation, InMemoryApprovalStore
 from core.runtime.contract import ApprovedExecutionContract, normalize_target_rel_path
 from core.runtime.messages import IncomingMessage
 from core.runtime.runtime import BrainFrogRuntime
@@ -71,13 +73,29 @@ class TestFilesystemBoundaryAndContract(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def issued_contract(self, **fields):
+        """Exercise the real issuance boundary with explicit Phase 15A grants."""
+        targets = sorted(fields["approved_targets"])
+        service = ApprovalService(InMemoryApprovalStore())
+        request = service.create_request(
+            "session", fields["channel"], "alice", "chat", fields["action_type"],
+            CanonicalOperation(fields["action_type"], targets[0], {"targets": targets}),
+            session_incarnation_id="incarnation", capabilities=fields["capabilities"],
+            workspace_root=str(self.repo_dir),
+        )
+        self.assertTrue(service.approve(request.request_id, "bob", fields["channel"])[0])
+        self.assertTrue(service.verify_and_consume(
+            request.request_id, request.operation_digest, "session", fields["channel"],
+            session_incarnation_id="incarnation", requester_id="alice",
+        )[0])
+        return ApprovedExecutionContract.from_approval_request(request, self.repo_dir)
+
     def test_approved_target_allows_exact_file(self) -> None:
         """1. An approved target allows writing exactly that file."""
-        contract = ApprovedExecutionContract(
-            request_id="req_001",
+        contract = self.issued_contract(
             action_type="write_file",
             approved_targets=frozenset(["safe.txt"]),
-            operation_digest="abc",
+            capabilities=Capabilities(FilesystemPolicy(write=["safe.txt"])),
             channel="telegram",
         )
         _write_files(self.repo_dir, {"safe.txt": "content"}, mode="build", contract=contract)
@@ -87,11 +105,10 @@ class TestFilesystemBoundaryAndContract(unittest.TestCase):
 
     def test_unapproved_extra_file_denied(self) -> None:
         """2. When an unapproved extra file is returned, write is denied."""
-        contract = ApprovedExecutionContract(
-            request_id="req_002",
+        contract = self.issued_contract(
             action_type="write_file",
             approved_targets=frozenset(["safe.txt"]),
-            operation_digest="abc",
+            capabilities=Capabilities(FilesystemPolicy(write=["safe.txt"])),
             channel="telegram",
         )
         with self.assertRaises(PermissionError) as ctx:
@@ -106,11 +123,10 @@ class TestFilesystemBoundaryAndContract(unittest.TestCase):
 
     def test_unapproved_extra_file_causes_no_partial_write(self) -> None:
         """3. An unapproved extra file causes ZERO partial writes."""
-        contract = ApprovedExecutionContract(
-            request_id="req_003",
+        contract = self.issued_contract(
             action_type="write_file",
             approved_targets=frozenset(["safe.txt"]),
-            operation_digest="abc",
+            capabilities=Capabilities(FilesystemPolicy(write=["safe.txt"])),
             channel="telegram",
         )
         safe_file = self.repo_dir / "safe.txt"
@@ -151,11 +167,10 @@ class TestFilesystemBoundaryAndContract(unittest.TestCase):
 
     def test_nested_valid_path_allowed(self) -> None:
         """8. Nested valid paths within repo_dir are allowed."""
-        contract = ApprovedExecutionContract(
-            request_id="req_008",
+        contract = self.issued_contract(
             action_type="write_file",
             approved_targets=frozenset(["src/components/Button.tsx"]),
-            operation_digest="abc",
+            capabilities=Capabilities(FilesystemPolicy(write=["src/components/Button.tsx"])),
             channel="telegram",
         )
         _write_files(self.repo_dir, {"src/components/Button.tsx": "button"}, mode="build", contract=contract)
@@ -183,11 +198,10 @@ class TestFilesystemBoundaryAndContract(unittest.TestCase):
 
     def test_multi_file_approved_scope_subset_allowed(self) -> None:
         """Multi-file approved scope allows valid subsets but denies supersets."""
-        contract = ApprovedExecutionContract(
-            request_id="req_multi",
+        contract = self.issued_contract(
             action_type="write_files",
             approved_targets=frozenset(["a.py", "b.py", "c.py"]),
-            operation_digest="abc",
+            capabilities=Capabilities(FilesystemPolicy(write=["a.py", "b.py", "c.py"])),
             channel="telegram",
         )
         # Subset {a.py, b.py} -> allowed

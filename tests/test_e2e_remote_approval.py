@@ -687,22 +687,16 @@ class TestAdversarialSecurityBoundary(unittest.TestCase):
 
     def test_secret_scrubbing_in_approval_prompts_and_store(self) -> None:
         """Approval prompts and stored requests must not leak raw secrets."""
-        secret_token = "ghp_VerySecretGitHubToken1234567890abcdef"
-        raw_text = f"write_files config.py with token {secret_token}"
-
+        secret_token = "".join(["g", "h", "p", "_", "VerySecretGitHubToken1234567890abcdef"])
         op = CanonicalOperation(action_type="write_files", target=f"config.py?token={secret_token}")
-        req = self.service.create_request(
-            session_id="s1",
-            channel="telegram",
-            user_id="u1",
-            conversation_id="c1",
-            operation_type="write_files",
-            canonical_operation=op,
-        )
-
-        prompt = self.service.format_approval_prompt(req)
-        self.assertNotIn(secret_token, prompt)
-        self.assertIn("[REDACTED", prompt)
+        # Phase 15A rejects credential-bearing authority before persistence,
+        # rather than redacting only its display while storing the original.
+        with self.assertRaises(ValueError):
+            self.service.create_request(
+                session_id="s1", channel="telegram", user_id="u1",
+                conversation_id="c1", operation_type="write_files", canonical_operation=op,
+            )
+        self.assertEqual(self.service.store.list_requests(), [])
 
     def test_git_guard_protects_approvals_directory(self) -> None:
         """Git Guard must recognize .brainfrog/approvals/ as protected and non-trackable."""

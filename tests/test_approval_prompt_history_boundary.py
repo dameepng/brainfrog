@@ -590,7 +590,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
         canonical_op = CanonicalOperation(
             action_type="write_file",
             target="safe.txt",
-            parameters={"env": "test"}
+            parameters={}  # Capability contracts accept only executable filesystem parameters.
         )
         digest = canonical_op.compute_digest()
 
@@ -620,6 +620,8 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
                 conversation_id=conv_id,
                 operation_type="write_file",
                 canonical_operation=canonical_op,
+                capabilities=runtime._approval_capabilities(canonical_op),
+                workspace_root=str(self.repo_dir),
                 risk_class="MEDIUM",
                 session_incarnation_id=sess.session_incarnation_id,
             )

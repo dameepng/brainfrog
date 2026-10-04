@@ -66,6 +66,9 @@ class RunConfig:
     execution_contract: Optional[ApprovedExecutionContract] = None
     origin_channel: str = "cli"
     allow_remote_git_push: bool = True
+    actor: str = ""
+    session_id: str = ""
+    session_incarnation_id: Optional[str] = None
 
 
 @dataclass
@@ -381,6 +384,8 @@ def validate_and_stage_files(
     staged: List[Tuple[Path, str]] = []
 
     for raw_rel, content in files.items():
+        if contract is not None:
+            contract.require_filesystem("write", raw_rel, repo_res)
         # 1. Reject invalid or null paths
         if not isinstance(raw_rel, str) or not raw_rel.strip():
             raise PermissionError("Path validation denied: file path is empty or not a string.")
@@ -440,6 +445,7 @@ def validate_and_stage_files(
                     f"Execution denied: generated file '{canonical_rel}' is outside the approved scope "
                     f"(approved: [{allowed_str}], request_id={contract.request_id})."
                 )
+            contract.require_filesystem("write", canonical_rel, repo_res)
 
         staged.append((target_path, content))
 
@@ -727,6 +733,22 @@ class Orchestrator:
         self.s2_tag = getattr(self.s2, "provider_name", "claude")
         self.cfg = config
         self.log_fn = log_fn
+        if self.cfg.execution_contract is not None:
+            from system2.antigravity_client import AntigravitySystem2Client
+            if isinstance(self.s2, AntigravitySystem2Client):
+                raise PermissionError("CLI model providers require unsupported shell authority")
+            if self.cfg.mode != "build":
+                raise PermissionError("Contract execution requires bounded build mode")
+            self.guidelines_files = []
+            self.guidelines = ""
+            self.available_skills = []
+            self.active_skill = None
+            self.pinned_files = {}
+            self.attached_images = []
+            self.s2.guidelines = ""
+            self.cfg.plan_context = None
+            self.cfg.auto_pr = False
+            return
         self.guidelines_files = get_guideline_files(self.cfg.repo_dir)
         self.guidelines = load_project_guidelines(self.cfg.repo_dir)
 
@@ -819,8 +841,8 @@ class Orchestrator:
 
         # 2. Execution Contract check: If an approved contract exists, it is the authoritative boundary
         if self.cfg.execution_contract is not None:
-            if not self.cfg.execution_contract.allows_remote_git_push():
-                return False
+            # Git subprocess/hook containment is not executable in Phase 15A.
+            return False
 
         # 3. Origin channel provenance check: Remote channels are never permitted to push
         origin_ch = (getattr(self.cfg, "origin_channel", "cli") or "").lower().strip()
@@ -876,6 +898,15 @@ class Orchestrator:
         return res
 
     def run(self) -> List[StepResult]:
+        if self.cfg.execution_contract is not None:
+            contract = self.cfg.execution_contract
+            if not self.cfg.actor or not self.cfg.session_id or not self.cfg.session_incarnation_id:
+                raise PermissionError("Explicit execution identity (actor, session_id, session_incarnation_id) is required for contract execution")
+            contract.validate(actor=self.cfg.actor, channel=self.cfg.origin_channel,
+                              session_id=self.cfg.session_id,
+                              session_incarnation_id=self.cfg.session_incarnation_id,
+                              repo_dir=self.cfg.repo_dir)
+            contract.capabilities.require("network.access")
         if self.cfg.mode == "plan":
             self._log("[brainfrog] 🧭 Mode: [bold #4EC9B0]PLAN[/bold #4EC9B0] (Eksplorasi codebase & penyusunan rencana)")
         else:
@@ -1152,6 +1183,9 @@ class Orchestrator:
                 else:
                     raise
         for s in steps:
+            if self.cfg.execution_contract is not None:
+                for path in s.files:
+                    self.cfg.execution_contract.require_filesystem("read", path, self.cfg.repo_dir)
             s.files = [_normalize_rel_path(self.cfg.repo_dir, f) for f in s.files]
         self._log(f"[system2/{self.s2_tag}] plan has {len(steps)} step(s)")
 
@@ -1164,6 +1198,9 @@ class Orchestrator:
         return results
 
     def _scope_gate(self) -> ScopeDecision:
+        if self.cfg.execution_contract is not None:
+            return ScopeDecision(domain=None, change_type="code_change",
+                                 focus_tree="\n".join(sorted(self.cfg.execution_contract.approved_targets)))
         if not self.cfg.domains:
             change_type = "question_only" if (self.cfg.execution_contract is None and is_question_task(self.cfg.task)) else "unclear"
             return ScopeDecision(domain=None, change_type=change_type, focus_tree=_repo_tree(self.cfg.repo_dir))
@@ -1261,6 +1298,10 @@ class Orchestrator:
         if self.cfg.mode == "plan":
             raise PermissionError("Eksekusi langkah modifikasi kode dilarang dalam mode Plan.")
         self._log(f"=== Step {step.id}: {step.description} ===")
+        if self.cfg.execution_contract is not None:
+            self.cfg.execution_contract.capabilities.require("network.access")
+            for path in step.files:
+                self.cfg.execution_contract.require_filesystem("read", path, self.cfg.repo_dir)
         file_contents = _read_files(self.cfg.repo_dir, step.files)
 
         effective_task = self.cfg.task
@@ -1281,6 +1322,11 @@ class Orchestrator:
             images=self.attached_images,
         )
         self._safe_write_files(new_files)
+
+        if self.cfg.execution_contract is not None:
+            return StepResult(step, "unverified", 0,
+                              "Approved files written. Tests, shell commands, Git operations, "
+                              "and browser verification were not authorized; changes are unverified.")
 
         retries = 0
         while True:
@@ -1459,6 +1505,8 @@ class Orchestrator:
         Runs npm run build, starts dev server, navigates to dev URL,
         and verifies 0 console errors and 0 failed network requests.
         """
+        if self.cfg.execution_contract is not None:
+            raise PermissionError("Browser verification requires unsupported shell authority")
         try:
             from system2.visual_inspector import is_frontend_change
             from core.frontend_quality_gate import (
@@ -1545,6 +1593,8 @@ class Orchestrator:
 
         Returns True if visual fixes were applied, False otherwise.
         """
+        if self.cfg.execution_contract is not None:
+            raise PermissionError("Visual verification requires unsupported shell authority")
         if not hasattr(self.s2, "visual_review_and_fix"):
             return False
 
@@ -1651,6 +1701,8 @@ class Orchestrator:
         return False
 
     def _get_step_diff_snippet(self, new_files: Dict[str, str], max_len: int = 2500) -> str:
+        if self.cfg.execution_contract is not None:
+            raise PermissionError("Git read execution is unsupported under a contract")
         parts = []
         try:
             diff_proc = _run(["git", "diff"], self.cfg.repo_dir)
@@ -1681,6 +1733,8 @@ class Orchestrator:
         2. Evaluates if there is an actionable, high-signal proactive suggestion for the user.
         Returns suggestion string if a genuine gap/risk exists, else None.
         """
+        if self.cfg.execution_contract is not None:
+            return None
         needs_learning = retries > 0 or visual_fixed
         suggestion_text: Optional[str] = None
 
@@ -1799,6 +1853,10 @@ class Orchestrator:
         gate_result: Optional[Any] = None,
         suggestion: Optional[str] = None,
     ) -> StepResult:
+        if self.cfg.execution_contract is not None:
+            self._log("Remote Git push skipped: contract does not authorize Git execution.")
+            return StepResult(step, "unverified", retries,
+                              "Git and test execution are not authorized; changes are unverified.")
         if self.cfg.mode == "plan":
             raise PermissionError("Pembuatan commit atau pull request dilarang dalam mode Plan.")
         stat = _diff_stat(self.cfg.repo_dir)

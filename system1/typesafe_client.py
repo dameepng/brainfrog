@@ -91,7 +91,14 @@ class TypeSafeSystemOne(SystemOneClient):
                 },
                 json=payload,
                 timeout=self.timeout,
+                allow_redirects=False,
             )
+            if resp.status_code in (301, 302, 303, 307, 308) or resp.is_redirect is True:
+                location = resp.headers.get("Location", "")
+                raise RuntimeError(
+                    f"System 1 provider redirected to '{location}' "
+                    f"({resp.status_code}): transport-level redirects are prohibited for model APIs."
+                )
             resp.raise_for_status()
         except requests.exceptions.HTTPError as exc:
             err_resp = exc.response if getattr(exc, "response", None) is not None else resp

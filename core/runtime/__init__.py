@@ -23,6 +23,23 @@ from .approval import (
 from .contract import ApprovedExecutionContract
 from .runtime import BrainFrogRuntime
 from .session import SessionManager, SessionState, session_manager
+from .work import (
+    ALLOWED_TRANSITIONS,
+    InvalidWorkTransition,
+    InMemoryWorkStore,
+    TERMINAL_WORK_STATUSES,
+    Work,
+    WorkStatus,
+    WorkStore,
+)
+from .planning import (
+    DeterministicPlanner,
+    Plan,
+    PlanStep,
+    Planner,
+    apply_plan_to_work,
+    validate_plan,
+)
 
 __all__ = [
     "AgentEvent",
@@ -47,4 +64,17 @@ __all__ = [
     "InMemoryApprovalStore",
     "RiskClass",
     "ApprovedExecutionContract",
+    "Work",
+    "WorkStatus",
+    "WorkStore",
+    "InMemoryWorkStore",
+    "ALLOWED_TRANSITIONS",
+    "TERMINAL_WORK_STATUSES",
+    "InvalidWorkTransition",
+    "Plan",
+    "PlanStep",
+    "Planner",
+    "DeterministicPlanner",
+    "apply_plan_to_work",
+    "validate_plan",
 ]

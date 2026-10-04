@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import secrets
 import shutil
@@ -51,10 +52,11 @@ _LOCK_NB = getattr(fcntl, "LOCK_NB", 4)
 _LOCK_UN = getattr(fcntl, "LOCK_UN", 8)
 
 from core.runtime.session import scrub_secrets
+from core.runtime.capabilities import Capabilities
 
 logger = logging.getLogger(__name__)
 
-CURRENT_APPROVAL_SCHEMA_VERSION = 1
+CURRENT_APPROVAL_SCHEMA_VERSION = 2
 DEFAULT_APPROVAL_TTL_SECONDS = 300.0  # 5 minutes
 DEFAULT_MAX_PENDING_PER_SESSION = 20
 DEFAULT_MAX_PENDING_PER_REQUESTER = 200
@@ -272,6 +274,52 @@ class ApprovalRequest:
     rejection_reason: Optional[str] = None
     session_incarnation_id: Optional[str] = None
     schema_version: int = CURRENT_APPROVAL_SCHEMA_VERSION
+    capabilities: Capabilities = field(default_factory=Capabilities)
+    authorization_digest: str = ""
+    workspace_root: str = ""
+    approval_digest: str = ""
+
+    def authorization_payload(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "request_id": self.request_id,
+            "session_id": self.session_id,
+            "session_incarnation_id": self.session_incarnation_id,
+            "channel": self.channel,
+            "user_id": self.user_id,
+            "conversation_id": self.conversation_id,
+            "operation_type": self.operation_type,
+            "operation": self.canonical_operation.to_canonical_dict(),
+            "operation_digest": self.operation_digest,
+            "capabilities": self.capabilities.to_dict(),
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "nonce": self.nonce,
+            "workspace_root": self.workspace_root,
+        }
+
+    def compute_authorization_digest(self) -> str:
+        return CanonicalOperation("execution_contract_v2", "", self.authorization_payload()).compute_digest()
+
+    def integrity_valid(self) -> bool:
+        try:
+            return (
+                self.schema_version == CURRENT_APPROVAL_SCHEMA_VERSION
+                and type(self.capabilities) is Capabilities
+                and self.operation_digest == self.canonical_operation.compute_digest()
+                and bool(self.authorization_digest)
+                and secrets.compare_digest(self.authorization_digest, self.compute_authorization_digest())
+                and (self.status not in (ApprovalStatus.APPROVED, ApprovalStatus.CONSUMED)
+                     or (bool(self.approver_id) and bool(self.approval_digest)
+                         and secrets.compare_digest(self.approval_digest, self.compute_approval_digest())))
+            )
+        except (ValueError, TypeError, AttributeError):
+            return False
+
+    def compute_approval_digest(self) -> str:
+        return CanonicalOperation("approval_v2", self.authorization_digest, {
+            "approver_id": self.approver_id, "approved_at": self.approved_at,
+        }).compute_digest()
 
     def is_expired(self, now: Optional[float] = None) -> bool:
         """Check if request validity window has expired."""
@@ -280,8 +328,14 @@ class ApprovalRequest:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize state to a JSON-safe dictionary with secret scrubbing."""
+        from core.runtime.contract import reject_secrets
+        reject_secrets(self.authorization_payload())
         return {
             "schema_version": self.schema_version,
+            "capabilities": self.capabilities.to_dict(),
+            "authorization_digest": self.authorization_digest,
+            "workspace_root": self.workspace_root,
+            "approval_digest": self.approval_digest,
             "request_id": self.request_id,
             "session_id": self.session_id,
             "session_incarnation_id": self.session_incarnation_id,
@@ -305,11 +359,17 @@ class ApprovalRequest:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ApprovalRequest:
         """Instantiate an ApprovalRequest from a serialized dictionary."""
-        version = int(data.get("schema_version", 1))
-        if version > CURRENT_APPROVAL_SCHEMA_VERSION:
+        version = data.get("schema_version", 1)
+        if type(version) is not int or version not in (1, CURRENT_APPROVAL_SCHEMA_VERSION):
             raise ValueError(f"Unsupported approval schema version: {version}")
+        if set(data) - set(cls.__dataclass_fields__):
+            raise ValueError("Unknown approval fields")
 
         op_data = data.get("canonical_operation", {})
+        if type(op_data) is not dict or set(op_data) - {"action_type", "target", "parameters"}:
+            raise ValueError("Unknown or malformed canonical operation fields")
+        if type(op_data.get("parameters", {})) is not dict:
+            raise ValueError("Malformed canonical operation parameters")
         canon_op = CanonicalOperation(
             action_type=str(op_data.get("action_type", "")),
             target=str(op_data.get("target", "")),
@@ -320,7 +380,7 @@ class ApprovalRequest:
         try:
             status = ApprovalStatus(raw_status)
         except ValueError:
-            status = ApprovalStatus.PENDING
+            raise ValueError("Invalid approval status") from None
 
         return cls(
             request_id=str(data["request_id"]),
@@ -342,6 +402,10 @@ class ApprovalRequest:
             rejection_reason=data.get("rejection_reason"),
             session_incarnation_id=data.get("session_incarnation_id"),
             schema_version=version,
+            capabilities=Capabilities.from_dict(data.get("capabilities", {})),
+            authorization_digest=data.get("authorization_digest", ""),
+            workspace_root=data.get("workspace_root", ""),
+            approval_digest=data.get("approval_digest", ""),
         )
 
 
@@ -495,6 +559,9 @@ class InMemoryApprovalStore(ApprovalStore):
 
             if req.status != ApprovalStatus.APPROVED:
                 return False, req, f"Approval request '{request_id}' is not in APPROVED state (current: {req.status.value})."
+
+            if not req.integrity_valid():
+                return False, req, "Approval integrity mismatch or legacy authorization (fail closed)."
 
             if req.operation_digest != expected_digest:
                 return False, req, (
@@ -1005,6 +1072,9 @@ class FileApprovalStore(ApprovalStore):
                     if req.status != ApprovalStatus.APPROVED:
                         return False, req, f"Approval request '{request_id}' is not in APPROVED state (current: {req.status.value})."
 
+                    if not req.integrity_valid():
+                        return False, req, "Approval integrity mismatch or legacy authorization (fail closed)."
+
                     if req.operation_digest != expected_digest:
                         return False, req, (
                             f"Operation digest mismatch: expected '{expected_digest}', "
@@ -1088,10 +1158,14 @@ class ApprovalService:
         risk_class: str = RiskClass.MEDIUM.value,
         ttl_seconds: Optional[float] = None,
         session_incarnation_id: Optional[str] = None,
+        capabilities: Optional[Capabilities] = None,
+        workspace_root: str = "",
     ) -> ApprovalRequest:
         """Create and persist a new PENDING approval request with secure nonce and quota bounds."""
         now = time.time()
-        ttl = ttl_seconds or self.default_ttl_seconds
+        ttl = self.default_ttl_seconds if ttl_seconds is None else ttl_seconds
+        if type(ttl) not in (int, float) or not math.isfinite(ttl):
+            raise ValueError("Invalid approval expiration")
         expires_at = now + ttl
 
         # Cryptographically secure random identifiers
@@ -1114,7 +1188,14 @@ class ApprovalService:
             nonce=nonce,
             status=ApprovalStatus.PENDING,
             session_incarnation_id=session_incarnation_id,
+            capabilities=capabilities if capabilities is not None else Capabilities(),
+            workspace_root=str(Path(workspace_root).resolve()) if workspace_root else "",
         )
+        if type(request.capabilities) is not Capabilities:
+            raise ValueError("Capabilities must be a validated domain type")
+        request.authorization_digest = request.compute_authorization_digest()
+        from core.runtime.contract import reject_secrets
+        reject_secrets(request.authorization_payload())
 
         # 1. Deterministic Payload Size Bound (serialized JSON)
         serialized_bytes = len(json.dumps(request.to_dict(), ensure_ascii=False).encode("utf-8"))
@@ -1193,6 +1274,9 @@ class ApprovalService:
             if req.status != ApprovalStatus.PENDING:
                 return False, f"Cannot approve request '{request_id}' with status {req.status.value}.", req
 
+            if not req.integrity_valid():
+                return False, "Approval integrity mismatch or legacy authorization.", req
+
             # Channel verification
             if channel.lower().strip() != req.channel.lower():
                 return False, f"Channel mismatch: request belongs to '{req.channel}', cannot approve from '{channel}'.", req
@@ -1203,12 +1287,15 @@ class ApprovalService:
 
             # Two-man rule enforcement
             clean_approver = approver_id.strip()
+            if not clean_approver:
+                return False, "Approver identity is required.", req
             if self.two_man_rule_enabled and clean_approver == req.user_id:
                 return False, "Two-man rule violation: Requester cannot approve their own request.", req
 
             req.status = ApprovalStatus.APPROVED
             req.approver_id = clean_approver
             req.approved_at = time.time()
+            req.approval_digest = req.compute_approval_digest()
             self.store.save(req)
             return True, f"Request '{request_id}' has been approved by user '{clean_approver}'.", req
 
@@ -1332,6 +1419,9 @@ class ApprovalService:
             f"• **Request ID:** `{request.request_id}`\n"
             f"• **Validity Window:** {time_str}\n\n"
             f"To authorize this exact operation:\n"
+            f"Capabilities: `{json.dumps(request.capabilities.to_dict(), sort_keys=True)}`\n"
+            "Network access, if granted, covers configured model APIs only. "
+            "Shell and Git execution are unsupported under this contract.\n"
             f"`/approve {request.request_id}`\n\n"
             f"To reject:\n"
             f"`/reject {request.request_id}`"

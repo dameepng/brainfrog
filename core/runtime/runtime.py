@@ -44,7 +44,8 @@ from .approval import (
     RiskClass,
     extract_canonical_operation,
 )
-from .contract import ApprovedExecutionContract
+from .capabilities import Capabilities, FilesystemPolicy, NetworkPolicy
+from .contract import ApprovedExecutionContract, operation_targets
 
 
 class BrainFrogRuntime:
@@ -387,10 +388,24 @@ class BrainFrogRuntime:
                 )
             approved_execution = True
             if app_req is not None:
-                execution_contract = ApprovedExecutionContract.from_approval_request(
-                    app_req,
-                    repo_dir=Path(message.metadata.get("repo_dir") or self.repo_dir).resolve(),
-                )
+                try:
+                    execution_contract = ApprovedExecutionContract.from_approval_request(
+                        app_req, repo_dir=Path(self.repo_dir).resolve(),
+                    )
+                    execution_contract.validate(
+                        actor=message.user_id, channel=effective_channel,
+                        session_id=session.session_id,
+                        session_incarnation_id=session.session_incarnation_id,
+                        repo_dir=Path(self.repo_dir).resolve(),
+                    )
+                    execution_contract.capabilities.require("network.access")
+                except (ValueError, PermissionError) as exc:
+                    return OutgoingMessage(text=str(exc), events=events, success=False,
+                                           status="rejected", error=str(exc))
+                # Incoming metadata cannot replace the approved task or workspace.
+                raw_text = f"{app_req.canonical_operation.action_type} {app_req.canonical_operation.target}"
+                message.metadata.clear()
+                action = classify_request_action(raw_text, {})
             emit("agent.approval.consumed", {
                 "request_id": approval_id,
                 "approver": app_req.approver_id if app_req else None,
@@ -444,6 +459,8 @@ class BrainFrogRuntime:
                         canonical_operation=canonical_op,
                         risk_class=risk,
                         session_incarnation_id=session.session_incarnation_id,
+                        capabilities=self._approval_capabilities(canonical_op),
+                        workspace_root=str(Path(self.repo_dir).resolve()),
                     )
                 except ApprovalQuotaExceededError as qe:
                     emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": str(qe)})
@@ -462,6 +479,11 @@ class BrainFrogRuntime:
                         success=False,
                         status="rejected",
                         error=str(pe),
+                    )
+                except (ValueError, PermissionError):
+                    return OutgoingMessage(
+                        text="Approval policy rejected invalid targets, parameters, or credential material.",
+                        events=events, success=False, status="rejected",
                     )
                 emit("agent.approval.requested", {
                     "request_id": app_req.request_id,
@@ -491,8 +513,7 @@ class BrainFrogRuntime:
         # For remote channels, enforce read-only / plan mode if code editing is not permitted
         effective_mode = requested_mode
         if approved_execution:
-            if action in (PermissionAction.WRITE_CODE, PermissionAction.WRITE_FILES):
-                effective_mode = "build"
+            effective_mode = "build"
         elif policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value:
             if not policy.allow_code_edits and requested_mode == "build":
                 # Fallback to plan mode so remote users get safe architectural analysis & PRD
@@ -508,7 +529,7 @@ class BrainFrogRuntime:
         auto_pr = bool(message.metadata.get("auto_pr", False)) and policy.allow_auto_pr
         max_retries = int(message.metadata.get("max_retries", 3))
 
-        test_cmd_list = self._resolve_test_cmd(message.metadata.get("test_cmd"))
+        test_cmd_list = [] if execution_contract else self._resolve_test_cmd(message.metadata.get("test_cmd"))
 
         # Plan context resolution
         if approved_execution:
@@ -541,7 +562,7 @@ class BrainFrogRuntime:
 
         # 5. Load Domains & Prepare Orchestrator Config
         can_auto_create = bool(effective_mode == "build" and policy.allow_code_edits)
-        domains = load_module_map(workspace_dir, task=raw_text, auto_create=can_auto_create)
+        domains = {} if execution_contract else load_module_map(workspace_dir, task=raw_text, auto_create=can_auto_create)
 
         effective_task = raw_text
         if not approved_execution and session.history:
@@ -577,6 +598,9 @@ class BrainFrogRuntime:
             execution_contract=execution_contract,
             origin_channel=effective_channel,
             allow_remote_git_push=allow_remote_git_push,
+            actor=message.user_id,
+            session_id=session.session_id,
+            session_incarnation_id=session.session_incarnation_id,
         )
 
         def log_runtime(msg: str) -> None:
@@ -590,15 +614,11 @@ class BrainFrogRuntime:
             elif "planning task" in clean or "writing code" in clean or "PRD" in clean:
                 emit("agent.system2.started", {"log": clean})
 
-        orchestrator = Orchestrator(
-            system1=s1,
-            system2=s2,
-            config=cfg,
-            log_fn=log_runtime,
-        )
-
         # 6. Execute via existing Orchestrator
         try:
+            orchestrator = Orchestrator(
+                system1=s1, system2=s2, config=cfg, log_fn=log_runtime,
+            )
             results: List[StepResult] = orchestrator.run()
         except Exception as e:
             err_msg = f"Orchestration Error: {e}"
@@ -699,3 +719,12 @@ class BrainFrogRuntime:
 
     # Backward compatibility and usability alias
     process_message = handle_message
+
+    @staticmethod
+    def _approval_capabilities(operation):
+        """Trusted policy proposal, persisted BEFORE human approval; ignores metadata grants."""
+        if operation.action_type not in ("write_file", "write_files", "write_code"):
+            return Capabilities()
+        targets = tuple(sorted(operation_targets(operation.to_canonical_dict())))
+        return Capabilities(filesystem=FilesystemPolicy(read=targets, write=targets),
+                            network=NetworkPolicy(access=True))
