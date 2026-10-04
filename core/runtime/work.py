@@ -75,6 +75,39 @@ class Work:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
+    def __init__(
+        self,
+        id: Optional[Union[str, WorkStatus]] = None,
+        intent: str = "",
+        goal: str = "",
+        scope: Union[Tuple[str, ...], Sequence[str]] = (),
+        plan: Union[Tuple[str, ...], Sequence[str]] = (),
+        capabilities: Optional[Capabilities] = None,
+        status: Union[WorkStatus, str] = WorkStatus.CREATED,
+        created_at: Optional[float] = None,
+        updated_at: Optional[float] = None,
+    ) -> None:
+        actual_id = f"work_{secrets.token_hex(16)}" if id is None else id
+        actual_status = status
+        if isinstance(id, WorkStatus):
+            actual_status = id
+            actual_id = f"work_{secrets.token_hex(16)}"
+
+        now = time.time()
+        actual_created = now if created_at is None else created_at
+        actual_updated = now if updated_at is None else updated_at
+
+        object.__setattr__(self, "id", actual_id)
+        object.__setattr__(self, "intent", intent)
+        object.__setattr__(self, "goal", goal)
+        object.__setattr__(self, "scope", scope)
+        object.__setattr__(self, "plan", plan)
+        object.__setattr__(self, "capabilities", capabilities)
+        object.__setattr__(self, "status", actual_status)
+        object.__setattr__(self, "created_at", actual_created)
+        object.__setattr__(self, "updated_at", actual_updated)
+        self.__post_init__()
+
     def __post_init__(self) -> None:
         # Support shorthand instantiation Work(WorkStatus.CREATED)
         if isinstance(self.id, WorkStatus):

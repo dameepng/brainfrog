@@ -27,7 +27,7 @@ if _PACKAGE_DIR not in sys.path:
 from core.modules import Domain, resolve_focus_tree
 from system1.base import Answer, ChoiceQuestion, NoulQuestion, ScoreQuestion, SystemOneClient
 from system2 import PlanStep, System2Client, System2ClientType, extract_json
-from security.git_guard import (
+from security.git_guard import (  # pyright: ignore[reportMissingImports]
     ensure_gitignore_security,
     purge_tracked_sensitive_files,
     scan_staged_changes,
@@ -69,6 +69,11 @@ class RunConfig:
     actor: str = ""
     session_id: str = ""
     session_incarnation_id: Optional[str] = None
+    work_id: Optional[str] = None
+    plan_id: Optional[str] = None
+    transaction_store: Optional[Any] = None
+    transaction_verifier: Optional[Any] = None
+    last_transaction_result: Optional[Any] = None
 
 
 @dataclass
@@ -457,11 +462,17 @@ def _write_files(
     files: Dict[str, str],
     mode: str = "build",
     contract: Optional[ApprovedExecutionContract] = None,
-) -> None:
-    """Safely write files after validating ALL entries against path traversal and scope.
+    work_id: Optional[str] = None,
+    plan_id: Optional[str] = None,
+    store: Optional[Any] = None,
+    session_id: Optional[str] = None,
+    verifier: Optional[Any] = None,
+) -> Any:
+    """Safely write files within an atomic Transaction after validating ALL entries.
 
     Atomic application-level write: Validates the entire batch before writing the first file.
     If any file is unauthorized or invalid, raises PermissionError with zero partial writes.
+    If execution fails mid-way, automatically rolls back any executed mutations in reverse order.
     """
     if mode == "plan":
         raise PermissionError(
@@ -471,10 +482,32 @@ def _write_files(
     # Validate all files before writing the first file (Fail-closed, zero partial writes)
     staged = validate_and_stage_files(repo_dir, files, contract=contract)
 
-    # All files passed validation; proceed with writes
+    from core.runtime.transaction import TransactionCoordinator
+    coordinator = TransactionCoordinator(
+        workspace=repo_dir,
+        contract=contract,
+        work_id=work_id,
+        plan_id=plan_id,
+        session_id=session_id,
+        store=store,
+        verifier=verifier,
+    )
+    coordinator.begin()
+    repo_res = repo_dir.resolve()
     for target_path, content in staged:
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(content, encoding="utf-8")
+        clean_rel = target_path.relative_to(repo_res).as_posix()
+        if target_path.exists():
+            coordinator.stage_modify(clean_rel, content)
+        else:
+            coordinator.stage_create(clean_rel, content)
+
+    if not coordinator.execute():
+        raise RuntimeError(f"Transaction execution failed: {coordinator.tx.failure_reason}")
+
+    if not coordinator.verify():
+        raise RuntimeError(f"Transaction verification failed: {coordinator.tx.failure_reason}")
+
+    return coordinator.commit()
 
 
 @dataclass
@@ -732,6 +765,7 @@ class Orchestrator:
         self.s2 = system2
         self.s2_tag = getattr(self.s2, "provider_name", "claude")
         self.cfg = config
+        self.config = config
         self.log_fn = log_fn
         if self.cfg.execution_contract is not None:
             from system2.antigravity_client import AntigravitySystem2Client
@@ -819,14 +853,21 @@ class Orchestrator:
             except UnicodeEncodeError:
                 print(msg.encode("ascii", errors="replace").decode("ascii"))
 
-    def _safe_write_files(self, files: Dict[str, str]) -> None:
+    def _safe_write_files(self, files: Dict[str, str]) -> Any:
         """Safely write files under the active execution contract and path validation rules."""
-        _write_files(
+        res = _write_files(
             repo_dir=self.cfg.repo_dir,
             files=files,
             mode=self.cfg.mode,
             contract=self.cfg.execution_contract,
+            work_id=self.cfg.work_id,
+            plan_id=self.cfg.plan_id,
+            store=self.cfg.transaction_store,
+            session_id=self.cfg.session_id,
+            verifier=self.cfg.transaction_verifier,
         )
+        self.cfg.last_transaction_result = res
+        return res
 
     def _can_push_to_remote(self) -> bool:
         """Deterministic authority boundary check for remote Git push operations.
@@ -1324,9 +1365,12 @@ class Orchestrator:
         self._safe_write_files(new_files)
 
         if self.cfg.execution_contract is not None:
-            return StepResult(step, "unverified", 0,
-                              "Approved files written. Tests, shell commands, Git operations, "
-                              "and browser verification were not authorized; changes are unverified.")
+            tx_res = self.cfg.last_transaction_result
+            if tx_res is None or not tx_res.success:
+                raise RuntimeError("Transactional verification did not commit")
+            return StepResult(step, "verified", 0,
+                              "Approved files were transactionally applied and verified. "
+                              "Shell, Git, and browser operations were not authorized.")
 
         retries = 0
         while True:

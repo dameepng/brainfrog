@@ -46,6 +46,16 @@ from .approval import (
 )
 from .capabilities import Capabilities, FilesystemPolicy, NetworkPolicy
 from .contract import ApprovedExecutionContract, operation_targets
+from .transaction import (
+    FileTransactionStore,
+    RecoveryResult,
+    TransactionRecoveryManager,
+    TransactionStore,
+    TransactionVerifier,
+)
+from .remote_work import RemoteWorkCoordinator, RemoteWorkResult
+from .planning import Planner
+from .work import WorkStatus, WorkStore
 
 
 class BrainFrogRuntime:
@@ -82,6 +92,11 @@ class BrainFrogRuntime:
         max_history_bytes: Optional[int] = None,
         max_message_bytes: Optional[int] = None,
         session_ttl_seconds: Optional[float] = None,
+        transaction_store: Optional[TransactionStore] = None,
+        auto_recover_transactions: bool = True,
+        work_store: Optional[WorkStore] = None,
+        planner: Optional[Planner] = None,
+        transaction_verifier: Optional[TransactionVerifier] = None,
     ) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
         self.default_backend = default_backend
@@ -141,6 +156,46 @@ class BrainFrogRuntime:
                 svc_kwargs["max_payload_bytes"] = max_payload_bytes
             self.approval_service = ApprovalService(**svc_kwargs)
         self.require_approval = require_approval
+        if transaction_store is not None:
+            self.transaction_store = transaction_store
+        else:
+            self.transaction_store = FileTransactionStore(self.repo_dir)
+
+        self.auto_recover_transactions = auto_recover_transactions
+        self.startup_recovery_results: List[RecoveryResult] = []
+        if self.auto_recover_transactions:
+            self.startup_recovery_results = self.recover_startup_transactions()
+        self.remote_work = RemoteWorkCoordinator(work_store=work_store, planner=planner)
+        self.transaction_verifier = transaction_verifier
+        self._reconcile_recovered_work()
+
+    def recover_startup_transactions(self) -> List[RecoveryResult]:
+        """Discover and recover incomplete transactions during runtime initialization."""
+        mgr = TransactionRecoveryManager(workspace=self.repo_dir, store=self.transaction_store)
+        return mgr.recover_incomplete(limit=50)
+
+    def _reconcile_recovered_work(self) -> None:
+        """Map deterministic transaction recovery outcomes back to persisted Work state."""
+        for recovery in self.startup_recovery_results:
+            tx = self.transaction_store.get(recovery.transaction_id)
+            if tx is None or not tx.work_id:
+                continue
+            work = self.remote_work.work_store.get(tx.work_id)
+            if work is None or work.is_terminal:
+                continue
+            try:
+                if recovery.final_status.value == "committed" and work.status == WorkStatus.VERIFYING:
+                    self.remote_work.work_store.save(work.transition(WorkStatus.DONE))
+                elif work.status in (WorkStatus.EXECUTING, WorkStatus.VERIFYING):
+                    self.remote_work.work_store.save(work.transition(WorkStatus.FAILED))
+            except (ValueError, KeyError):
+                # Recovery is authoritative; an incompatible descriptive record fails closed.
+                current = self.remote_work.work_store.get(tx.work_id)
+                if current and not current.is_terminal and current.status != WorkStatus.FAILED:
+                    try:
+                        self.remote_work.work_store.save(current.transition(WorkStatus.FAILED))
+                    except ValueError:
+                        pass
 
     def _resolve_test_cmd(self, custom_cmd: Optional[str]) -> List[str]:
         if custom_cmd:
@@ -209,6 +264,9 @@ class BrainFrogRuntime:
                     "• `/help` — Show available commands and instructions\n"
                     "• `/status` — View active session and runtime diagnostics\n"
                     "• `/doctor` — Run comprehensive system & configuration check\n"
+                    "• `/transactions` — View recent execution transactions\n"
+                    "• `/transaction <id>` — View details for a specific transaction\n"
+                    "• `/recover <id>` — Deterministically recover an interrupted transaction\n"
                     "• `/reset` or `/new` — Reset current conversation session\n\n"
                     "💡 You can query the repository, request architecture analysis, or generate plans.\n"
                     "⚠️ Local CLI commands (`/undo`, `/diff`, `/preview`, `/screenshot`, `/paste`, shell execution) are restricted to local CLI."
@@ -256,8 +314,14 @@ class BrainFrogRuntime:
                     channel=effective_channel,
                 )
                 if ok:
+                    remote_result = self.remote_work.result(
+                        req_id, "accepted", "Work approved and ready for execution."
+                    )
                     emit("agent.approved", {"request_id": req_id, "approver": message.user_id})
-                    return OutgoingMessage(text=f"✅ {resp_msg}", events=events, success=True, status="completed")
+                    metadata = {"remote_work": remote_result.to_dict()} if remote_result else {}
+                    suffix = f" Use `/exec {req_id}` to execute." if remote_result else ""
+                    return OutgoingMessage(text=f"✅ {resp_msg}{suffix}", events=events,
+                                           success=True, status="completed", metadata=metadata)
                 else:
                     emit("agent.approval.failed", {"request_id": req_id, "reason": resp_msg})
                     return OutgoingMessage(text=f"❌ {resp_msg}", events=events, success=False, status="rejected", error=resp_msg)
@@ -272,6 +336,7 @@ class BrainFrogRuntime:
                     channel=effective_channel,
                 )
                 if ok:
+                    self.remote_work.transition_for_approval(req_id, WorkStatus.CANCELLED)
                     emit("agent.rejected", {"request_id": req_id, "approver": message.user_id})
                     return OutgoingMessage(text=f"🚫 {resp_msg}", events=events, success=True, status="completed")
                 else:
@@ -286,6 +351,7 @@ class BrainFrogRuntime:
                     requester_id=message.user_id,
                 )
                 if ok:
+                    self.remote_work.transition_for_approval(req_id, WorkStatus.CANCELLED)
                     emit("agent.cancelled", {"request_id": req_id, "requester": message.user_id})
                     return OutgoingMessage(text=f"🛑 {resp_msg}", events=events, success=True, status="completed")
                 else:
@@ -309,6 +375,54 @@ class BrainFrogRuntime:
                 for r in pending:
                     lines.append(f"• `{r.request_id}` — {r.operation_type} (`{r.canonical_operation.target}`) [Risk: {r.risk_class}]")
                 return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
+
+            if cmd == "/transactions":
+                txs = self.transaction_store.list(session_id=session.session_id, limit=20)
+                if not txs:
+                    return OutgoingMessage(text="ℹ️ No transactions recorded for this session.", events=events, success=True, status="completed")
+                lines = ["📋 **Recorded Transactions:**\n"]
+                for tx in txs:
+                    lines.append(f"• `{tx.id}` — `{tx.status.value}` ({len(tx.operations)} ops, created: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(tx.created_at))})")
+                return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
+
+            if cmd == "/transaction":
+                if len(parts) < 2 or not parts[1].strip():
+                    return OutgoingMessage(text="⚠️ Usage: `/transaction <transaction_id>`", events=events, success=False, status="rejected")
+                tx_id = parts[1].strip()
+                tx = self.transaction_store.get(tx_id)
+                if not tx:
+                    return OutgoingMessage(text=f"❌ Transaction '{tx_id}' not found.", events=events, success=False, status="rejected")
+                lines = [
+                    f"📋 **Transaction Details (`{tx.id}`):**\n",
+                    f"• Status: `{tx.status.value}`",
+                    f"• Work ID: `{tx.work_id or 'none'}`",
+                    f"• Plan ID: `{tx.plan_id or 'none'}`",
+                    f"• Session ID: `{tx.session_id or 'none'}`",
+                    f"• Operations: {len(tx.operations)}",
+                ]
+                for op in tx.operations:
+                    lines.append(f"  - `{op.operation_type.value}`: `{op.path}` [{op.status.value}]")
+                if tx.error:
+                    lines.append(f"• Error: `{tx.error}`")
+                if tx.rollback_error:
+                    lines.append(f"• Rollback Error: `{tx.rollback_error}`")
+                return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
+
+            if cmd == "/recover":
+                if len(parts) < 2 or not parts[1].strip():
+                    return OutgoingMessage(text="⚠️ Usage: `/recover <transaction_id>`", events=events, success=False, status="rejected")
+                tx_id = parts[1].strip()
+                mgr = TransactionRecoveryManager(workspace=self.repo_dir, store=self.transaction_store)
+                res = mgr.recover(tx_id)
+                if res.recovered:
+                    action_desc = "rolled back" if res.rolled_back else res.final_status.value
+                    msg = f"✅ Transaction `{tx_id}` recovered ({action_desc})."
+                    emit("agent.transaction.recovered", {"transaction_id": tx_id, "status": res.final_status.value})
+                    return OutgoingMessage(text=msg, events=events, success=True, status="completed")
+                else:
+                    err_msg = res.error or "Recovery failed"
+                    emit("agent.transaction.recovery_failed", {"transaction_id": tx_id, "error": err_msg})
+                    return OutgoingMessage(text=f"❌ Recovery failed for transaction `{tx_id}`: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
 
             if cmd in ("/exec", "/run"):
                 tokens = raw_text.strip().split()
@@ -359,10 +473,21 @@ class BrainFrogRuntime:
         allowed, reason = evaluate_channel_action(
             effective_channel, action, policy
         )
+        remote_coding_request = (
+            policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value
+            and action in (PermissionAction.WRITE_CODE, PermissionAction.WRITE_FILES)
+        )
+        remote_contract_required = remote_coding_request and allowed
+        if remote_contract_required:
+            # Remote mutations always cross the approval/contract boundary, even
+            # when a custom channel policy would otherwise permit code edits.
+            allowed = False
+            reason = "Remote coding requires an approved execution contract."
 
         approval_id = message.metadata.get("approval_id") or message.metadata.get("request_id")
         approved_execution = False
         execution_contract: Optional[ApprovedExecutionContract] = None
+        remote_context = None
 
         if approval_id:
             digest = message.metadata.get("expected_digest")
@@ -406,13 +531,22 @@ class BrainFrogRuntime:
                 raw_text = f"{app_req.canonical_operation.action_type} {app_req.canonical_operation.target}"
                 message.metadata.clear()
                 action = classify_request_action(raw_text, {})
+                remote_context = self.remote_work.context_for_approval(str(approval_id))
+                if remote_context is not None:
+                    self.remote_work.transition_for_approval(
+                        str(approval_id), WorkStatus.EXECUTING
+                    )
             emit("agent.approval.consumed", {
                 "request_id": approval_id,
                 "approver": app_req.approver_id if app_req else None,
             })
 
         if not allowed and not approved_execution:
-            should_request_approval = bool(self.require_approval or message.metadata.get("require_approval"))
+            should_request_approval = bool(
+                remote_contract_required
+                or self.require_approval
+                or message.metadata.get("require_approval")
+            )
             if should_request_approval:
                 canonical_op = extract_canonical_operation(raw_text, action, message.metadata, repo_dir=Path(self.repo_dir))
 
@@ -449,6 +583,31 @@ class BrainFrogRuntime:
                     if action in (PermissionAction.SHELL_EXECUTION, PermissionAction.GIT_DESTRUCTIVE, PermissionAction.DEPLOYMENT)
                     else (RiskClass.HIGH.value if action == PermissionAction.CREDENTIAL_ACCESS else RiskClass.MEDIUM.value)
                 )
+                capabilities = self._approval_capabilities(canonical_op)
+                pending_remote_work = None
+                pending_remote_plan = None
+                if (
+                    policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value
+                    and effective_channel in ("telegram", "whatsapp")
+                    and canonical_op.action_type in ("write_file", "write_files", "write_code")
+                ):
+                    targets = tuple(sorted(operation_targets(canonical_op.to_canonical_dict())))
+                    try:
+                        normalized_request = self.remote_work.normalize(
+                            message_id=message.id, actor=message.user_id,
+                            channel=effective_channel, session_id=session.session_id,
+                            session_incarnation_id=session.session_incarnation_id,
+                            intent=raw_text, workspace=self.repo_dir, targets=targets,
+                        )
+                        pending_remote_work, pending_remote_plan = self.remote_work.submit(
+                            normalized_request, capabilities
+                        )
+                    except (ValueError, PermissionError) as exc:
+                        return OutgoingMessage(
+                            text=f"Remote work rejected: {scrub_secrets(str(exc))}",
+                            events=events, success=False, status="rejected",
+                            error="remote_work_invalid",
+                        )
                 try:
                     app_req = self.approval_service.create_request(
                         session_id=session.session_id,
@@ -459,10 +618,14 @@ class BrainFrogRuntime:
                         canonical_operation=canonical_op,
                         risk_class=risk,
                         session_incarnation_id=session.session_incarnation_id,
-                        capabilities=self._approval_capabilities(canonical_op),
+                        capabilities=capabilities,
                         workspace_root=str(Path(self.repo_dir).resolve()),
                     )
                 except ApprovalQuotaExceededError as qe:
+                    if pending_remote_work is not None:
+                        self.remote_work.work_store.save(
+                            pending_remote_work.transition(WorkStatus.FAILED)
+                        )
                     emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": str(qe)})
                     return OutgoingMessage(
                         text=f"⚠️ Approval quota exceeded: {qe}",
@@ -472,6 +635,10 @@ class BrainFrogRuntime:
                         error=str(qe),
                     )
                 except ApprovalPayloadTooLargeError as pe:
+                    if pending_remote_work is not None:
+                        self.remote_work.work_store.save(
+                            pending_remote_work.transition(WorkStatus.FAILED)
+                        )
                     emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": str(pe)})
                     return OutgoingMessage(
                         text=f"❌ Approval payload too large: {pe}",
@@ -481,6 +648,10 @@ class BrainFrogRuntime:
                         error=str(pe),
                     )
                 except (ValueError, PermissionError):
+                    if pending_remote_work is not None:
+                        self.remote_work.work_store.save(
+                            pending_remote_work.transition(WorkStatus.FAILED)
+                        )
                     return OutgoingMessage(
                         text="Approval policy rejected invalid targets, parameters, or credential material.",
                         events=events, success=False, status="rejected",
@@ -490,6 +661,19 @@ class BrainFrogRuntime:
                     "operation": canonical_op.to_canonical_dict(),
                 })
                 prompt_text = self.approval_service.format_approval_prompt(app_req)
+                remote_result = None
+                if pending_remote_work is not None and pending_remote_plan is not None:
+                    self.remote_work.bind_approval(pending_remote_work.id, app_req.request_id)
+                    remote_result = RemoteWorkResult(
+                        request_id=normalized_request.request_id,
+                        work_id=pending_remote_work.id,
+                        plan_id=pending_remote_plan.id,
+                        status="approval_required",
+                        message=f"Work {pending_remote_work.id} is ready for approval.",
+                        approval_required=True,
+                        approval_request_id=app_req.request_id,
+                    )
+                    prompt_text = f"{remote_result.message}\n\n{prompt_text}"
                 return OutgoingMessage(
                     text=prompt_text,
                     events=events,
@@ -498,6 +682,7 @@ class BrainFrogRuntime:
                     metadata={
                         "request_id": app_req.request_id,
                         "operation_digest": app_req.operation_digest,
+                        **({"remote_work": remote_result.to_dict()} if remote_result else {}),
                     },
                 )
 
@@ -565,6 +750,8 @@ class BrainFrogRuntime:
         domains = {} if execution_contract else load_module_map(workspace_dir, task=raw_text, auto_create=can_auto_create)
 
         effective_task = raw_text
+        if remote_context is not None:
+            effective_task = remote_context.request.intent
         if not approved_execution and session.history:
             history_lines = []
             for turn in session.history[-3:]:
@@ -601,6 +788,10 @@ class BrainFrogRuntime:
             actor=message.user_id,
             session_id=session.session_id,
             session_incarnation_id=session.session_incarnation_id,
+            work_id=remote_context.work_id if remote_context else message.metadata.get("work_id"),
+            plan_id=remote_context.plan_id if remote_context else message.metadata.get("plan_id"),
+            transaction_store=self.transaction_store,
+            transaction_verifier=self.transaction_verifier,
         )
 
         def log_runtime(msg: str) -> None:
@@ -622,9 +813,22 @@ class BrainFrogRuntime:
             results: List[StepResult] = orchestrator.run()
         except Exception as e:
             err_msg = f"Orchestration Error: {e}"
+            remote_result = None
+            if remote_context is not None:
+                self.remote_work.transition_for_approval(str(approval_id), WorkStatus.FAILED)
+                txs = self.transaction_store.list(session_id=session.session_id, limit=20)
+                matching = next((tx for tx in txs if tx.work_id == remote_context.work_id), None)
+                if matching:
+                    self.remote_work.bind_transaction(str(approval_id), matching.id)
+                remote_result = self.remote_work.result(
+                    str(approval_id), "failed",
+                    f"Orchestration Error: Work {remote_context.work_id} failed "
+                    f"and was rolled back. {scrub_secrets(str(e))}",
+                    error_code="execution_failed",
+                )
             emit("agent.error", {"error": err_msg})
             return OutgoingMessage(
-                text=f"❌ {err_msg}",
+                text=(remote_result.message if remote_result else f"❌ {err_msg}"),
                 events=events,
                 success=False,
                 status="error",
@@ -632,10 +836,30 @@ class BrainFrogRuntime:
                 metadata={
                     "session_id": session.session_id,
                     "mode": effective_mode,
+                    **({"remote_work": remote_result.to_dict()} if remote_result else {}),
                 },
             )
 
         emit("agent.completed", {"steps_count": len(results)})
+
+        remote_result = None
+        if remote_context is not None:
+            tx_res = cfg.last_transaction_result
+            if tx_res is None or not tx_res.success:
+                self.remote_work.transition_for_approval(str(approval_id), WorkStatus.FAILED)
+                remote_result = self.remote_work.result(
+                    str(approval_id), "failed",
+                    f"Work {remote_context.work_id} failed and was rolled back.",
+                    error_code="verification_failed",
+                )
+            else:
+                self.remote_work.bind_transaction(str(approval_id), tx_res.transaction_id)
+                self.remote_work.transition_for_approval(str(approval_id), WorkStatus.VERIFYING)
+                self.remote_work.transition_for_approval(str(approval_id), WorkStatus.DONE)
+                remote_result = self.remote_work.result(
+                    str(approval_id), "completed",
+                    f"Work {remote_context.work_id} completed successfully.",
+                )
 
         # 7. Format Outgoing Response Text
         reply_texts: List[str] = []
@@ -659,6 +883,9 @@ class BrainFrogRuntime:
                 reply_texts.append(r.detail)
 
         final_text = scrub_secrets("\n\n".join(reply_texts).strip() or "Task completed.")
+        if remote_result is not None:
+            final_text = remote_result.message
+            is_success = remote_result.status == "completed"
 
         # Check if session was reset while request was in-flight (F02 Guard)
         if session.session_incarnation_id != initial_incarnation:
@@ -705,16 +932,25 @@ class BrainFrogRuntime:
                 },
             )
 
+        out_meta: Dict[str, Any] = {
+            "session_id": session.session_id,
+            "mode": effective_mode,
+            "steps_count": len(results),
+        }
+        if cfg.last_transaction_result:
+            tx_res = cfg.last_transaction_result
+            out_meta["transaction_id"] = tx_res.transaction_id
+            out_meta["transaction_status"] = tx_res.status.value
+            out_meta["transaction_success"] = tx_res.success
+        if remote_result is not None:
+            out_meta["remote_work"] = remote_result.to_dict()
+
         return OutgoingMessage(
             text=final_text,
             events=events,
             success=is_success,
             status="completed" if is_success else "error",
-            metadata={
-                "session_id": session.session_id,
-                "mode": effective_mode,
-                "steps_count": len(results),
-            },
+            metadata=out_meta,
         )
 
     # Backward compatibility and usability alias

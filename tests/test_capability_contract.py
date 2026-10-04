@@ -255,7 +255,7 @@ class CapabilityContractTests(unittest.TestCase):
              patch("orchestrator.load_project_guidelines", side_effect=AssertionError("Unscoped read")):
             engine = Orchestrator(MockSystem1(), MockSystem2({"src/auth.py": "bounded"}), config)
             result = engine.run()
-        self.assertEqual(result[0].outcome, "unverified")
+        self.assertEqual(result[0].outcome, "verified")
         self.assertEqual((self.root / "src/auth.py").read_text(), "bounded")
 
     def test_missing_network_stops_before_provider(self):
@@ -340,7 +340,7 @@ class CapabilityContractTests(unittest.TestCase):
         )
         engine = Orchestrator(MockSystem1(), MockSystem2({"src/auth.py": "updated"}), config)
         results = engine.run()
-        self.assertEqual(results[0].outcome, "unverified")
+        self.assertEqual(results[0].outcome, "verified")
         self.assertEqual((self.root / "src/auth.py").read_text(), "updated")
 
     def test_runtime_approved_execution_with_explicit_identity_e2e(self):
