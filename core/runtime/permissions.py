@@ -73,7 +73,7 @@ class PermissionPolicy:
     allow_auto_pr: bool = False
 
     def is_allowed(self, action: str | PermissionAction) -> bool:
-        act = action.value if isinstance(action, PermissionAction) else str(action)
+        act = action.value if isinstance(action, PermissionAction) else action
         canon = CANONICAL_ACTION_MAP.get(act, act)
 
         if self.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value:
@@ -257,7 +257,7 @@ def evaluate_channel_action(
     Returns:
         (is_allowed: bool, reason_or_status: str)
     """
-    act = action.value if isinstance(action, PermissionAction) else str(action)
+    act = action.value if isinstance(action, PermissionAction) else action
     canon = CANONICAL_ACTION_MAP.get(act, act)
     pol = policy or get_default_policy(channel)
 
