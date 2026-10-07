@@ -11,18 +11,20 @@ from core.memory import (
     is_generic_suggestion,
 )
 from orchestrator import Orchestrator, PlanStep, RunConfig, StepResult
+from typing import Any, Dict, cast
+from system1.base import Answer, SystemOneClient
 
 
-class MockS1:
+class MockS1(SystemOneClient):
     name = "mock_jev"
 
-    def decide(self, state, questions):
-        mock_ans = MagicMock()
+    def decide(self, state: Dict[str, Any], questions: Dict[str, Any]) -> Dict[str, Answer]:
+        mock_ans = MagicMock(spec=Answer)
         mock_ans.choice = "core"
         mock_ans.confidence = 0.95
         mock_ans.noul = 0.95
         mock_ans.score = 0
-        return {k: mock_ans for k in questions}
+        return {k: cast(Answer, mock_ans) for k in questions}
 
 
 class MockS2:

@@ -104,7 +104,7 @@ def capture_screenshot(
     if isinstance(target, Path) or (isinstance(target, str) and not target.startswith(("http://", "https://", "file://"))):
         target_url = Path(target).resolve().as_uri()
     else:
-        target_url = str(target)
+        target_url = target
 
     user_data_dir = tempfile.mkdtemp(prefix="bf_browser_")
     cmd = [
