@@ -51,7 +51,7 @@ _LOCK_EX = getattr(fcntl, "LOCK_EX", 2)
 _LOCK_NB = getattr(fcntl, "LOCK_NB", 4)
 _LOCK_UN = getattr(fcntl, "LOCK_UN", 8)
 
-from core.runtime.session import scrub_secrets
+from core.runtime.secret_scrubbing import scrub_secrets
 from core.runtime.capabilities import Capabilities
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,19 @@ class RiskClass(str, Enum):
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
+
+
+@dataclass(frozen=True)
+class ApprovalTransitionContext:
+    """Authenticated server-side identity used for an approval transition."""
+
+    actor_id: str
+    channel: str
+    session_id: Optional[str] = None
+    session_incarnation_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    canonical_session_incarnation_id: Optional[str] = None
+    authoritative_actor_incarnation_id: Optional[str] = None
 
 
 @dataclass
@@ -1254,50 +1267,19 @@ class ApprovalService:
         approver_id: str,
         channel: str,
         session_id: Optional[str] = None,
+        session_incarnation_id: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
         """Transition a request from PENDING -> APPROVED with two-man rule validation."""
-        lock_ctx = (
-            self.store._get_request_lock(request_id)
-            if hasattr(self.store, "_get_request_lock")
-            else nullcontext()
+        return self.transition(
+            request_id,
+            "approve",
+            ApprovalTransitionContext(
+                actor_id=approver_id,
+                channel=channel,
+                session_id=session_id,
+                session_incarnation_id=session_incarnation_id,
+            ),
         )
-        with lock_ctx:
-            req = self.store.get(request_id)
-            if req is None:
-                return False, f"Approval request '{request_id}' not found.", None
-
-            if req.is_expired():
-                req.status = ApprovalStatus.EXPIRED
-                self.store.save(req)
-                return False, f"Approval request '{request_id}' has expired.", req
-
-            if req.status != ApprovalStatus.PENDING:
-                return False, f"Cannot approve request '{request_id}' with status {req.status.value}.", req
-
-            if not req.integrity_valid():
-                return False, "Approval integrity mismatch or legacy authorization.", req
-
-            # Channel verification
-            if channel.lower().strip() != req.channel.lower():
-                return False, f"Channel mismatch: request belongs to '{req.channel}', cannot approve from '{channel}'.", req
-
-            # Session verification (if enforced)
-            if session_id and session_id != req.session_id:
-                return False, f"Session mismatch: request belongs to session '{req.session_id}'.", req
-
-            # Two-man rule enforcement
-            clean_approver = approver_id.strip()
-            if not clean_approver:
-                return False, "Approver identity is required.", req
-            if self.two_man_rule_enabled and clean_approver == req.user_id:
-                return False, "Two-man rule violation: Requester cannot approve their own request.", req
-
-            req.status = ApprovalStatus.APPROVED
-            req.approver_id = clean_approver
-            req.approved_at = time.time()
-            req.approval_digest = req.compute_approval_digest()
-            self.store.save(req)
-            return True, f"Request '{request_id}' has been approved by user '{clean_approver}'.", req
 
     def reject(
         self,
@@ -1305,34 +1287,53 @@ class ApprovalService:
         approver_id: str,
         channel: str,
         reason: str = "Rejected by human operator",
+        session_id: Optional[str] = None,
+        session_incarnation_id: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
         """Transition a request from PENDING -> REJECTED."""
-        lock_ctx = (
-            self.store._get_request_lock(request_id)
-            if hasattr(self.store, "_get_request_lock")
-            else nullcontext()
+        return self.transition(
+            request_id,
+            "reject",
+            ApprovalTransitionContext(
+                actor_id=approver_id,
+                channel=channel,
+                session_id=session_id,
+                session_incarnation_id=session_incarnation_id,
+            ),
+            reason=reason,
         )
-        with lock_ctx:
-            req = self.store.get(request_id)
-            if req is None:
-                return False, f"Approval request '{request_id}' not found.", None
-
-            if req.status != ApprovalStatus.PENDING:
-                return False, f"Cannot reject request '{request_id}' with status {req.status.value}.", req
-
-            clean_approver = approver_id.strip()
-            req.status = ApprovalStatus.REJECTED
-            req.approver_id = clean_approver
-            req.rejection_reason = reason
-            self.store.save(req)
-            return True, f"Request '{request_id}' has been rejected by user '{clean_approver}'.", req
 
     def cancel(
         self,
         request_id: str,
         requester_id: str,
+        channel: Optional[str] = None,
+        session_id: Optional[str] = None,
+        session_incarnation_id: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
         """Allow the original requester to cancel their own pending request."""
+        return self.transition(
+            request_id,
+            "cancel",
+            ApprovalTransitionContext(
+                actor_id=requester_id,
+                channel=channel or "",
+                session_id=session_id,
+                session_incarnation_id=session_incarnation_id,
+            ),
+        )
+
+    def transition(
+        self,
+        request_id: str,
+        action: str,
+        context: ApprovalTransitionContext,
+        *,
+        reason: str = "Rejected by human operator",
+    ) -> Tuple[bool, str, Optional[ApprovalRequest]]:
+        """Apply one canonical, atomic transition after server-side binding checks."""
+        if action not in {"approve", "reject", "cancel"}:
+            return False, "Unknown approval action.", None
         lock_ctx = (
             self.store._get_request_lock(request_id)
             if hasattr(self.store, "_get_request_lock")
@@ -1343,15 +1344,75 @@ class ApprovalService:
             if req is None:
                 return False, f"Approval request '{request_id}' not found.", None
 
+            if not req.integrity_valid():
+                return False, "Approval integrity mismatch or legacy authorization.", req
+
+            # Terminal states are monotonic. A late callback must not rewrite an
+            # auditable terminal outcome merely because its TTL has elapsed.
+            if req.status in TERMINAL_APPROVAL_STATUSES:
+                return False, f"Cannot {action} request '{request_id}' with status {req.status.value}.", req
+
+            if req.is_expired():
+                req.status = ApprovalStatus.EXPIRED
+                self.store.save(req)
+                return False, f"Approval request '{request_id}' has expired.", req
+
             if req.status != ApprovalStatus.PENDING:
-                return False, f"Cannot cancel request '{request_id}' with status {req.status.value}.", req
+                return False, f"Cannot {action} request '{request_id}' with status {req.status.value}.", req
 
-            if requester_id.strip() != req.user_id:
-                return False, "Only the original requester can cancel a pending request.", req
+            channel = context.channel.lower().strip()
+            if channel and channel != req.channel.lower():
+                return False, f"Channel mismatch: request belongs to '{req.channel}', cannot {action} from '{context.channel}'.", req
 
-            req.status = ApprovalStatus.CANCELLED
+            clean_actor = context.actor_id.strip()
+            if not clean_actor:
+                return False, "Actor identity is required.", req
+
+            # The requester's private conversation identifies the request origin,
+            # not the approval audience. A distinct approver is authorized by the
+            # channel's existing authentication/allowlist gate and may therefore
+            # approve from a separate private conversation on the same channel.
+            # Requester-owned actions remain bound to the exact original session.
+            if clean_actor == req.user_id:
+                if context.conversation_id is not None and context.conversation_id != req.conversation_id:
+                    return False, "Conversation binding mismatch.", req
+                if context.session_id and context.session_id != req.session_id:
+                    return False, f"Session mismatch: request belongs to session '{req.session_id}'.", req
+
+            canonical_incarnation = context.canonical_session_incarnation_id
+            if canonical_incarnation is not None and canonical_incarnation != req.session_incarnation_id:
+                return False, "Session incarnation mismatch: stale approval rejected.", req
+            if (context.session_incarnation_id is not None
+                    and context.actor_id.strip() == req.user_id
+                    and context.session_incarnation_id != req.session_incarnation_id):
+                return False, "Session incarnation mismatch: stale approval rejected.", req
+            if (context.session_incarnation_id is not None
+                    and context.authoritative_actor_incarnation_id is not None
+                    and context.session_incarnation_id != context.authoritative_actor_incarnation_id):
+                return False, "Approver session incarnation mismatch: stale approval rejected.", req
+
+            if action == "cancel":
+                if clean_actor != req.user_id:
+                    return False, "Only the original requester can cancel a pending request.", req
+                req.status = ApprovalStatus.CANCELLED
+                self.store.save(req)
+                return True, f"Request '{request_id}' has been cancelled.", req
+
+            if action == "approve":
+                if self.two_man_rule_enabled and clean_actor == req.user_id:
+                    return False, "Two-man rule violation: Requester cannot approve their own request.", req
+                req.status = ApprovalStatus.APPROVED
+                req.approver_id = clean_actor
+                req.approved_at = time.time()
+                req.approval_digest = req.compute_approval_digest()
+                self.store.save(req)
+                return True, f"Request '{request_id}' has been approved by user '{clean_actor}'.", req
+
+            req.status = ApprovalStatus.REJECTED
+            req.approver_id = clean_actor
+            req.rejection_reason = reason
             self.store.save(req)
-            return True, f"Request '{request_id}' has been cancelled.", req
+            return True, f"Request '{request_id}' has been rejected by user '{clean_actor}'.", req
 
     def invalidate_session_approvals(
         self,

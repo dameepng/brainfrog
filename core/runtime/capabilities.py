@@ -28,6 +28,7 @@ def scope_path(value: str, repo_dir: Optional[Path] = None) -> str:
     return normalized
 
 
+@dataclass(frozen=True)
 class Policy:
     def __post_init__(self):
         for item in fields(self):
@@ -109,8 +110,12 @@ class Capabilities:
     def from_dict(cls, data):
         if type(data) is not dict or set(data) - set(cls._types()):
             raise ValueError("Unknown or malformed capabilities")
-        return cls(**{name: policy.from_dict(data.get(name, {}))
-                      for name, policy in cls._types().items()})
+        return cls(
+            filesystem=FilesystemPolicy.from_dict(data.get("filesystem", {})),
+            shell=ShellPolicy.from_dict(data.get("shell", {})),
+            network=NetworkPolicy.from_dict(data.get("network", {})),
+            git=GitPolicy.from_dict(data.get("git", {})),
+        )
 
     def require(self, name: str, target: Optional[str] = None,
                 repo_dir: Optional[Path] = None) -> None:
@@ -122,6 +127,8 @@ class Capabilities:
             raise PermissionError("Unknown capability")
         grant = getattr(policy, action)
         if group == "filesystem":
+            if target is None:
+                raise PermissionError("Filesystem capability requires a target path")
             try:
                 normalized = scope_path(target, repo_dir)
             except ValueError as exc:
@@ -137,3 +144,12 @@ class Capabilities:
         # Subprocesses can escape file scopes; Git hooks can run arbitrary code.
         if self.shell.execute or self.git.read or self.git.commit or self.git.push:
             raise PermissionError("Shell and Git contract execution are not supported in Phase 15A")
+
+
+def attenuate_capabilities(
+    parent_capabilities: Capabilities,
+    requested_capabilities: Optional[Capabilities] = None,
+) -> Capabilities:
+    """Deterministically attenuate child Capabilities from parent Capabilities."""
+    from core.runtime.delegation import attenuate_capabilities as _attenuate
+    return _attenuate(parent_capabilities, requested_capabilities)

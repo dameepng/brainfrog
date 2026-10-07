@@ -242,7 +242,7 @@ def operation_targets(op):
 
 
 def reject_secrets(value):
-    from core.runtime.session import scrub_secrets
+    from core.runtime.secret_scrubbing import scrub_secrets
     if isinstance(value, dict):
         for key, item in value.items():
             if (re.search(r"password|secret|credential|api[_-]?key|token", key, re.I)

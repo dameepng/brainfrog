@@ -104,12 +104,22 @@ class RemoteWorkCoordinator:
         )
 
     def submit(self, request: RemoteWorkRequest, capabilities: Capabilities) -> Tuple[Work, Plan]:
-        work = Work(intent=request.intent, goal=request.intent, scope=request.targets,
-                    capabilities=capabilities)
+        work = Work(
+            intent=request.intent,
+            goal=request.intent,
+            scope=request.targets,
+            capabilities=capabilities,
+            actor_id=request.actor,
+            channel=request.channel,
+            session_id=request.session_id,
+            session_incarnation_id=request.session_incarnation_id,
+        )
         self.work_store.create(work)
         work = self.work_store.save(work.transition(WorkStatus.PLANNING))
         plan = self.planner.create_plan(work)
-        work = self.work_store.save(apply_plan_to_work(work, plan))
+        work = self.work_store.save(
+            apply_plan_to_work(work, plan).with_update(plan_id=plan.id)
+        )
         self._contexts[work.id] = RemoteWorkContext(request, work.id, plan.id)
         return work, plan
 
@@ -119,6 +129,13 @@ class RemoteWorkCoordinator:
                                     approval_request_id, context.transaction_id)
         self._contexts[work_id] = context
         self._approval_index[approval_request_id] = work_id
+        # Persist approval reference on Work
+        work = self.work_store.get(work_id)
+        if work and not work.is_terminal:
+            try:
+                self.work_store.save(work.with_update(approval_request_id=approval_request_id))
+            except Exception:
+                pass
         return context
 
     def context_for_approval(self, approval_request_id: str) -> Optional[RemoteWorkContext]:
@@ -143,6 +160,13 @@ class RemoteWorkCoordinator:
             context.request, context.work_id, context.plan_id,
             context.approval_request_id, transaction_id,
         )
+        # Persist transaction reference on Work
+        work = self.work_store.get(context.work_id)
+        if work and not work.is_terminal:
+            try:
+                self.work_store.save(work.with_update(transaction_id=transaction_id))
+            except Exception:
+                pass
 
     def result(self, approval_request_id: str, status: str, message: str,
                *, error_code: Optional[str] = None) -> Optional[RemoteWorkResult]:

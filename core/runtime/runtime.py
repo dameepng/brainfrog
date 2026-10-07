@@ -53,7 +53,7 @@ from .transaction import (
     TransactionStore,
     TransactionVerifier,
 )
-from .remote_work import RemoteWorkCoordinator, RemoteWorkResult
+from .remote_work import RemoteWorkCoordinator, RemoteWorkRequest, RemoteWorkResult
 from .planning import Planner
 from .work import WorkStatus, WorkStore
 
@@ -401,7 +401,9 @@ class BrainFrogRuntime:
                     f"• Operations: {len(tx.operations)}",
                 ]
                 for op in tx.operations:
-                    lines.append(f"  - `{op.operation_type.value}`: `{op.path}` [{op.status.value}]")
+                    op_type = getattr(op.operation_type, "value", str(op.operation_type))
+                    op_stat = getattr(op.status, "value", str(op.status))
+                    lines.append(f"  - `{op_type}`: `{op.path}` [{op_stat}]")
                 if tx.error:
                     lines.append(f"• Error: `{tx.error}`")
                 if tx.rollback_error:
@@ -586,6 +588,7 @@ class BrainFrogRuntime:
                 capabilities = self._approval_capabilities(canonical_op)
                 pending_remote_work = None
                 pending_remote_plan = None
+                normalized_request: Optional[RemoteWorkRequest] = None
                 if (
                     policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value
                     and effective_channel in ("telegram", "whatsapp")
@@ -593,14 +596,15 @@ class BrainFrogRuntime:
                 ):
                     targets = tuple(sorted(operation_targets(canonical_op.to_canonical_dict())))
                     try:
-                        normalized_request = self.remote_work.normalize(
+                        norm = self.remote_work.normalize(
                             message_id=message.id, actor=message.user_id,
                             channel=effective_channel, session_id=session.session_id,
                             session_incarnation_id=session.session_incarnation_id,
                             intent=raw_text, workspace=self.repo_dir, targets=targets,
                         )
+                        normalized_request = norm
                         pending_remote_work, pending_remote_plan = self.remote_work.submit(
-                            normalized_request, capabilities
+                            norm, capabilities
                         )
                     except (ValueError, PermissionError) as exc:
                         return OutgoingMessage(
@@ -664,8 +668,9 @@ class BrainFrogRuntime:
                 remote_result = None
                 if pending_remote_work is not None and pending_remote_plan is not None:
                     self.remote_work.bind_approval(pending_remote_work.id, app_req.request_id)
+                    req_id = normalized_request.request_id if normalized_request is not None else app_req.request_id
                     remote_result = RemoteWorkResult(
-                        request_id=normalized_request.request_id,
+                        request_id=req_id,
                         work_id=pending_remote_work.id,
                         plan_id=pending_remote_plan.id,
                         status="approval_required",
