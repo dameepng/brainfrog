@@ -20,3 +20,11 @@ env/
 # Scratch & test sandbox
 sandbox_repo/
 scratch/
+
+# BrainFrog local runtime state
+.brainfrog/approvals/
+.brainfrog/sessions/
+.brainfrog/scratch/
+
+# Test caches
+.pytest_cache/
