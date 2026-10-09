@@ -26,9 +26,9 @@ def authorize_work_inspection(
     clean_actor = actor_id.strip()
     clean_channel = channel.strip().lower()
 
-    # If work has an owner, only the owner can inspect it
+    # If work has an owner, only the owner can inspect it (CLI is exempt for local administration)
     if work.actor_id and work.actor_id.strip():
-        if clean_actor != work.actor_id.strip():
+        if clean_actor != work.actor_id.strip() and clean_channel != "cli":
             return False, f"Work '{work.id}' not found or access denied."
 
     # If work is bound to a specific channel, verify channel compatibility

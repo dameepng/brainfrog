@@ -274,6 +274,7 @@ class Transaction:
     """
 
     id: str = field(default_factory=lambda: f"tx_{secrets.token_hex(16)}")
+    task_id: Optional[str] = None
     work_id: Optional[str] = None
     plan_id: Optional[str] = None
     contract_id: Optional[str] = None
@@ -377,6 +378,7 @@ class Transaction:
         """Serialize transaction to JSON-safe dictionary with secret scrubbing."""
         data: Dict[str, Any] = {
             "id": self.id,
+            "task_id": self.task_id,
             "work_id": self.work_id,
             "plan_id": self.plan_id,
             "contract_id": self.contract_id,
@@ -405,6 +407,7 @@ class Transaction:
         operations = [TransactionOperation.from_dict(o) for o in raw_ops]
         return cls(
             id=data["id"],
+            task_id=data.get("task_id"),
             work_id=data.get("work_id"),
             plan_id=data.get("plan_id"),
             contract_id=data.get("contract_id"),
@@ -458,6 +461,11 @@ class TransactionResult:
     @property
     def success(self) -> bool:
         return self.committed
+
+    @property
+    def is_recovery_required(self) -> bool:
+        """Indicates whether manual or automated recovery is required due to incomplete/failed rollback."""
+        return bool(self.rollback_error) or (not self.committed and not self.rolled_back)
 
 
 # =============================================================================
@@ -727,6 +735,7 @@ class TransactionCoordinator:
         tx_id: Optional[str] = None,
         store: Optional[TransactionStore] = None,
         verifier: Optional[TransactionVerifier] = None,
+        task_id: Optional[str] = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.contract = contract
@@ -735,6 +744,7 @@ class TransactionCoordinator:
 
         self.tx = Transaction(
             id=tx_id or f"tx_{secrets.token_hex(16)}",
+            task_id=task_id,
             work_id=work_id,
             plan_id=plan_id,
             contract_id=getattr(contract, "request_id", None) if contract else None,
@@ -1114,20 +1124,65 @@ class TransactionCoordinator:
         return self.commit()
 
     def _rollback_operation(self, op: TransactionOperation) -> bool:
-        """Roll back a single executed operation."""
+        """Roll back a single executed operation.
+
+        Verifies that files have not been concurrently mutated by an external
+        user or editor. If external modifications are detected, aborts rollback
+        to prevent destroying user work and fails closed.
+        """
         target_path = self.workspace / op.target
         if op.type == OperationType.CREATE_FILE:
-            # Rollback creation: delete created file
+            # Check for external concurrent modification during transaction
             if target_path.exists():
+                after = op.after_state or {}
+                if after.get("is_text", True):
+                    current_disk = target_path.read_text(encoding="utf-8", errors="replace")
+                    expected = after.get("content", "")
+                else:
+                    current_disk = base64.b64encode(target_path.read_bytes()).decode("ascii")
+                    expected = after.get("content_b64", "")
+                if current_disk != expected:
+                    raise RuntimeError(
+                        f"External mutation detected on created file '{op.target}' (content on disk differs from BrainFrog mutation). "
+                        "Rollback aborted to preserve user modifications."
+                    )
                 target_path.unlink()
 
-        elif op.type in (OperationType.MODIFY_FILE, OperationType.DELETE_FILE):
-            # Rollback modify/delete: restore previous content
+        elif op.type == OperationType.MODIFY_FILE:
+            # Check for external concurrent modification during transaction
+            if target_path.exists():
+                after = op.after_state or {}
+                if after.get("is_text", True):
+                    current_disk = target_path.read_text(encoding="utf-8", errors="replace")
+                    expected = after.get("content", "")
+                else:
+                    current_disk = base64.b64encode(target_path.read_bytes()).decode("ascii")
+                    expected = after.get("content_b64", "")
+                if current_disk != expected:
+                    raise RuntimeError(
+                        f"External mutation detected on modified file '{op.target}' (content on disk differs from BrainFrog mutation). "
+                        "Rollback aborted to preserve user modifications."
+                    )
             before = op.before_state or {}
             if not before.get("exists", False):
                 if target_path.exists():
                     target_path.unlink()
             else:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if before.get("is_text", True):
+                    target_path.write_text(before.get("content", ""), encoding="utf-8")
+                else:
+                    raw = base64.b64decode(before.get("content_b64", "").encode("ascii"))
+                    target_path.write_bytes(raw)
+
+        elif op.type == OperationType.DELETE_FILE:
+            if target_path.exists():
+                raise RuntimeError(
+                    f"External mutation detected on deleted file '{op.target}' (file was recreated externally). "
+                    "Rollback aborted to preserve user modifications."
+                )
+            before = op.before_state or {}
+            if before.get("exists", False):
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 if before.get("is_text", True):
                     target_path.write_text(before.get("content", ""), encoding="utf-8")

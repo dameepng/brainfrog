@@ -32,19 +32,46 @@ class TelegramTransport(ABC):
         """Send a message chunk to the specified Telegram chat ID."""
         raise NotImplementedError
 
+    def send_with_options(
+        self, chat_id: str, text: str, *, reply_markup: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Optional richer delivery; legacy transports remain compatible."""
+        return self.send(chat_id, text)
+
+    def answer_callback(self, callback_query_id: str, text: str = "") -> bool:
+        return True
+
 
 class MockTelegramTransport(TelegramTransport):
     """Deterministic in-memory transport for testing Telegram message delivery without credentials."""
 
     def __init__(self) -> None:
-        self.sent_messages: List[Dict[str, str]] = []
+        self.sent_messages: List[Dict[str, Any]] = []
+        self.answered_callbacks: List[Dict[str, str]] = []
 
     def send(self, chat_id: str, text: str) -> bool:
         self.sent_messages.append({"chat_id": str(chat_id), "text": text})
         return True
 
+    def send_with_options(
+        self, chat_id: str, text: str, *, reply_markup: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        item: Dict[str, Any] = {"chat_id": str(chat_id), "text": text}
+        if reply_markup is not None:
+            item["reply_markup"] = reply_markup
+        self.sent_messages.append(item)
+        return True
+
+    def answer_callback(self, callback_query_id: str, text: str = "") -> bool:
+        self.answered_callbacks.append({
+            "callback_query_id": str(callback_query_id),
+            "text": text,
+        })
+        return True
+
     def clear(self) -> None:
         self.sent_messages.clear()
+        self.answered_callbacks.clear()
 
 
 class TelegramChannel(BaseChannel):
@@ -120,6 +147,9 @@ class TelegramChannel(BaseChannel):
     def process_update(self, update: Dict[str, Any]) -> Optional[OutgoingMessage]:
         """Process a single Telegram update dict and return the response."""
         update_id = update.get("update_id", 0)
+        callback_query = update.get("callback_query")
+        if callback_query:
+            return self._process_callback(update_id, callback_query)
         message = update.get("message") or update.get("edited_message")
         if not message:
             return None
@@ -173,20 +203,80 @@ class TelegramChannel(BaseChannel):
 
         # 5. Deliver Response back to Telegram
         if out and out.text:
-            self._send_text(chat_id, out.text)
+            self._send_text(
+                chat_id, out.text,
+                reply_markup=out.metadata.get("telegram_reply_markup"),
+            )
 
         return out
 
-    def _send_text(self, chat_id: str, text: str) -> bool:
+    def _process_callback(
+        self, update_id: object, callback_query: Dict[str, Any]
+    ) -> Optional[OutgoingMessage]:
+        from_user = callback_query.get("from", {})
+        callback_message = callback_query.get("message", {})
+        chat = callback_message.get("chat", {})
+        chat_id = str(chat.get("id", ""))
+        user_id = str(from_user.get("id", ""))
+        callback_id = str(callback_query.get("id", ""))
+
+        if not chat_id or not callback_id or not self.is_allowed_user(from_user):
+            if chat_id:
+                self._send_text(chat_id, "Unauthorized approval callback.")
+            return OutgoingMessage(
+                text="Unauthorized", success=False, status="rejected",
+                error="User not allowlisted",
+            )
+        if not self._check_rate_limit(user_id):
+            return OutgoingMessage(
+                text="Rate limited", success=False, status="rejected",
+                error="Rate limit exceeded",
+            )
+        if not self._handler:
+            return OutgoingMessage(
+                text="BrainFrog Runtime handler not attached.", success=False,
+                status="rejected", error="Runtime handler not attached",
+            )
+
+        incoming = IncomingMessage(
+            id=f"tg-callback-{update_id}", channel="telegram", user_id=user_id,
+            conversation_id=chat_id, text="", metadata={
+                "telegram_callback_data": callback_query.get("data"),
+                "chat_type": chat.get("type", "private"),
+                "username": from_user.get("username"),
+                "first_name": from_user.get("first_name"),
+            },
+        )
+        out = self._handler(incoming)
+        if self.transport:
+            self.transport.answer_callback(callback_id, out.text[:160] if out else "")
+        elif self.bot_token:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery",
+                    json={"callback_query_id": callback_id}, timeout=10,
+                )
+            except Exception:
+                pass
+        if out and out.text:
+            self._send_text(chat_id, out.text)
+        return out
+
+    def _send_text(
+        self, chat_id: str, text: str, *, reply_markup: Optional[Dict[str, Any]] = None
+    ) -> bool:
         if not self.bot_token and not self.transport:
             return False
 
         chunks = [text[i : i + TELEGRAM_MAX_MSG_LEN] for i in range(0, len(text), TELEGRAM_MAX_MSG_LEN)]
         all_ok = True
 
-        for chunk in chunks:
+        for index, chunk in enumerate(chunks):
+            chunk_markup = reply_markup if index == len(chunks) - 1 else None
             if self.transport:
-                ok = self.transport.send(chat_id, chunk)
+                ok = self.transport.send_with_options(
+                    chat_id, chunk, reply_markup=chunk_markup
+                )
                 all_ok = all_ok and ok
                 continue
 
@@ -196,6 +286,8 @@ class TelegramChannel(BaseChannel):
                 "text": chunk,
                 "parse_mode": "Markdown",
             }
+            if chunk_markup is not None:
+                payload["reply_markup"] = chunk_markup
             try:
                 res = requests.post(url, json=payload, timeout=10)
                 if not res.ok:
@@ -272,4 +364,3 @@ class TelegramChannel(BaseChannel):
         self._is_running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-

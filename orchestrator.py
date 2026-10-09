@@ -15,7 +15,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 # Ensure the package root (directory of this file) is always on sys.path so
 # that `skills.py` and other sibling modules are importable regardless of the
@@ -33,6 +33,12 @@ from security.git_guard import (  # pyright: ignore[reportMissingImports]
     scan_staged_changes,
     scan_dict_files,
     unstage_staged_changes,
+)
+from core.runtime.process import HardenedProcessResult, run_hardened_subprocess
+from core.runtime.transaction import (
+    TransactionCoordinator,
+    TransactionResult,
+    TransactionStatus,
 )
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -52,7 +58,7 @@ class StepResult:
 class RunConfig:
     repo_dir: Path
     task: str
-    test_command: List[str]
+    test_command: List[str] = field(default_factory=list)
     max_retries: int = 3
     auto_pr: bool = False
     pr_risk_ceiling: str = "medium"  # open PR automatically only up to this risk
@@ -71,9 +77,12 @@ class RunConfig:
     session_incarnation_id: Optional[str] = None
     work_id: Optional[str] = None
     plan_id: Optional[str] = None
+    task_id: Optional[str] = None
     transaction_store: Optional[Any] = None
     transaction_verifier: Optional[Any] = None
     last_transaction_result: Optional[Any] = None
+    last_test_result: Optional[Any] = None
+    allowed_scope: Optional[Sequence[str]] = None
 
 
 @dataclass
@@ -82,6 +91,17 @@ class ScopeDecision:
     change_type: str
     focus_tree: str
     clarify_message: Optional[str] = None
+
+
+def _safe_noul(ans: Any, default: float = 0.0) -> float:
+    """Safely extract numeric noul value from System 1 answer, failing closed to default."""
+    if ans is None:
+        return default
+    val = getattr(ans, "noul", None)
+    if isinstance(val, (int, float)):
+        return float(val)
+    return default
+
 
 
 def get_guideline_files(repo_dir: Path) -> List[Path]:
@@ -193,17 +213,13 @@ def sanitize_surrogates(text: str) -> str:
     return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
-def _run(cmd: List[str], cwd: Path) -> subprocess.CompletedProcess:
-    use_shell = sys.platform == "win32"
-    return subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        shell=use_shell,
-        encoding="utf-8",
-        errors="replace",
-    )
+def _run(
+    cmd: Union[List[str], Sequence[str], str],
+    cwd: Path,
+    timeout: Optional[float] = None,
+) -> HardenedProcessResult:
+    effective_timeout = float(timeout) if timeout is not None else 120.0
+    return run_hardened_subprocess(cmd, cwd=cwd, timeout=effective_timeout)
 
 
 def clean_git_remote_url(raw: str) -> str:
@@ -355,12 +371,62 @@ def _normalize_rel_path(repo_dir: Path, rel: str) -> str:
     return clean
 
 
+def validate_workspace_read_path(repo_dir: Path, raw_path: str) -> Path:
+    """Validate that a requested file path resolves strictly within the repository root.
+
+    Raises PermissionError if path attempts traversal, escapes workspace,
+    or resolves via symlink outside the workspace.
+    Fails closed and never leaks external file paths in exception details.
+    """
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise PermissionError("Path validation denied: path is empty or not a string.")
+    if "\x00" in raw_path:
+        raise PermissionError("Path validation denied: null byte detected in path.")
+
+    repo_res = repo_dir.resolve()
+    clean = raw_path.replace("\\", "/").strip()
+
+    # 1. Absolute drive/POSIX path check
+    if re.match(r"^[a-zA-Z]:", clean) or clean.startswith("/"):
+        cand = Path(clean).resolve()
+        if not cand.is_relative_to(repo_res):
+            raise PermissionError("Path traversal denied: absolute path escapes workspace boundary.")
+        target_path = cand
+    else:
+        norm_rel = _normalize_rel_path(repo_dir, clean)
+        target_path = (repo_res / norm_rel).resolve()
+
+    # 2. Workspace containment check
+    if not target_path.is_relative_to(repo_res):
+        raise PermissionError("Path traversal denied: path escapes workspace root boundary.")
+
+    if target_path == repo_res:
+        raise PermissionError("Path validation denied: path points to repository root, not a file.")
+
+    # 3. Check for external symlink escape on target
+    if target_path.is_symlink():
+        resolved_sym = target_path.resolve()
+        if not resolved_sym.is_relative_to(repo_res):
+            raise PermissionError("Symlink traversal denied: symlink resolves outside workspace boundary.")
+
+    # 4. Check parent hierarchy for symlinks pointing outside
+    curr = target_path.parent
+    while curr != repo_res and curr != curr.parent:
+        if curr.is_symlink():
+            resolved_parent = curr.resolve()
+            if not resolved_parent.is_relative_to(repo_res):
+                raise PermissionError("Symlink traversal denied: parent directory symlink resolves outside workspace boundary.")
+        curr = curr.parent
+
+    return target_path
+
+
 def _read_files(repo_dir: Path, paths: List[str]) -> Dict[str, str]:
     out = {}
     for rel in paths:
+        target_path = validate_workspace_read_path(repo_dir, rel)
         norm = _normalize_rel_path(repo_dir, rel)
-        f = repo_dir / norm
-        out[norm] = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        out[norm] = target_path.read_text(encoding="utf-8", errors="replace") if target_path.exists() and target_path.is_file() else ""
     return out
 
 
@@ -467,6 +533,7 @@ def _write_files(
     store: Optional[Any] = None,
     session_id: Optional[str] = None,
     verifier: Optional[Any] = None,
+    task_id: Optional[str] = None,
 ) -> Any:
     """Safely write files within an atomic Transaction after validating ALL entries.
 
@@ -491,6 +558,7 @@ def _write_files(
         session_id=session_id,
         store=store,
         verifier=verifier,
+        task_id=task_id,
     )
     coordinator.begin()
     repo_res = repo_dir.resolve()
@@ -838,6 +906,10 @@ class Orchestrator:
             self.cfg.auto_pr = False
 
     def _log(self, msg: str) -> None:
+        from core.runtime.process import _CURRENT_CANCEL_EVENT
+        cancel_ev = _CURRENT_CANCEL_EVENT.get()
+        if cancel_ev and cancel_ev.is_set():
+            raise KeyboardInterrupt("Execution cancelled by cancellation token")
         if self.log_fn:
             try:
                 self.log_fn(msg)
@@ -855,6 +927,10 @@ class Orchestrator:
 
     def _safe_write_files(self, files: Dict[str, str]) -> Any:
         """Safely write files under the active execution contract and path validation rules."""
+        from core.runtime.process import _CURRENT_CANCEL_EVENT
+        cancel_ev = _CURRENT_CANCEL_EVENT.get()
+        if cancel_ev and cancel_ev.is_set():
+            raise KeyboardInterrupt("Execution cancelled by cancellation token")
         res = _write_files(
             repo_dir=self.cfg.repo_dir,
             files=files,
@@ -865,9 +941,58 @@ class Orchestrator:
             store=self.cfg.transaction_store,
             session_id=self.cfg.session_id,
             verifier=self.cfg.transaction_verifier,
+            task_id=self.cfg.task_id,
         )
         self.cfg.last_transaction_result = res
         return res
+
+    def _stage_and_execute_transaction(self, files: Dict[str, str]) -> Any:
+        """Validate and execute filesystem mutations in an open Transaction without committing."""
+        from core.runtime.process import _CURRENT_CANCEL_EVENT
+        cancel_ev = _CURRENT_CANCEL_EVENT.get()
+        if cancel_ev and cancel_ev.is_set():
+            raise KeyboardInterrupt("Execution cancelled by cancellation token")
+        if self.cfg.mode == "plan":
+            raise PermissionError(
+                "Modifikasi berkas source code dilarang dalam mode Plan. Gunakan mode Build untuk melakukan perubahan."
+            )
+        staged = validate_and_stage_files(self.cfg.repo_dir, files, contract=self.cfg.execution_contract)
+        repo_res = self.cfg.repo_dir.resolve()
+        if self.cfg.allowed_scope is not None:
+            allowed_norm = {
+                Path(f).as_posix().lstrip("./") for f in self.cfg.allowed_scope
+            }
+            for cand_path, _ in staged:
+                cand_rel = cand_path.relative_to(repo_res).as_posix()
+                is_allowed = (
+                    cand_rel in allowed_norm
+                    or any(cand_rel.startswith(f"{prefix}/") for prefix in allowed_norm)
+                )
+                if not is_allowed:
+                    raise PermissionError(
+                        f"Scope violation: Mutation to '{cand_rel}' exceeds allowed task scope {sorted(allowed_norm)}. Failing closed."
+                    )
+        from core.runtime.transaction import TransactionCoordinator
+        coordinator = TransactionCoordinator(
+            workspace=self.cfg.repo_dir,
+            contract=self.cfg.execution_contract,
+            work_id=self.cfg.work_id,
+            plan_id=self.cfg.plan_id,
+            session_id=self.cfg.session_id,
+            store=self.cfg.transaction_store,
+            verifier=self.cfg.transaction_verifier,
+            task_id=self.cfg.task_id,
+        )
+        coordinator.begin()
+        for target_path, content in staged:
+            clean_rel = target_path.relative_to(repo_res).as_posix()
+            if target_path.exists():
+                coordinator.stage_modify(clean_rel, content)
+            else:
+                coordinator.stage_create(clean_rel, content)
+        if not coordinator.execute():
+            raise RuntimeError(f"Transaction execution failed: {coordinator.tx.failure_reason}")
+        return coordinator
 
     def _can_push_to_remote(self) -> bool:
         """Deterministic authority boundary check for remote Git push operations.
@@ -939,6 +1064,10 @@ class Orchestrator:
         return res
 
     def run(self) -> List[StepResult]:
+        from core.runtime.process import _CURRENT_CANCEL_EVENT
+        cancel_ev = _CURRENT_CANCEL_EVENT.get()
+        if cancel_ev and cancel_ev.is_set():
+            raise KeyboardInterrupt("Execution cancelled by cancellation token")
         if self.cfg.execution_contract is not None:
             contract = self.cfg.execution_contract
             if not self.cfg.actor or not self.cfg.session_id or not self.cfg.session_incarnation_id:
@@ -1232,6 +1361,9 @@ class Orchestrator:
 
         results: List[StepResult] = []
         for step in steps:
+            cancel_ev = _CURRENT_CANCEL_EVENT.get()
+            if cancel_ev and cancel_ev.is_set():
+                raise KeyboardInterrupt("Execution cancelled by cancellation token")
             result = self._run_step(step, sensitive=bool(scope.domain and scope.domain.sensitive))
             results.append(result)
             if result.outcome in ("escalated", "abandoned"):
@@ -1269,13 +1401,22 @@ class Orchestrator:
 
         # Speculative fan-out: ask all scope questions in a single Jev request.
         # Questions run in parallel; code decides which answers to use.
-        answers = self.s1.decide(state, {
-            "likely_domain": domain_question,
-            "change_type": CHANGE_TYPE_QUESTION,
-            "is_sensitive": SENSITIVE_TOUCH_QUESTION,
-            "complexity": COMPLEXITY_QUESTION,
-            "needs_tests": NEEDS_TESTS_QUESTION,
-        })
+        try:
+            answers = self.s1.decide(state, {
+                "likely_domain": domain_question,
+                "change_type": CHANGE_TYPE_QUESTION,
+                "is_sensitive": SENSITIVE_TOUCH_QUESTION,
+                "complexity": COMPLEXITY_QUESTION,
+                "needs_tests": NEEDS_TESTS_QUESTION,
+            })
+        except Exception as s1_err:
+            self._log(f"[system1/jev:{self.s1.name}] scope gate decision error ({s1_err}) — failing closed")
+            return ScopeDecision(
+                domain=None,
+                change_type="unclear",
+                focus_tree="",
+                clarify_message=f"System 1 decision provider is unavailable ({s1_err}). Execution paused to prevent unverified changes.",
+            )
 
         domain_answer = answers["likely_domain"]
         change_type = answers["change_type"].choice or "unclear"
@@ -1283,15 +1424,17 @@ class Orchestrator:
             change_type = "question_only"
 
         # Tiered confidence logging for debugging and threshold tuning
-        sensitive_prob = answers["is_sensitive"].noul or 0.0
+        sensitive_prob = _safe_noul(answers.get("is_sensitive"), 0.0)
         complexity_score = answers["complexity"].score if answers["complexity"].score is not None else "unknown"
-        needs_tests_prob = answers["needs_tests"].noul or 0.0
+        needs_tests_prob = _safe_noul(answers.get("needs_tests"), 0.0)
+        ct_conf = answers["change_type"].confidence if answers["change_type"].confidence is not None else 0.0
+        cx_conf = answers["complexity"].confidence if answers["complexity"].confidence is not None else 0.0
         self._log(
             f"[system1/jev:{self.s1.name}] scope_gate results:\n"
             f"  likely_domain = {domain_answer}\n"
-            f"  change_type   = {change_type} (confidence={answers['change_type'].confidence:.2f})\n"
+            f"  change_type   = {change_type} (confidence={ct_conf:.2f})\n"
             f"  is_sensitive  = {sensitive_prob:.2f}\n"
-            f"  complexity    = {complexity_score} (confidence={answers['complexity'].confidence:.2f})\n"
+            f"  complexity    = {complexity_score} (confidence={cx_conf:.2f})\n"
             f"  needs_tests   = {needs_tests_prob:.2f}"
         )
 
@@ -1335,6 +1478,10 @@ class Orchestrator:
             focus_tree = _repo_tree(self.cfg.repo_dir)
         return ScopeDecision(domain=domain, change_type=change_type, focus_tree=focus_tree)
 
+    def _run_test_suite(self) -> HardenedProcessResult:
+        """Execute domain tests using the hardened subprocess runner."""
+        return _run(self.cfg.test_command, self.cfg.repo_dir)
+
     def _run_step(self, step: PlanStep, sensitive: bool = False) -> StepResult:
         if self.cfg.mode == "plan":
             raise PermissionError("Eksekusi langkah modifikasi kode dilarang dalam mode Plan.")
@@ -1362,9 +1509,9 @@ class Orchestrator:
             pinned_files=self.pinned_files,
             images=self.attached_images,
         )
-        self._safe_write_files(new_files)
 
         if self.cfg.execution_contract is not None:
+            self._safe_write_files(new_files)
             tx_res = self.cfg.last_transaction_result
             if tx_res is None or not tx_res.success:
                 raise RuntimeError("Transactional verification did not commit")
@@ -1372,171 +1519,341 @@ class Orchestrator:
                               "Approved files were transactionally applied and verified. "
                               "Shell, Git, and browser operations were not authorized.")
 
-        retries = 0
-        while True:
-            test_proc = _run(self.cfg.test_command, self.cfg.repo_dir)
-            passed = test_proc.returncode == 0
-            output = (test_proc.stdout or "") + (test_proc.stderr or "")
-            self._log(f"[tests] {'PASS' if passed else 'FAIL'} (exit {test_proc.returncode})")
-
-            # Structured state with nested fields for Jev path references
-            diff_stat = _diff_stat(self.cfg.repo_dir)
-            step_files = list(new_files.keys()) or step.files
-            state: Dict[str, Any] = {
-                "task": {
-                    "original_request": self.cfg.task,
-                    "step_description": step.description,
-                    "step_id": step.id,
-                },
-                "execution": {
-                    "test_passed": passed,
-                    "test_exit_code": test_proc.returncode,
-                    "test_summary": output[-800:],
-                    "retry_count": retries,
-                    "max_retries": self.cfg.max_retries,
-                },
-                "diff": {
-                    "files_changed": step_files,
-                    "files_count": len(step_files),
-                    "lines_added": diff_stat.get("lines_added", 0),
-                    "lines_deleted": diff_stat.get("lines_deleted", 0),
-                },
+        # Code-side Step Scope Enforcement:
+        if step.files:
+            allowed_rel_paths = {
+                Path(_normalize_rel_path(self.cfg.repo_dir, f)).as_posix()
+                for f in step.files
             }
-
-            # Atomic fan-out: 4 narrow questions in 1 Jev request, composed in code
-            answers = self.s1.decide(state, {
-                "tests_passing": TESTS_PASSING_QUESTION,
-                "diff_complete": DIFF_COMPLETE_QUESTION,
-                "failure_fixable": FAILURE_FIXABLE_QUESTION,
-                "retry_concern": RETRY_CONCERN_QUESTION,
-            })
-
-            tests_ok = (answers["tests_passing"].noul or 0.0) > 0.7
-            diff_ok = (answers["diff_complete"].noul or 0.0) > 0.6
-            fixable = (answers["failure_fixable"].noul or 0.0) > 0.5
-            retry_raw = answers["retry_concern"].score
-            retry_score = retry_raw if retry_raw is not None else "within_normal"
-            retry_exceeded = (
-                (isinstance(retry_raw, (int, float)) and retry_raw >= 1.5)
-                or str(retry_score).lower() in ("exceeded_reasonable_limit", "2", "high")
-            )
-
-            self._log(
-                f"[system1/jev:{self.s1.name}] post-test evaluation:\n"
-                f"  tests_passing  = {answers['tests_passing'].noul:.2f} (threshold=0.70)\n"
-                f"  diff_complete  = {answers['diff_complete'].noul:.2f} (threshold=0.60)\n"
-                f"  failure_fixable= {answers['failure_fixable'].noul:.2f} (threshold=0.50)\n"
-                f"  retry_concern  = {retry_score} (confidence={answers['retry_concern'].confidence:.2f})"
-            )
-
-            # Code-side composition: explicit rules, not a single model choice
-            diff_score = answers["diff_complete"].noul or 0.0
-
-            # Step completion:
-            # 1. Tests passed and diff is strongly complete (diff_ok > 0.60)
-            # 2. OR tests passed cleanly (exit 0), files were touched, and diff has reasonable step relevance (>= 0.25)
-            step_diff_ok = diff_ok or (passed and len(step_files) > 0 and diff_score >= 0.25)
-            if tests_ok and step_diff_ok:
-                mcp_res = self._run_frontend_quality_gate(step, effective_task, new_files)
-                if mcp_res is not None and not mcp_res.passed:
-                    if retries < self.cfg.max_retries:
-                        retries += 1
-                        mcp_ctx = mcp_res.to_agent_context()
-                        self._log(f"[system2/{self.s2_tag}] fixing frontend quality gate failures, attempt {retries}/{self.cfg.max_retries} ...")
-                        self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{mcp_ctx}")
-                        current = _read_files(self.cfg.repo_dir, step_files)
-                        fixed = self.s2.review_and_fix(effective_task, step, current, mcp_ctx)
-                        self._safe_write_files(fixed)
-                        new_files.update(fixed)
-                        continue
-                    return StepResult(
-                        step,
-                        "escalated",
-                        retries,
-                        f"Stopped for human review after {retries} retr(ies). Frontend quality gate failure:\n{mcp_res.to_agent_context()[:1500]}",
-                    )
-
-                visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
-                diff_snippet = self._get_step_diff_snippet(new_files)
-                suggestion = self._auto_reflect(
-                    effective_task,
-                    retries,
-                    visual_fixed,
-                    output[-500:],
-                    step=step,
-                    diff_snippet=diff_snippet,
+            for candidate in new_files.keys():
+                norm_cand = Path(_normalize_rel_path(self.cfg.repo_dir, candidate)).as_posix()
+                is_allowed = (
+                    norm_cand in allowed_rel_paths
+                    or any(norm_cand.startswith(f"{prefix}/") for prefix in allowed_rel_paths)
                 )
-                return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion)
-
-            # Can retry if within retry budget and Jev has not flagged retries as futile
-            can_retry = not retry_exceeded and retries < self.cfg.max_retries
-            if can_retry:
-                retries += 1
-                if tests_ok and not step_diff_ok:
-                    retry_reason = f"diff for step '{step.description}' needs completion"
-                    retry_prompt = (
-                        f"Tests passed (exit 0), but changes for step '{step.description}' appear incomplete (score={diff_score:.2f}). "
-                        f"Currently touched files: {step_files}. "
-                        f"Please carefully review ALL requirements in '{step.description}'. If this step asks for any secondary actions, logs, or new files, please create or update them now."
+                if not is_allowed:
+                    err_msg = (
+                        f"Scope violation: Step '{step.id}' attempted to mutate '{candidate}' "
+                        f"which is outside planned step scope {sorted(allowed_rel_paths)}."
                     )
-                else:
-                    retry_reason = "test failure"
-                    retry_prompt = output
-                self._log(f"[system2/{self.s2_tag}] reviewing {retry_reason}, attempt {retries}/{self.cfg.max_retries} ...")
-                current = _read_files(self.cfg.repo_dir, step_files)
-                fixed = self.s2.review_and_fix(effective_task, step, current, retry_prompt)
-                self._safe_write_files(fixed)
-                new_files.update(fixed)
-                continue
+                    self._log(f"[orchestrator] ⛔ {err_msg}")
+                    return StepResult(step, "escalated", 0, f"Scope Violation: {err_msg}. Failing closed.")
 
-            # Safety net: If tests PASSED cleanly (exit 0) and touched files exist,
-            # NEVER abandon a working build even if retries exhausted on diff completeness.
-            # Finalize with a clear notice so the user keeps their working code.
-            if passed and tests_ok and len(step_files) > 0:
+        try:
+            active_coordinator = self._stage_and_execute_transaction(new_files)
+        except PermissionError as perm_err:
+            self._log(f"[orchestrator] ⛔ Scope/Permission Error on staging: {perm_err}")
+            return StepResult(step, "escalated", 0, str(perm_err))
+        except Exception as stage_err:
+            self._log(f"[orchestrator] ⛔ Staging Failure: {stage_err}")
+            return StepResult(step, "escalated", 0, f"Staging Failure: {stage_err}")
+        step_committed = False
+
+        try:
+            retries = 0
+            while True:
+                test_proc = self._run_test_suite()
+                self.cfg.last_test_result = test_proc
+                passed = test_proc.returncode == 0
+                output = (test_proc.stdout or "") + (test_proc.stderr or "")
+                self._log(f"[tests] {'PASS' if passed else 'FAIL'} (exit {test_proc.returncode})")
+
+                # Structured state with nested fields for Jev path references
+                diff_stat = _diff_stat(self.cfg.repo_dir)
+                step_files = list(new_files.keys()) or step.files
+                state: Dict[str, Any] = {
+                    "task": {
+                        "original_request": self.cfg.task,
+                        "step_description": step.description,
+                        "step_id": step.id,
+                    },
+                    "execution": {
+                        "test_passed": passed,
+                        "test_exit_code": test_proc.returncode,
+                        "test_summary": output[-800:],
+                        "retry_count": retries,
+                        "max_retries": self.cfg.max_retries,
+                    },
+                    "diff": {
+                        "files_changed": step_files,
+                        "files_count": len(step_files),
+                        "lines_added": diff_stat.get("lines_added", 0),
+                        "lines_deleted": diff_stat.get("lines_deleted", 0),
+                    },
+                }
+
+                # Atomic fan-out: 4 narrow questions in 1 Jev request, composed in code
+                try:
+                    answers = self.s1.decide(state, {
+                        "tests_passing": TESTS_PASSING_QUESTION,
+                        "diff_complete": DIFF_COMPLETE_QUESTION,
+                        "failure_fixable": FAILURE_FIXABLE_QUESTION,
+                        "retry_concern": RETRY_CONCERN_QUESTION,
+                    })
+                except Exception as s1_err:
+                    self._log(f"[system1/jev:{self.s1.name}] post-test evaluation error ({s1_err}) — failing closed")
+                    answers = {
+                        "tests_passing": Answer(noul=1.0 if passed else 0.0, confidence=0.5),
+                        "diff_complete": Answer(noul=0.0, confidence=0.0),
+                        "failure_fixable": Answer(noul=0.0, confidence=0.0),
+                        "retry_concern": Answer(score="high", confidence=0.0),
+                    }
+
+                ans_tp = answers.get("tests_passing")
+                ans_dc = answers.get("diff_complete")
+                ans_ff = answers.get("failure_fixable")
+                ans_rc = answers.get("retry_concern")
+
+                tp_noul = _safe_noul(ans_tp, 1.0 if passed else 0.0)
+                dc_noul = _safe_noul(ans_dc, 0.0)
+                ff_noul = _safe_noul(ans_ff, 0.0)
+
+                tests_ok = passed and (tp_noul > 0.7)
+                diff_ok = dc_noul > 0.6
+                fixable = ff_noul > 0.5
+                retry_raw = getattr(ans_rc, "score", None) if ans_rc else None
+                retry_score = retry_raw if retry_raw is not None else "within_normal"
+                retry_exceeded = (
+                    (isinstance(retry_raw, (int, float)) and retry_raw >= 1.5)
+                    or str(retry_score).lower() in ("exceeded_reasonable_limit", "2", "high")
+                )
+
+                tp_str = f"{tp_noul:.2f}"
+                dc_str = f"{dc_noul:.2f}"
+                ff_str = f"{ff_noul:.2f}"
+                rc_conf = getattr(ans_rc, "confidence", None) if ans_rc else None
+                rc_conf_str = f"{rc_conf:.2f}" if isinstance(rc_conf, (int, float)) else "0.00"
+
                 self._log(
-                    f"[orchestrator] ⚠️ Step '{step.description}' tests passed cleanly but diff completeness "
-                    f"was borderline ({diff_score:.2f}). Finalizing step because the code build is healthy."
+                    f"[system1/jev:{self.s1.name}] post-test evaluation:\n"
+                    f"  tests_passing  = {tp_str} (threshold=0.70)\n"
+                    f"  diff_complete  = {dc_str} (threshold=0.60)\n"
+                    f"  failure_fixable= {ff_str} (threshold=0.50)\n"
+                    f"  retry_concern  = {retry_score} (confidence={rc_conf_str})"
                 )
-                mcp_res = self._run_frontend_quality_gate(step, effective_task, new_files)
-                if mcp_res is not None and not mcp_res.passed:
-                    if retries < self.cfg.max_retries:
-                        retries += 1
-                        mcp_ctx = mcp_res.to_agent_context()
-                        self._log(f"[system2/{self.s2_tag}] fixing frontend quality gate failures, attempt {retries}/{self.cfg.max_retries} ...")
-                        self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{mcp_ctx}")
-                        current = _read_files(self.cfg.repo_dir, step_files)
-                        fixed = self.s2.review_and_fix(effective_task, step, current, mcp_ctx)
-                        self._safe_write_files(fixed)
-                        new_files.update(fixed)
-                        continue
+
+                # Code-side composition: explicit rules, not a single model choice
+                diff_score = _safe_noul(answers.get("diff_complete"), 0.0)
+
+                # Step completion:
+                # 1. Tests passed and diff is strongly complete (diff_ok > 0.60)
+                # 2. OR tests passed cleanly (exit 0), files were touched, and diff has reasonable step relevance (>= 0.25)
+                step_diff_ok = diff_ok or (passed and len(step_files) > 0 and diff_score >= 0.25)
+                if tests_ok and step_diff_ok:
+                    mcp_res = self._run_frontend_quality_gate(step, effective_task, new_files)
+                    if mcp_res is not None and not mcp_res.passed:
+                        if retries < self.cfg.max_retries:
+                            retries += 1
+                            mcp_ctx = mcp_res.to_agent_context()
+                            self._log(f"[system2/{self.s2_tag}] fixing frontend quality gate failures, attempt {retries}/{self.cfg.max_retries} ...")
+                            self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{mcp_ctx}")
+                            current = _read_files(self.cfg.repo_dir, step_files)
+                            fixed = self.s2.review_and_fix(effective_task, step, current, mcp_ctx)
+                            active_coordinator.rollback(reason=f"Frontend quality gate failure, rolling back attempt {retries - 1}")
+                            active_coordinator = self._stage_and_execute_transaction(fixed)
+                            new_files = dict(fixed)
+                            continue
+                        self._log(f"[orchestrator] ⚠️ Step '{step.description}' exhausted retries on frontend quality gate; rolling back...")
+                        rb_res = active_coordinator.rollback(reason="Frontend quality gate failure after retry exhaustion")
+                        self.cfg.last_transaction_result = rb_res
+                        if not rb_res.rolled_back:
+                            return StepResult(
+                                step,
+                                "escalated",
+                                retries,
+                                f"Stopped for human review after {retries} retr(ies). Rollback failed: {rb_res.rollback_error}",
+                            )
+                        return StepResult(
+                            step,
+                            "escalated",
+                            retries,
+                            f"Stopped for human review after {retries} retr(ies) (mutations rolled back). Frontend quality gate failure:\n{mcp_res.to_agent_context()[:1500]}",
+                        )
+
+                    # VERIFY AND COMMIT THE TRANSACTION!
+                    verified = active_coordinator.verify()
+                    if not verified:
+                        self._log(
+                            f"[orchestrator] ⚠️ Transaction verification failed: "
+                            f"{active_coordinator.tx.failure_reason}. Failing closed without commit."
+                        )
+                        self.cfg.last_transaction_result = TransactionResult(
+                            transaction_id=active_coordinator.tx.id,
+                            status=active_coordinator.tx.status,
+                            committed=False,
+                            rolled_back=(active_coordinator.tx.status == TransactionStatus.ROLLED_BACK),
+                            operations=tuple(active_coordinator.tx.operations),
+                            error=active_coordinator.tx.failure_reason,
+                            rollback_error=active_coordinator.tx.rollback_reason,
+                        )
+                        return StepResult(
+                            step,
+                            "escalated",
+                            retries,
+                            f"Filesystem transaction verification failed: {active_coordinator.tx.failure_reason}. Mutations rolled back.",
+                        )
+                    tx_res = active_coordinator.commit()
+                    self.cfg.last_transaction_result = tx_res
+                    step_committed = True
+
+                    visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
+                    diff_snippet = self._get_step_diff_snippet(new_files)
+                    suggestion = self._auto_reflect(
+                        effective_task,
+                        retries,
+                        visual_fixed,
+                        output[-500:],
+                        step=step,
+                        diff_snippet=diff_snippet,
+                    )
+                    return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion)
+
+                # Can retry if within retry budget and Jev has not flagged retries as futile
+                can_retry = not retry_exceeded and retries < self.cfg.max_retries
+                if can_retry:
+                    retries += 1
+                    if tests_ok and not step_diff_ok:
+                        retry_reason = f"diff for step '{step.description}' needs completion"
+                        retry_prompt = (
+                            f"Tests passed (exit 0), but changes for step '{step.description}' appear incomplete (score={diff_score:.2f}). "
+                            f"Currently touched files: {step_files}. "
+                            f"Please carefully review ALL requirements in '{step.description}'. If this step asks for any secondary actions, logs, or new files, please create or update them now."
+                        )
+                    else:
+                        retry_reason = "test failure"
+                        retry_prompt = output
+                    self._log(f"[system2/{self.s2_tag}] reviewing {retry_reason}, attempt {retries}/{self.cfg.max_retries} ...")
+                    current = _read_files(self.cfg.repo_dir, step_files)
+                    fixed = self.s2.review_and_fix(effective_task, step, current, retry_prompt)
+                    try:
+                        active_coordinator.rollback(reason=f"Test failure, rolling back attempt {retries - 1}")
+                    except Exception as rb_exc:
+                        self._log(f"[orchestrator] ⚠️ Rollback on retry failed: {rb_exc}")
+                        return StepResult(
+                            step,
+                            "escalated",
+                            retries,
+                            f"Rollback Failure: {rb_exc}. Failing closed to prevent inconsistent workspace state.",
+                        )
+                    active_coordinator = self._stage_and_execute_transaction(fixed)
+                    new_files = dict(fixed)
+                    continue
+
+                # Safety net: If tests PASSED cleanly (exit 0) and touched files exist,
+                # NEVER abandon a working build even if retries exhausted on diff completeness.
+                # Finalize with a clear notice so the user keeps their working code.
+                if passed and tests_ok and len(step_files) > 0:
+                    self._log(
+                        f"[orchestrator] ⚠️ Step '{step.description}' tests passed cleanly but diff completeness "
+                        f"was borderline ({diff_score:.2f}). Finalizing step because the code build is healthy."
+                    )
+                    mcp_res = self._run_frontend_quality_gate(step, effective_task, new_files)
+                    if mcp_res is not None and not mcp_res.passed:
+                        if retries < self.cfg.max_retries:
+                            retries += 1
+                            mcp_ctx = mcp_res.to_agent_context()
+                            self._log(f"[system2/{self.s2_tag}] fixing frontend quality gate failures, attempt {retries}/{self.cfg.max_retries} ...")
+                            self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{mcp_ctx}")
+                            current = _read_files(self.cfg.repo_dir, step_files)
+                            fixed = self.s2.review_and_fix(effective_task, step, current, mcp_ctx)
+                            active_coordinator.rollback(reason=f"Frontend quality gate failure, rolling back attempt {retries - 1}")
+                            active_coordinator = self._stage_and_execute_transaction(fixed)
+                            new_files = dict(fixed)
+                            continue
+                        self._log(f"[orchestrator] ⚠️ Step '{step.description}' exhausted retries on frontend quality gate; rolling back...")
+                        rb_res = active_coordinator.rollback(reason="Frontend quality gate failure after retry exhaustion")
+                        self.cfg.last_transaction_result = rb_res
+                        if not rb_res.rolled_back:
+                            return StepResult(
+                                step,
+                                "escalated",
+                                retries,
+                                f"Stopped for human review after {retries} retr(ies). Rollback failed: {rb_res.rollback_error}",
+                            )
+                        return StepResult(
+                            step,
+                            "escalated",
+                            retries,
+                            f"Stopped for human review after {retries} retr(ies) (mutations rolled back). Frontend quality gate failure:\n{mcp_res.to_agent_context()[:1500]}",
+                        )
+
+                    # VERIFY AND COMMIT THE TRANSACTION!
+                    verified = active_coordinator.verify()
+                    if not verified:
+                        self._log(
+                            f"[orchestrator] ⚠️ Step '{step.description}' transaction verification failed: "
+                            f"{active_coordinator.tx.failure_reason}. Failing closed without commit."
+                        )
+                        self.cfg.last_transaction_result = TransactionResult(
+                            transaction_id=active_coordinator.tx.id,
+                            status=active_coordinator.tx.status,
+                            committed=False,
+                            rolled_back=(active_coordinator.tx.status == TransactionStatus.ROLLED_BACK),
+                            operations=tuple(active_coordinator.tx.operations),
+                            error=active_coordinator.tx.failure_reason,
+                            rollback_error=active_coordinator.tx.rollback_reason,
+                        )
+                        return StepResult(
+                            step,
+                            "escalated",
+                            retries,
+                            f"Filesystem transaction verification failed: {active_coordinator.tx.failure_reason}. Mutations rolled back.",
+                        )
+                    tx_res = active_coordinator.commit()
+                    self.cfg.last_transaction_result = tx_res
+                    step_committed = True
+
+                    visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
+                    diff_snippet = self._get_step_diff_snippet(new_files)
+                    suggestion = self._auto_reflect(
+                        effective_task,
+                        retries,
+                        visual_fixed,
+                        output[-500:],
+                        step=step,
+                        diff_snippet=diff_snippet,
+                    )
+                    return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion)
+
+                # Final failure path: tests failed, retries exhausted -> ROLLBACK!
+                self._log(f"[orchestrator] ⚠️ Step '{step.description}' failed verification; rolling back all task mutations...")
+                try:
+                    rb_res = active_coordinator.rollback(reason="Step verification failed and retries exhausted")
+                    self.cfg.last_transaction_result = rb_res
+                except Exception as rb_exc:
+                    self._log(f"[orchestrator] ⚠️ Rollback failed with exception: {rb_exc}")
                     return StepResult(
                         step,
                         "escalated",
                         retries,
-                        f"Stopped for human review after {retries} retr(ies). Frontend quality gate failure:\n{mcp_res.to_agent_context()[:1500]}",
+                        f"Rollback Failure: {rb_exc}. Repository may require manual inspection.",
+                    )
+                if not rb_res.rolled_back:
+                    return StepResult(
+                        step,
+                        "escalated",
+                        retries,
+                        f"Transaction rollback failed: {rb_res.rollback_error}. Repository may require manual inspection.",
                     )
 
-                visual_fixed = self._run_visual_quality_gate(step, effective_task, new_files)
-                diff_snippet = self._get_step_diff_snippet(new_files)
-                suggestion = self._auto_reflect(
-                    effective_task,
+                if retry_exceeded or retries >= self.cfg.max_retries:
+                    return StepResult(step, "abandoned", retries, "Jev assessed retry limit exceeded with no progress (mutations rolled back).")
+
+                return StepResult(
+                    step,
+                    "escalated",
                     retries,
-                    visual_fixed,
-                    output[-500:],
-                    step=step,
-                    diff_snippet=diff_snippet,
+                    f"Stopped for human review after {retries} retr(ies) (mutations rolled back). Last test output:\n{output[-1500:]}",
                 )
-                return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion)
 
-            if retry_exceeded or retries >= self.cfg.max_retries:
-                return StepResult(step, "abandoned", retries, "Jev assessed retry limit exceeded with no progress.")
-
-            return StepResult(
-                step,
-                "escalated",
-                retries,
-                f"Stopped for human review after {retries} retr(ies). Last test output:\n{output[-1500:]}",
-            )
+        except (KeyboardInterrupt, BaseException) as cancel_exc:
+            if not step_committed and active_coordinator and not active_coordinator.tx.is_terminal:
+                try:
+                    self._log(f"[orchestrator] 🛑 Cancellation received; rolling back in-flight transaction '{active_coordinator.tx.id}'...")
+                    self.cfg.last_transaction_result = active_coordinator.rollback(reason="Execution cancelled by user/runtime")
+                except Exception as rb_exc:
+                    self._log(f"[orchestrator] ⚠️ Rollback on cancellation encountered error: {rb_exc}")
+            raise
 
     def _run_frontend_quality_gate(
         self,
@@ -1905,13 +2222,18 @@ class Orchestrator:
             raise PermissionError("Pembuatan commit atau pull request dilarang dalam mode Plan.")
         stat = _diff_stat(self.cfg.repo_dir)
         pr_state = {"task": self.cfg.task, "test_passed": True, "sensitive_domain": sensitive, **stat}
-        risk_answers = self.s1.decide(
-            pr_state,
-            {"diff_risk": RISK_QUESTION, "safe_to_proceed": SAFE_TO_PROCEED_QUESTION},
-        )
-        risk: Answer = risk_answers["diff_risk"]
-        safe: Answer = risk_answers["safe_to_proceed"]
-        self._log(f"[system1/jev:{self.s1.name}] diff_risk = {risk}, safe_to_proceed = {safe}")
+        try:
+            risk_answers = self.s1.decide(
+                pr_state,
+                {"diff_risk": RISK_QUESTION, "safe_to_proceed": SAFE_TO_PROCEED_QUESTION},
+            )
+            risk = risk_answers.get("diff_risk") or Answer(score=2, choice="high")
+            safe = risk_answers.get("safe_to_proceed") or Answer(noul=0.0, choice="no")
+            self._log(f"[system1/jev:{self.s1.name}] diff_risk = {risk}, safe_to_proceed = {safe}")
+        except Exception as e:
+            self._log(f"[system1/jev:{self.s1.name}] ⚠️ System 1 decision failed ({e}); failing closed to high risk.")
+            risk = Answer(score=2, choice="high")
+            safe = Answer(noul=0.0, choice="no")
         if sensitive:
             self._log("[orchestrator] this change touches a domain flagged sensitive=true in modules.json")
 
@@ -1945,9 +2267,19 @@ class Orchestrator:
             # Capture staged diff summary before committing
             diff_summary = _staged_diff_summary(self.cfg.repo_dir)
 
+            from core.runtime.task_finalization import TaskFinalizationCoordinator
+            from core.runtime.process import _CURRENT_TASK_ID
+            task_id_for_intent = _CURRENT_TASK_ID.get()
+            finalizer = TaskFinalizationCoordinator(self.cfg.repo_dir)
+            if task_id_for_intent:
+                finalizer.record_commit_intent(task_id_for_intent)
+
             commit_res = _run(["git", "commit", "-m", commit_msg], self.cfg.repo_dir)
             if commit_res.returncode == 0:
                 self._log(f"[git] 📦 Committed: [bold #E8E8E8]{commit_title}[/bold #E8E8E8]")
+                if task_id_for_intent:
+                    c_sha = _run(["git", "rev-parse", "HEAD"], self.cfg.repo_dir).stdout.strip()
+                    finalizer.record_commit_success(task_id_for_intent, commit_sha=c_sha)
                 for breakdown_line in _format_diff_breakdown(diff_summary):
                     self._log(breakdown_line)
         except Exception as e:

@@ -30,7 +30,7 @@ bf = "cli:main"
 
 [tool.setuptools]
 py-modules = ["cli", "orchestrator", "config", "modules", "plans", "memory", "skills", "auth_manager", "git_guard"]
-packages = ["core", "security", "system1", "system2", "tests"]
+packages = ["brainfrog", "brainfrog.sdk", "core", "security", "system1", "system2", "tests"]
 
 [tool.pyrefly]
 search-path = [".github/scripts"]
@@ -40,5 +40,6 @@ extraPaths = [".github/scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["tests/fixtures"]
 
 
