@@ -240,7 +240,7 @@ class ChildResult:
             raise ResultAggregationBindingError("success must be a boolean")
 
         # Scrub and bound result summary
-        clean_summary = scrub_secrets(str(self.result_summary or ""))
+        clean_summary = scrub_secrets(self.result_summary or "")
         if len(clean_summary) > MAX_SUMMARY_BYTES:
             clean_summary = clean_summary[:MAX_SUMMARY_BYTES - 16] + "... [truncated]"
         object.__setattr__(self, "result_summary", clean_summary)
@@ -262,17 +262,17 @@ class ChildResult:
 
         # Failure fields
         if self.failure_code is not None:
-            clean_fc = scrub_secrets(str(self.failure_code))[:64]
+            clean_fc = scrub_secrets(self.failure_code)[:64]
             object.__setattr__(self, "failure_code", clean_fc)
 
         if self.failure_message is not None:
-            clean_fm = scrub_secrets(str(self.failure_message))
+            clean_fm = scrub_secrets(self.failure_message)
             if len(clean_fm) > MAX_FAILURE_MESSAGE_BYTES:
                 clean_fm = clean_fm[:MAX_FAILURE_MESSAGE_BYTES - 16] + "... [truncated]"
             object.__setattr__(self, "failure_message", clean_fm)
 
         if self.cancellation_reason is not None:
-            clean_cr = scrub_secrets(str(self.cancellation_reason))
+            clean_cr = scrub_secrets(self.cancellation_reason)
             if len(clean_cr) > MAX_FAILURE_MESSAGE_BYTES:
                 clean_cr = clean_cr[:MAX_FAILURE_MESSAGE_BYTES - 16] + "... [truncated]"
             object.__setattr__(self, "cancellation_reason", clean_cr)
@@ -283,7 +283,7 @@ class ChildResult:
             object.__setattr__(self, "completed_at", float(self.completed_at))
 
         if self.verification_status is not None:
-            object.__setattr__(self, "verification_status", str(self.verification_status)[:32])
+            object.__setattr__(self, "verification_status", self.verification_status[:32])
 
         # Reject secrets across all text fields
         reject_secrets({

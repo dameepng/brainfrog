@@ -188,9 +188,10 @@ def extract_canonical_operation(
     action_type = str(action_type).strip().lower()
 
     params: Dict[str, Any] = {}
-    for k in ("environment", "branch", "force", "mode", "command"):
-        if k in meta:
-            params[k] = meta[k]
+    if action_type not in ("write_code", "write_files", "write_file", "delete_file", "read_code"):
+        for k in ("environment", "branch", "force", "mode", "command"):
+            if k in meta:
+                params[k] = meta[k]
 
     # Non-filesystem action types have their own explicit target extraction
     if action_type in ("deployment", "deploy_project"):

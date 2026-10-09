@@ -607,38 +607,54 @@ class TestDelegationSecretSafety(unittest.TestCase):
 
     def test_reject_secrets_across_all_fields(self) -> None:
         now = time.time()
-        base_kwargs: Dict[str, Any] = {
-            "delegation_id": "delg_sec_01",
-            "parent_work_id": "work_1",
-            "child_subagent_id": "sub_1",
-            "actor": "alice",
-            "session_id": "sess_1",
-            "session_incarnation_id": "inc_1",
-            "created_at": now,
-            "expires_at": now + 200.0,
-        }
+
+        def make_contract(**kwargs: Any) -> DelegationContract:
+            base = {
+                "delegation_id": "delg_sec_01",
+                "parent_work_id": "work_1",
+                "child_subagent_id": "sub_1",
+                "actor": "alice",
+                "session_id": "sess_1",
+                "session_incarnation_id": "inc_1",
+                "created_at": now,
+                "expires_at": now + 200.0,
+            }
+            merged = {**base, **kwargs}
+            return DelegationContract(
+                delegation_id=str(merged["delegation_id"]),
+                parent_work_id=str(merged["parent_work_id"]),
+                child_subagent_id=str(merged["child_subagent_id"]),
+                actor=str(merged["actor"]),
+                session_id=str(merged["session_id"]),
+                session_incarnation_id=str(merged["session_incarnation_id"]),
+                created_at=float(merged["created_at"]),
+                expires_at=float(merged["expires_at"]),
+                role=str(merged.get("role", "")),
+                purpose=str(merged.get("purpose", "")),
+                metadata=merged.get("metadata", None),
+            )
 
         # 1. API key in role
         with self.assertRaises(ValueError):
-            DelegationContract(**{**base_kwargs, "role": "sk-proj-" + "123456789012345678901234567890123456789012345678"})
+            make_contract(role="sk-proj-" + "123456789012345678901234567890123456789012345678")
 
         # 2. Bearer token in purpose
         with self.assertRaises(ValueError):
-            DelegationContract(**{**base_kwargs, "purpose": "Authorization: Bearer my_secret_token_12345"})
+            make_contract(purpose="Authorization: Bearer my_secret_token_12345")
 
         # 3. Password in metadata
         with self.assertRaises(ValueError):
-            DelegationContract(**{**base_kwargs, "metadata": {"password": "admin_password"}})
+            make_contract(metadata={"password": "admin_password"})
 
         # 4. Unencrypted private key PEM
         pem = "-----BEGIN " + "PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7\n-----END " + "PRIVATE KEY-----"
         with self.assertRaises(ValueError):
-            DelegationContract(**{**base_kwargs, "purpose": pem})
+            make_contract(purpose=pem)
 
         # 5. Encrypted private key PEM
         enc_pem = "-----BEGIN " + "ENCRYPTED PRIVATE KEY-----\nMIIFDjBABgkqhkiG9w0BBQ0wMzAbBgkqhkiG9w0BBQwwDgQI\n-----END " + "ENCRYPTED PRIVATE KEY-----"
         with self.assertRaises(ValueError):
-            DelegationContract(**{**base_kwargs, "purpose": enc_pem})
+            make_contract(purpose=enc_pem)
 
 
 class TestDelegationArchitecturalBoundary(unittest.TestCase):

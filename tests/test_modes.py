@@ -101,9 +101,13 @@ class MockSystem2:
         return [PlanStep("1", "Implementasi auth.py", ["auth.py"])]
 
     def write_code(self, step, task, file_contents, pinned_files=None, **kwargs):
+        if step and getattr(step, "files", None):
+            return {f: "def login(): return True\n" for f in step.files}
         return {"auth.py": "def login(): return True\n"}
 
     def review_and_fix(self, task, step, file_contents, test_output, **kwargs):
+        if step and getattr(step, "files", None):
+            return {f: "def login(): return True # fixed\n" for f in step.files}
         return {"auth.py": "def login(): return True # fixed\n"}
 
     def draft_pr(self, task, changed_files, test_status):

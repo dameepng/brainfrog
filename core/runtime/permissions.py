@@ -191,7 +191,7 @@ def classify_request_action(
 
     # 2. Destructive git & destructive filesystem
     destructive_patterns = [
-        r"\bgit\s+(?:reset\s+--hard|push\s+(?:--force|-f)|clean\s+-fd|branch\s+-D)\b",
+        r"\bgit\s+(?:reset\s+--hard|push\b.*?(?:--force|-f\b)|clean\s+-fd|branch\s+-D)",
         r"\b(?:delete|destroy|remove|wipe|hapus|hancurkan)\s+(?:the\s+)?(?:project|repo|repository|codebase|all\s+files)\b",
         r"\brm\s+-rf\b",
         r"\bforce\s+push\b",

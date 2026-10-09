@@ -443,7 +443,7 @@ class TestSubagentSerialization(unittest.TestCase):
             Subagent.from_dict(data)
 
     def test_from_dict_rejects_missing_required_fields(self) -> None:
-        valid_dict = {
+        valid_dict: Dict[str, Any] = {
             "subagent_id": "sub_1",
             "parent_work_id": "work_1",
             "session_id": "sess_1",

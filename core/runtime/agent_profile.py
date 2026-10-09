@@ -421,9 +421,9 @@ class AgentProfile:
     profile_id: str
     display_name: str
     description: str
-    task_types: Tuple[str, ...] = ()
-    domains: Tuple[str, ...] = ()
-    skills: Tuple[str, ...] = ()
+    task_types: Sequence[str] = ()
+    domains: Sequence[str] = ()
+    skills: Sequence[str] = ()
     constraints: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
     schema_version: int = CURRENT_AGENT_PROFILE_SCHEMA_VERSION
@@ -906,29 +906,29 @@ class ProfileResolutionResult:
             raise AgentProfileValidationError(
                 f"candidate_ids count exceeds maximum ({MAX_RESOLUTION_CANDIDATE_IDS})"
             )
-        clean_cands = tuple(sorted(str(c).strip() for c in self.candidate_ids if str(c).strip()))
+        clean_cands = tuple(sorted(c.strip() for c in self.candidate_ids if c.strip()))
         object.__setattr__(self, "candidate_ids", clean_cands)
 
         if not isinstance(self.score, (int, float)) or not math.isfinite(self.score):
             raise AgentProfileValidationError("score must be a finite number")
         object.__setattr__(self, "score", float(self.score))
 
-        clean_reason = scrub_secrets(str(self.reason).strip())
+        clean_reason = scrub_secrets(self.reason.strip())
         if len(clean_reason) > MAX_RESOLUTION_REASON_CHARS:
             clean_reason = clean_reason[:MAX_RESOLUTION_REASON_CHARS]
         object.__setattr__(self, "reason", clean_reason)
 
         if self.matched_task_type is not None:
-            clean_mtt = str(self.matched_task_type).strip() or None
+            clean_mtt = self.matched_task_type.strip() or None
             object.__setattr__(self, "matched_task_type", clean_mtt)
 
         if self.matched_domain is not None:
-            clean_mdom = str(self.matched_domain).strip() or None
+            clean_mdom = self.matched_domain.strip() or None
             object.__setattr__(self, "matched_domain", clean_mdom)
 
         if type(self.matched_skills) not in (list, tuple, set, frozenset):
             raise AgentProfileValidationError("matched_skills must be a sequence or set")
-        clean_mskills = tuple(sorted(str(s).strip() for s in self.matched_skills if str(s).strip()))
+        clean_mskills = tuple(sorted(s.strip() for s in self.matched_skills if s.strip()))
         object.__setattr__(self, "matched_skills", clean_mskills)
 
         serialized_size = len(json.dumps(self.to_dict()).encode("utf-8"))
