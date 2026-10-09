@@ -19,6 +19,7 @@ import inspect
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -300,7 +301,10 @@ class TestWorkSecurityProperties(unittest.TestCase):
         self.work_store.create(work)
 
         results = []
+        barrier = threading.Barrier(8)
+
         def attempt_resume() -> tuple[bool, str]:
+            barrier.wait()
             return resume_work(
                 work_id="work_p7",
                 actor_id="alice",
@@ -320,6 +324,12 @@ class TestWorkSecurityProperties(unittest.TestCase):
         final_work = self.work_store.get("work_p7")
         assert final_work is not None
         self.assertEqual(final_work.status, WorkStatus.VERIFYING)
+
+        # Single winner claim: exactly 1 success, 7 safe rejections
+        successes = [r for r in results if r[0] is True]
+        self.assertEqual(len(successes), 1)
+        rejections = [r for r in results if r[0] is False]
+        self.assertEqual(len(rejections), 7)
 
     def test_property_8_stale_work_revision_cannot_overwrite_newer_state(self) -> None:
         """PROPERTY 8: Stale Work revision cannot overwrite newer state."""

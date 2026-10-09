@@ -6,7 +6,10 @@ the canonical execution pipeline (orchestrator.py), canonical approval engine
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
+import os
+import secrets
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -31,8 +34,35 @@ from core.runtime.work_authorization import (
     authorize_work_execution_continuation,
     authorize_work_inspection,
 )
+from core.runtime.workspace_lock import is_pid_running
 
 logger = logging.getLogger(__name__)
+
+RESUME_LEASE_SECONDS: float = 30.0
+
+
+class _ClaimRejectedError(Exception):
+    """Internal exception raised when an atomic resume claim cannot be acquired."""
+
+    def __init__(self, message: str, work: Optional[Work] = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.work = work
+
+
+def _release_claim(store: WorkStore, wid: str, claim_id: str) -> None:
+    """Safely release an active resume claim if the claim identifier matches."""
+    def release_fn(current: Work) -> Work:
+        meta = dict(current.resume_metadata or {})
+        if meta.get("claim_id") == claim_id:
+            meta["claim_active"] = False
+            return current.with_update(resume_metadata=meta)
+        return current
+
+    try:
+        store.update(wid, release_fn)
+    except Exception:
+        pass
 
 
 def resume_work(
@@ -51,7 +81,7 @@ def resume_work(
 
     Enforces:
     - Authorization & session incarnation validity (Section 31 & 32)
-    - Idempotent claim (Section 21)
+    - Single-winner atomic claim lease (Section 21)
     - Transaction correlation & existing recovery manager integration (Section 22)
     - No execution bypass: delegates authority to canonical orchestrator/approval pipeline
     """
@@ -70,144 +100,211 @@ def resume_work(
     if not auth_ok:
         return False, auth_reason, None
 
-    # Inspect current state
+    # Inspect current state (fast-reject before claiming)
     if work.status == WorkStatus.DONE:
         return False, f"Work '{work_id}' is already completed.", work
 
     if work.status == WorkStatus.CANCELLED:
         return False, f"Work '{work_id}' was cancelled and cannot be resumed.", work
 
-    # Check for active execution claim (Idempotency - Section 21)
+    if work.status == WorkStatus.FAILED:
+        if work.failure and work.failure.retryable:
+            return True, f"Work '{work_id}' is retryable. Retry initiated.", work
+        return False, f"Work '{work_id}' failed permanently and is not retryable.", work
+
     now = time.time()
-    resume_meta = dict(work.resume_metadata or {})
-    last_resumed_at = resume_meta.get("resumed_at", 0.0)
-    if work.status == WorkStatus.EXECUTING and (now - last_resumed_at) < 30.0 and resume_meta.get("active_pid") == str(time.time()):
-        return False, f"Work '{work_id}' is already actively executing.", work
+    claim_id = secrets.token_hex(8)
 
     # Atomically claim resume ownership under lock
     try:
         def claim_fn(current: Work) -> Work:
+            if current.status == WorkStatus.DONE:
+                raise _ClaimRejectedError(f"Work '{work_id}' is already completed.", current)
+            if current.status == WorkStatus.CANCELLED:
+                raise _ClaimRejectedError(f"Work '{work_id}' was cancelled and cannot be resumed.", current)
+            if current.status == WorkStatus.FAILED:
+                if current.failure and current.failure.retryable:
+                    raise _ClaimRejectedError(f"Work '{work_id}' is retryable. Retry initiated.", current)
+                raise _ClaimRejectedError(f"Work '{work_id}' failed permanently and is not retryable.", current)
+
             meta = dict(current.resume_metadata or {})
-            meta.update({
+            is_active = meta.get("claim_active", False)
+            last_resumed_at = meta.get("resumed_at", 0.0)
+            active_pid = meta.get("active_pid")
+
+            is_lease_valid = (now - last_resumed_at) < RESUME_LEASE_SECONDS
+            holder_alive = True
+            if isinstance(active_pid, int):
+                if active_pid == os.getpid():
+                    holder_alive = True
+                else:
+                    holder_alive = is_pid_running(active_pid)
+
+            if (is_active or current.status == WorkStatus.VERIFYING) and is_lease_valid and holder_alive:
+                if current.status == WorkStatus.VERIFYING:
+                    raise _ClaimRejectedError(f"Work '{work_id}' is actively being verified.", current)
+                else:
+                    raise _ClaimRejectedError(f"Work '{work_id}' is already actively executing.", current)
+
+            new_meta = dict(meta)
+            new_meta.update({
+                "claim_active": True,
+                "claim_id": claim_id,
                 "resumed_at": now,
                 "resumed_by": actor_id,
                 "resume_channel": channel,
+                "active_pid": os.getpid(),
+                "claim_status": current.status.value,
             })
-            return current.with_update(resume_metadata=meta, updated_at=now)
+            return current.with_update(resume_metadata=new_meta, updated_at=now)
 
         work = work_store.update(work_id, claim_fn)
+    except _ClaimRejectedError as exc:
+        rejected_work = exc.work or work_store.get(work_id) or work
+        return False, exc.message, rejected_work
     except StaleWorkRevisionError as exc:
-        return False, f"Concurrent resume detected: {exc}", work
+        rejected_work = work_store.get(work_id) or work
+        if rejected_work and rejected_work.status == WorkStatus.VERIFYING:
+            return False, f"Work '{work_id}' is actively being verified.", rejected_work
+        return False, f"Concurrent resume detected: {exc}", rejected_work
 
-    # State-specific continuation logic
-    if work.status == WorkStatus.APPROVAL_REQUIRED:
-        if work.approval_request_id and approval_service:
-            appr = approval_service.store.get(work.approval_request_id)
-            if appr is not None:
-                if appr.status == ApprovalStatus.APPROVED:
-                    return (
-                        True,
-                        f"Work '{work_id}' has been approved. Use `/exec {work.approval_request_id}` to execute.",
-                        work,
-                    )
-                elif appr.status == ApprovalStatus.PENDING and not appr.is_expired():
-                    return (
-                        True,
-                        f"Work '{work_id}' is waiting for approval. Use `/approve {work.approval_request_id}` to proceed.",
-                        work,
-                    )
-                elif appr.status in (ApprovalStatus.CONSUMED, ApprovalStatus.REJECTED, ApprovalStatus.CANCELLED, ApprovalStatus.EXPIRED):
-                    new_status = WorkStatus.CANCELLED if appr.status == ApprovalStatus.CANCELLED else WorkStatus.FAILED
-                    work = work_store.save(work.transition(
-                        new_status,
-                        failure=WorkFailure(code="APPROVAL_INVALID", summary=f"Approval request {appr.status.value}", retryable=False),
-                    ))
-                    return False, f"Approval request {appr.status.value}. Work cannot proceed.", work
-        return True, f"Work '{work_id}' is awaiting approval.", work
+    try:
+        # State-specific continuation logic
+        if work.status == WorkStatus.APPROVAL_REQUIRED:
+            if work.approval_request_id and approval_service:
+                appr = approval_service.store.get(work.approval_request_id)
+                if appr is not None:
+                    if appr.status == ApprovalStatus.APPROVED:
+                        _release_claim(work_store, work_id, claim_id)
+                        return (
+                            True,
+                            f"Work '{work_id}' has been approved. Use `/exec {work.approval_request_id}` to execute.",
+                            work,
+                        )
+                    elif appr.status == ApprovalStatus.PENDING and not appr.is_expired():
+                        _release_claim(work_store, work_id, claim_id)
+                        return (
+                            True,
+                            f"Work '{work_id}' is waiting for approval. Use `/approve {work.approval_request_id}` to proceed.",
+                            work,
+                        )
+                    elif appr.status in (ApprovalStatus.CONSUMED, ApprovalStatus.REJECTED, ApprovalStatus.CANCELLED, ApprovalStatus.EXPIRED):
+                        new_status = WorkStatus.CANCELLED if appr.status == ApprovalStatus.CANCELLED else WorkStatus.FAILED
+                        work = work_store.save(work.transition(
+                            new_status,
+                            failure=WorkFailure(code="APPROVAL_INVALID", summary=f"Approval request {appr.status.value}", retryable=False),
+                        ))
+                        _release_claim(work_store, work_id, claim_id)
+                        return False, f"Approval request {appr.status.value}. Work cannot proceed.", work
+            _release_claim(work_store, work_id, claim_id)
+            return True, f"Work '{work_id}' is awaiting approval.", work
 
-    elif work.status == WorkStatus.PLANNING:
-        return True, f"Work '{work_id}' is ready for planning continuation.", work
+        elif work.status == WorkStatus.PLANNING:
+            _release_claim(work_store, work_id, claim_id)
+            return True, f"Work '{work_id}' is ready for planning continuation.", work
 
-    elif work.status == WorkStatus.EXECUTING:
-        # Crash recovery correlation (Section 22 & 23)
-        if not work.transaction_id:
-            work = work_store.save(work.transition(
-                WorkStatus.FAILED,
-                failure=WorkFailure(
-                    code="MISSING_TX",
-                    stage="executing",
-                    summary="Executing work lacks transaction binding and cannot be safely resumed",
-                    retryable=False,
-                ),
-            ))
-            return False, f"Work '{work_id}' has missing transaction binding and cannot be resumed.", work
+        elif work.status == WorkStatus.EXECUTING:
+            # Crash recovery correlation (Section 22 & 23)
+            if not work.transaction_id:
+                work = work_store.save(work.transition(
+                    WorkStatus.FAILED,
+                    failure=WorkFailure(
+                        code="MISSING_TX",
+                        stage="executing",
+                        summary="Executing work lacks transaction binding and cannot be safely resumed",
+                        retryable=False,
+                    ),
+                ))
+                _release_claim(work_store, work_id, claim_id)
+                return False, f"Work '{work_id}' has missing transaction binding and cannot be resumed.", work
 
-        if recovery_manager:
-            res = recovery_manager.recover(work.transaction_id)
-            if res.recovered:
-                if res.final_status.value == "committed":
+            if recovery_manager:
+                res = recovery_manager.recover(work.transaction_id)
+                if res.recovered:
+                    if res.final_status.value == "committed":
+                        v_meta = dict(work.resume_metadata or {})
+                        v_meta.update({
+                            "claim_active": True,
+                            "claim_id": secrets.token_hex(8),
+                            "resumed_at": time.time(),
+                            "active_pid": os.getpid(),
+                            "claim_status": WorkStatus.VERIFYING.value,
+                        })
+                        try:
+                            work = work_store.save(work.transition(WorkStatus.VERIFYING, resume_metadata=v_meta))
+                        except (InvalidWorkTransition, StaleWorkRevisionError):
+                            work = work_store.get(work_id) or work
+                        return True, f"Transaction was committed. Work '{work_id}' transitioned to VERIFYING.", work
+                    else:
+                        try:
+                            work = work_store.save(work.transition(
+                                WorkStatus.FAILED,
+                                failure=WorkFailure(
+                                    code="TRANSACTION_RECOVERED",
+                                    stage="recovery",
+                                    summary=f"In-flight transaction recovered ({res.final_status.value})",
+                                    retryable=True,
+                                ),
+                            ))
+                        except (InvalidWorkTransition, StaleWorkRevisionError):
+                            work = work_store.get(work_id) or work
+                        _release_claim(work_store, work_id, claim_id)
+                        return True, f"Transaction safely recovered ({res.final_status.value}). Work '{work_id}' ready for retry.", work
+                elif res.ambiguous:
                     try:
-                        work = work_store.save(work.transition(WorkStatus.VERIFYING))
+                        work = work_store.save(work.transition(
+                            WorkStatus.FAILED,
+                            failure=WorkFailure(code="AMBIGUOUS_CRASH_STATE", stage="recovery", summary=res.error or "Ambiguous state", retryable=False),
+                        ))
                     except (InvalidWorkTransition, StaleWorkRevisionError):
                         work = work_store.get(work_id) or work
-                    return True, f"Transaction was committed. Work '{work_id}' transitioned to VERIFYING.", work
+                    _release_claim(work_store, work_id, claim_id)
+                    return False, f"Crash recovery failed: ambiguous state for transaction '{work.transaction_id}'.", work
                 else:
                     try:
                         work = work_store.save(work.transition(
                             WorkStatus.FAILED,
-                            failure=WorkFailure(
-                                code="TRANSACTION_RECOVERED",
-                                stage="recovery",
-                                summary=f"In-flight transaction recovered ({res.final_status.value})",
-                                retryable=True,
-                            ),
+                            failure=WorkFailure(code="RECOVERY_FAILED", stage="recovery", summary=res.error or "Recovery error", retryable=False),
                         ))
                     except (InvalidWorkTransition, StaleWorkRevisionError):
                         work = work_store.get(work_id) or work
-                    return True, f"Transaction safely recovered ({res.final_status.value}). Work '{work_id}' ready for retry.", work
-            elif res.ambiguous:
-                try:
-                    work = work_store.save(work.transition(
-                        WorkStatus.FAILED,
-                        failure=WorkFailure(code="AMBIGUOUS_CRASH_STATE", stage="recovery", summary=res.error or "Ambiguous state", retryable=False),
-                    ))
-                except (InvalidWorkTransition, StaleWorkRevisionError):
-                    work = work_store.get(work_id) or work
-                return False, f"Crash recovery failed: ambiguous state for transaction '{work.transaction_id}'.", work
-            else:
-                try:
-                    work = work_store.save(work.transition(
-                        WorkStatus.FAILED,
-                        failure=WorkFailure(code="RECOVERY_FAILED", stage="recovery", summary=res.error or "Recovery error", retryable=False),
-                    ))
-                except (InvalidWorkTransition, StaleWorkRevisionError):
-                    work = work_store.get(work_id) or work
-                return False, f"Recovery failed for transaction '{work.transaction_id}': {res.error}", work
-        return True, f"Work '{work_id}' is in EXECUTING state.", work
+                    _release_claim(work_store, work_id, claim_id)
+                    return False, f"Recovery failed for transaction '{work.transaction_id}': {res.error}", work
+            _release_claim(work_store, work_id, claim_id)
+            return True, f"Work '{work_id}' is in EXECUTING state.", work
 
-    elif work.status == WorkStatus.VERIFYING:
-        # Recovery from crash during verification
-        try:
-            work = work_store.save(work.transition(
-                WorkStatus.DONE,
-                verification_result=VerificationResult(
-                    status="PASS",
-                    passed=1,
-                    failed=0,
-                    summary="Recovered verification completed",
-                ),
-            ))
-        except (InvalidWorkTransition, StaleWorkRevisionError):
-            work = work_store.get(work_id) or work
-        return True, f"Verification completed. Work '{work_id}' is now DONE.", work
+        elif work.status == WorkStatus.VERIFYING:
+            # Recovery from crash during verification
+            d_meta = dict(work.resume_metadata or {})
+            d_meta["claim_active"] = False
+            try:
+                work = work_store.save(work.transition(
+                    WorkStatus.DONE,
+                    verification_result=VerificationResult(
+                        status="PASS",
+                        passed=1,
+                        failed=0,
+                        summary="Recovered verification completed",
+                    ),
+                    resume_metadata=d_meta,
+                ))
+            except (InvalidWorkTransition, StaleWorkRevisionError):
+                work = work_store.get(work_id) or work
+            return True, f"Verification completed. Work '{work_id}' is now DONE.", work
 
-    elif work.status == WorkStatus.FAILED:
-        if work.failure and work.failure.retryable:
-            # Deterministically retry by transitioning to PLANNING or APPROVAL_REQUIRED
-            return True, f"Work '{work_id}' is retryable. Retry initiated.", work
-        return False, f"Work '{work_id}' failed permanently and is not retryable.", work
+        elif work.status == WorkStatus.FAILED:
+            _release_claim(work_store, work_id, claim_id)
+            if work.failure and work.failure.retryable:
+                # Deterministically retry by transitioning to PLANNING or APPROVAL_REQUIRED
+                return True, f"Work '{work_id}' is retryable. Retry initiated.", work
+            return False, f"Work '{work_id}' failed permanently and is not retryable.", work
 
-    return True, f"Work '{work_id}' resumed.", work
+        _release_claim(work_store, work_id, claim_id)
+        return True, f"Work '{work_id}' resumed.", work
+
+    except Exception:
+        _release_claim(work_store, work_id, claim_id)
+        raise
 
 
 def cancel_work(
@@ -244,7 +341,9 @@ def cancel_work(
 
     def _safe_save_cancel(c: Work, success_msg: str) -> Tuple[bool, str, Optional[Work]]:
         try:
-            saved = work_store.save(c)
+            meta = dict(c.resume_metadata or {})
+            meta["claim_active"] = False
+            saved = work_store.save(replace(c, resume_metadata=meta))
             return True, success_msg, saved
         except (InvalidWorkTransition, StaleWorkRevisionError):
             current = work_store.get(work_id)

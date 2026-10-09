@@ -17,11 +17,23 @@ import time
 import unittest
 from pathlib import Path
 
-from core.runtime.approval import ApprovalService, InMemoryApprovalStore
+from core.runtime.approval import (
+    ApprovalRequest,
+    ApprovalService,
+    ApprovalStatus,
+    InMemoryApprovalStore,
+)
 from core.runtime.session import InMemorySessionStore, SessionManager, SessionState
-from core.runtime.transaction import InMemoryTransactionStore
+from core.runtime.transaction import (
+    InMemoryTransactionStore,
+    Transaction,
+    TransactionRecoveryManager,
+    TransactionStatus,
+)
 from core.runtime.work import (
+    VerificationResult,
     Work,
+    WorkFailure,
     WorkStatus,
 )
 from core.runtime.work_continuation import cancel_work, resume_work
@@ -203,6 +215,261 @@ class TestWorkConcurrency(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertIn("invalidated session incarnation", msg.lower())
+
+    def test_concurrent_resume_eight_callers_single_winner_barrier(self) -> None:
+        """Prove that eight simultaneous callers produce at most one successful resume claim."""
+        tx_store = InMemoryTransactionStore()
+        tx = Transaction(
+            id="tx_conc_8",
+            session_id="sess_c8",
+            status=TransactionStatus.COMMITTED,
+        )
+        tx_store.save(tx)
+        recovery_mgr = TransactionRecoveryManager(workspace=self.repo_dir, store=tx_store)
+
+        work = Work(
+            id="work_conc_8",
+            intent="Process data concurrently",
+            goal="Process data concurrently",
+            actor_id="alice",
+            channel="cli",
+            status=WorkStatus.EXECUTING,
+            transaction_id="tx_conc_8",
+        )
+        self.store.create(work)
+
+        barrier = threading.Barrier(8)
+        results = []
+
+        def worker() -> tuple[bool, str]:
+            barrier.wait()
+            return resume_work(
+                work_id="work_conc_8",
+                actor_id="alice",
+                channel="cli",
+                work_store=self.store,
+                transaction_store=tx_store,
+                recovery_manager=recovery_mgr,
+            )[:2]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futs = [executor.submit(worker) for _ in range(8)]
+            for fut in concurrent.futures.as_completed(futs):
+                results.append(fut.result())
+
+        self.assertEqual(len(results), 8)
+        successes = [r for r in results if r[0] is True]
+        self.assertEqual(len(successes), 1)
+        rejections = [r for r in results if r[0] is False]
+        self.assertEqual(len(rejections), 7)
+
+        # Work must remain in VERIFYING (not advanced to DONE by losing callers)
+        final_work = self.store.get("work_conc_8")
+        assert final_work is not None
+        self.assertEqual(final_work.status, WorkStatus.VERIFYING)
+
+    def test_repeated_sequential_resume_when_valid(self) -> None:
+        """Prove that repeated sequential resume still works when valid across states."""
+        # 1. PLANNING sequential resume
+        work_plan = Work(
+            id="work_seq_plan",
+            intent="Plan task",
+            goal="Goal",
+            actor_id="alice",
+            channel="cli",
+            status=WorkStatus.PLANNING,
+        )
+        self.store.create(work_plan)
+        ok1, msg1, _ = resume_work(work_id="work_seq_plan", actor_id="alice", channel="cli", work_store=self.store)
+        self.assertTrue(ok1)
+        self.assertIn("planning continuation", msg1.lower())
+
+        ok2, msg2, _ = resume_work(work_id="work_seq_plan", actor_id="alice", channel="cli", work_store=self.store)
+        self.assertTrue(ok2)
+        self.assertIn("planning continuation", msg2.lower())
+
+        # 2. APPROVAL_REQUIRED sequential resume
+        work_appr = Work(
+            id="work_seq_appr",
+            intent="Deploy",
+            goal="Deploy",
+            actor_id="alice",
+            channel="cli",
+            status=WorkStatus.APPROVAL_REQUIRED,
+        )
+        self.store.create(work_appr)
+        ok_a1, msg_a1, _ = resume_work(
+            work_id="work_seq_appr",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.store,
+        )
+        self.assertTrue(ok_a1)
+        self.assertIn("awaiting approval", msg_a1.lower())
+
+        ok_a2, msg_a2, _ = resume_work(
+            work_id="work_seq_appr",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.store,
+        )
+        self.assertTrue(ok_a2)
+        self.assertIn("awaiting approval", msg_a2.lower())
+
+        # 3. FAILED with retryable=True
+        work_fail = Work(
+            id="work_seq_fail",
+            intent="Retry task",
+            goal="Goal",
+            actor_id="alice",
+            channel="cli",
+            status=WorkStatus.FAILED,
+            failure=WorkFailure(code="ERR_TRANSIENT", summary="Temporary error", retryable=True),
+        )
+        self.store.create(work_fail)
+        ok_f1, msg_f1, _ = resume_work(work_id="work_seq_fail", actor_id="alice", channel="cli", work_store=self.store)
+        self.assertTrue(ok_f1)
+        self.assertIn("retry initiated", msg_f1.lower())
+
+    def test_stale_claim_recovery_expired_lease_and_dead_pid(self) -> None:
+        """Prove that stale claims (expired lease or dead PID) can be recovered safely."""
+        # 1. Expired lease on crashed VERIFYING work -> recovers to DONE
+        work_ver = Work(
+            id="work_stale_lease",
+            intent="Verify task",
+            goal="Goal",
+            actor_id="alice",
+            channel="cli",
+            status=WorkStatus.VERIFYING,
+            resume_metadata={
+                "claim_active": True,
+                "resumed_at": time.time() - 40.0,  # Expired lease (> 30s)
+                "active_pid": 12345,
+            },
+        )
+        self.store.create(work_ver)
+
+        ok_v, msg_v, w_v = resume_work(
+            work_id="work_stale_lease",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.store,
+        )
+        self.assertTrue(ok_v)
+        self.assertIn("now done", msg_v.lower())
+        final_ver = self.store.get("work_stale_lease")
+        assert final_ver is not None
+        self.assertEqual(final_ver.status, WorkStatus.DONE)
+
+        # 2. Dead PID on crashed EXECUTING work -> recovers to VERIFYING immediately
+        tx_store = InMemoryTransactionStore()
+        tx = Transaction(id="tx_dead_pid", session_id="sess_d", status=TransactionStatus.COMMITTED)
+        tx_store.save(tx)
+        recovery_mgr = TransactionRecoveryManager(workspace=self.repo_dir, store=tx_store)
+
+        work_dead = Work(
+            id="work_dead_pid",
+            intent="Execute task",
+            goal="Goal",
+            actor_id="alice",
+            channel="cli",
+            status=WorkStatus.EXECUTING,
+            transaction_id="tx_dead_pid",
+            resume_metadata={
+                "claim_active": True,
+                "resumed_at": time.time(),  # Recent timestamp
+                "active_pid": 99999999,      # Dead process PID
+            },
+        )
+        self.store.create(work_dead)
+
+        ok_d, msg_d, _ = resume_work(
+            work_id="work_dead_pid",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.store,
+            transaction_store=tx_store,
+            recovery_manager=recovery_mgr,
+        )
+        self.assertTrue(ok_d)
+        self.assertIn("transitioned to verifying", msg_d.lower())
+        final_dead = self.store.get("work_dead_pid")
+        assert final_dead is not None
+        self.assertEqual(final_dead.status, WorkStatus.VERIFYING)
+
+    def test_exceptions_and_cancellation_release_claims_safely(self) -> None:
+        """Prove that exceptions during resume release claim, and cancellation invalidates claims."""
+        # 1. Exception during continuation releases claim
+        tx_store = InMemoryTransactionStore()
+        tx = Transaction(id="tx_exc_1", session_id="sess_e", status=TransactionStatus.COMMITTED)
+        tx_store.save(tx)
+
+        class FaultyRecoveryManager:
+            def recover(self, tx_id: str):
+                raise RuntimeError("Simulated crash during recovery")
+
+        work_exc = Work(
+            id="work_exc_test",
+            intent="Process data",
+            goal="Goal",
+            actor_id="alice",
+            channel="cli",
+            status=WorkStatus.EXECUTING,
+            transaction_id="tx_exc_1",
+        )
+        self.store.create(work_exc)
+
+        # Resume raises RuntimeError
+        with self.assertRaises(RuntimeError):
+            resume_work(
+                work_id="work_exc_test",
+                actor_id="alice",
+                channel="cli",
+                work_store=self.store,
+                transaction_store=tx_store,
+                recovery_manager=FaultyRecoveryManager(),
+            )
+
+        # Claim was released on error!
+        stored = self.store.get("work_exc_test")
+        assert stored is not None
+        self.assertFalse(stored.resume_metadata.get("claim_active", False))
+
+        # Subsequent resume with working recovery succeeds without being blocked by active lease
+        working_rm = TransactionRecoveryManager(workspace=self.repo_dir, store=tx_store)
+        ok_next, _, _ = resume_work(
+            work_id="work_exc_test",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.store,
+            transaction_store=tx_store,
+            recovery_manager=working_rm,
+        )
+        self.assertTrue(ok_next)
+
+        # 2. Cancellation invalidates claim
+        work_can = Work(
+            id="work_can_test",
+            intent="Task to cancel",
+            goal="Goal",
+            actor_id="alice",
+            channel="cli",
+            status=WorkStatus.PLANNING,
+            resume_metadata={"claim_active": True, "resumed_at": time.time(), "claim_id": "c_init"},
+        )
+        self.store.create(work_can)
+
+        ok_c, _, _ = cancel_work(work_id="work_can_test", actor_id="alice", channel="cli", work_store=self.store)
+        self.assertTrue(ok_c)
+        stored_can = self.store.get("work_can_test")
+        assert stored_can is not None
+        self.assertEqual(stored_can.status, WorkStatus.CANCELLED)
+        self.assertFalse(stored_can.resume_metadata.get("claim_active", False))
+
+        # Resume on cancelled fails closed
+        ok_after, msg_after, _ = resume_work(work_id="work_can_test", actor_id="alice", channel="cli", work_store=self.store)
+        self.assertFalse(ok_after)
+        self.assertIn("cancelled and cannot be resumed", msg_after.lower())
 
 
 if __name__ == "__main__":
