@@ -297,13 +297,20 @@ class WhatsAppChannel(BaseChannel):
                 error="Rate limit exceeded",
             )
 
+        # Normalize natural-language aliases for work commands (Section 28)
+        norm_text = text.strip()
+        lower_t = norm_text.lower()
+        if lower_t in ("works", "works active", "works failed", "works done") or lower_t.startswith(("works ", "work ", "resume ", "cancel ")):
+            if not norm_text.startswith("/"):
+                norm_text = "/" + norm_text
+
         # 3. Build Normalized IncomingMessage (Channel strictly forced to 'whatsapp' to prevent spoofing)
         incoming = IncomingMessage(
             id=msg_id,
             channel="whatsapp",
             user_id=clean_user_id,
             conversation_id=conv_id,
-            text=text,
+            text=norm_text,
             metadata={
                 "raw_phone": from_number,
                 "source_channel": "whatsapp",

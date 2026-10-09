@@ -1,5 +1,10 @@
 # BrainFrog Security Documentation
 
+- [Telegram interactive approval](telegram-interactive-approval.md) — bounded
+  button UX over the canonical approval and execution boundaries.
+- [Phase 15H Work Runtime](work-runtime.md) — persistent work continuation,
+  resume, cancellation, and remote work status.
+
 Index of security findings addressed during the Phase 14 hardening cycle.
 
 - Phase 15A architecture: [Execution contracts](execution-contract.md)

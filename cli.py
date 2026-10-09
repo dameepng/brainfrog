@@ -13,6 +13,8 @@ import argparse
 import json
 import os
 import re
+import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -151,7 +153,7 @@ def _setup_multiline_key_detection() -> None:
     4. Windows Console API: KEY_EVENT_RECORD with SHIFT_PRESSED on Enter (VK_RETURN)
     """
     try:
-        from prompt_toolkit.input.vt100_parser import ANSI_SEQUENCES
+        from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
         from prompt_toolkit.keys import Keys
         ANSI_SEQUENCES["\x1b[13;2u"] = (Keys.Escape, Keys.ControlM)
         ANSI_SEQUENCES["\x1b[27;2;13~"] = (Keys.Escape, Keys.ControlM)
@@ -174,7 +176,7 @@ def _setup_multiline_key_detection() -> None:
                 return _orig_event(self, ev)
 
             ConsoleInputReader._event_to_key_presses = _shift_enter_event_to_key_presses
-            ConsoleInputReader._brainfrog_shift_enter_hooked = True
+            setattr(ConsoleInputReader, "_brainfrog_shift_enter_hooked", True)
     except Exception:
         pass
 
@@ -342,6 +344,9 @@ def ensure_git_remote(repo_dir: Path) -> None:
         )
 
 
+from core.runtime import execute_autonomous_task
+
+
 def detect_default_test_cmd(repo_dir: Path) -> str:
     """Detect plausible test runner for the workspace."""
     if (repo_dir / "gradlew").exists() or (repo_dir / "gradlew.bat").exists():
@@ -354,186 +359,286 @@ def detect_default_test_cmd(repo_dir: Path) -> str:
             return f"node --test {test_folder}/"
     if (repo_dir / "pytest.ini").exists() or (repo_dir / "tests").exists():
         return "pytest -q"
-    return "cmd /c exit 0" if os.name == "nt" else "true"
+    return ""
 
 
-# -------------------------------------------------------------------------
-# Execution Logic
-# -------------------------------------------------------------------------
-def execute_task(
-    task: str,
-    repo_dir: Path,
-    backend: str = "jev",
-    model: Optional[str] = None,
-    claude_model: Optional[str] = None,
-    provider: Optional[str] = None,
-    test_cmd: Optional[str] = None,
-    module_map: Optional[str] = None,
-    min_domain_confidence: float = 0.45,
-    auto_pr: bool = False,
-    pr_risk_ceiling: str = "medium",
-    max_retries: int = 3,
-    skill: Optional[str] = None,
-    mode: str = "build",
-    plan_context: Optional[str] = None,
-    attached_images: Optional[List[Any]] = None,
-) -> int:
-    """Run a single task through the dual-system orchestrator."""
-    from core.config import get_system1
-    from core.runtime.session import session_manager
-    from modules import load_module_map
-    from orchestrator import Orchestrator, RunConfig
-    from system2 import System2Client, usage_tracker
-
-    session = session_manager.get_or_create("cli", "local", "default", default_mode=mode)
-    session.active_mode = mode
-    session.active_skill = skill
-
-    if not (repo_dir / ".git").exists():
-        ensure_git_remote(repo_dir)
-        if not (repo_dir / ".git").exists():
-            print_banner_box(f"{repo_dir} is not a git repository.", level="error", title="Git Error")
-            return 1
-
-    if mode == "build" and not plan_context:
-        try:
-            from plans import get_latest_plan, format_plan_handoff
-            lp = get_latest_plan(repo_dir)
-            if lp:
-                plan_context = format_plan_handoff(lp, repo_dir)
-        except Exception:
-            pass
-
-    active_test_cmd = test_cmd or detect_default_test_cmd(repo_dir)
-
+def _resolve_relative_proof_path(path_str: Optional[str], repo_dir: Path, task_id: str) -> Optional[str]:
+    """Resolve proof path relative to workspace only if file exists and matches task_id."""
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = (repo_dir / p).resolve()
+    if not p.is_file():
+        return None
+    if task_id not in p.name:
+        return None
     try:
-        system1 = get_system1(backend)
-    except Exception as e:
-        print_banner_box(f"System 1 Error: {e}", level="error")
-        return 1
+        return str(p.relative_to(repo_dir.resolve()))
+    except ValueError:
+        return str(p)
 
-    chosen_model = model or claude_model
-    try:
-        system2 = System2Client(model=chosen_model, provider=provider)
-    except Exception as e:
-        print_banner_box(f"System 2 Error: {e}", level="error")
-        return 1
 
-    # Ensure chosen_model reflects the actual model resolved by System2Client (e.g. default Gemini Flash)
-    chosen_model = getattr(system2, "model", chosen_model) or chosen_model
-
-    domains = load_module_map(repo_dir, Path(module_map) if module_map else None, task=task)
-
-    if mode == "plan":
-        auto_pr = False
-
-    cfg = RunConfig(
-        repo_dir=repo_dir,
-        task=task,
-        test_command=active_test_cmd.split(),
-        max_retries=max_retries,
-        auto_pr=auto_pr,
-        pr_risk_ceiling=pr_risk_ceiling,
-        domains=domains,
-        min_domain_confidence=min_domain_confidence,
-        skill=skill,
-        mode=mode,
-        plan_context=plan_context,
-        attached_images=attached_images or [],
-    )
-
+def print_task_verification_report(result: Any, repo_dir: Path) -> None:
+    """Authoritative CLI display of TaskResult, verification gates, and proof artifacts."""
     cols, rows, box_w, margin, pad = get_layout_dims()
-    right_margin = max(0, cols - box_w - margin)
 
-    def log_cli(msg: str) -> None:
-        clean = msg.strip()
-        if not clean:
-            return
-        if clean.startswith("=== Step") and clean.endswith("==="):
-            step_title = clean.strip("= ").strip()
-            console.print()
-            console.print(Text(f"▸ {step_title}", style=f"bold {COLOR_FG_PRIMARY}"))
-            console.print(Text("─" * 40, style=COLOR_ACCENT))
-            console.print()
-        else:
-            try:
-                txt = Text.from_markup(clean)
-            except Exception:
-                txt = Text(clean, style=COLOR_FG_MUTED)
-            console.print(txt)
+    # 1. Verification Verdict Banner
+    verdict_text = "VERIFIED" if result.verified else "UNVERIFIED"
+    verdict_color = COLOR_SUCCESS if result.verified else COLOR_ERROR
+    verdict_sym = SYM_SUCCESS if result.verified else SYM_ERROR
 
-    orchestrator = Orchestrator(
-        system1,
-        system2,
-        cfg,
-        log_fn=log_cli,
+    console.print()
+    verdict_table = Table(
+        title=f" Task Verification: [{verdict_color} bold]{verdict_sym} {verdict_text}[/{verdict_color} bold] ",
+        box=box.ROUNDED,
+        border_style=verdict_color if not result.verified else COLOR_ACCENT,
+        header_style=f"bold {COLOR_ACCENT}",
+        show_header=False,
+        padding=(0, 1),
+        width=box_w,
     )
-    try:
-        results = orchestrator.run()
-    except KeyboardInterrupt:
-        print_banner_box("Task interrupted by user.", level="warning")
-        return 130
-    except Exception as e:
-        print_banner_box(f"Orchestration Error: {e}", level="error")
-        return 1
+    verdict_table.add_column("Property", style=f"bold {COLOR_FG_PRIMARY}", width=24)
+    verdict_table.add_column("Value", style=COLOR_FG_SECONDARY)
 
-    # Render Diagnosis / Question Answer / Plan & PRD or Scope Clarification
-    for r in results:
-        if r.outcome == "diagnosed" and r.detail:
-            console.print()
-            ans_title = Text.from_markup(f"[{COLOR_ACCENT} bold]{SYM_ASSISTANT} BrainFrog ({chosen_model})[/{COLOR_ACCENT} bold]")
-            console.print(ans_title)
-            console.print(Text("─" * 40, style=COLOR_ACCENT))
-            console.print(Markdown(r.detail))
-            console.print()
-        elif r.outcome == "planned" and r.detail:
-            console.print()
-            plan_title = Text.from_markup(f"[bold #4EC9B0]📋 Plan & PRD ({chosen_model})[/bold #4EC9B0]")
-            console.print(plan_title)
-            console.print(Text("─" * 40, style="#4EC9B0"))
-            console.print(Markdown(r.detail))
-            console.print()
-        elif r.outcome == "needs_clarification" and r.detail:
-            print_banner_box(r.detail, level="warning", title="Scope Clarification")
-        elif r.outcome in ("escalated", "abandoned") and r.detail:
-            print_banner_box(r.detail, level="error", title=f"Step {r.step.id} {r.outcome.upper()}")
+    verdict_table.add_row("Task ID", result.task_id)
 
-    # Render Task Summary Table only for multi-step / code planning tasks
-    is_question_turn = len(results) == 1 and results[0].outcome in ("diagnosed", "needs_clarification", "planned")
-    if not is_question_turn:
-        summary_table = Table(
-            title=" Task Summary ",
-            box=box.ROUNDED,
-            border_style=COLOR_FG_MUTED,
-            header_style=f"bold {COLOR_ACCENT}",
-            show_header=True,
-            padding=(0, 1),
-            width=box_w,
+    # Status styling
+    status_style = (
+        COLOR_SUCCESS
+        if result.status == "COMMITTED"
+        else (COLOR_WARNING if result.status in ("ROLLED_BACK", "CANCELLED") else COLOR_ERROR)
+    )
+    verdict_table.add_row("Execution Status", f"[{status_style} bold]{result.status}[/{status_style} bold]")
+    verdict_table.add_row(
+        "Verification Verdict", f"[{verdict_color} bold]{verdict_sym} {verdict_text}[/{verdict_color} bold]"
+    )
+
+    # Resolve safe relative proof paths
+    json_rel = _resolve_relative_proof_path(result.proof_path, repo_dir, result.task_id)
+    md_rel = _resolve_relative_proof_path(result.proof_markdown_path, repo_dir, result.task_id)
+
+    if json_rel:
+        verdict_table.add_row("Proof Artifact (JSON)", f"[bold {COLOR_ACCENT}]{json_rel}[/bold {COLOR_ACCENT}]")
+    if md_rel:
+        verdict_table.add_row("Proof Summary (MD)", f"[bold {COLOR_ACCENT}]{md_rel}[/bold {COLOR_ACCENT}]")
+
+    console.print(Align.center(verdict_table) if cols > 100 else verdict_table)
+
+    # 2. Verification Gate Breakdown Table
+    gate_table = Table(
+        title=" Verification Gate Breakdown ",
+        box=box.ROUNDED,
+        border_style=COLOR_FG_MUTED,
+        header_style=f"bold {COLOR_ACCENT}",
+        show_header=True,
+        padding=(0, 1),
+        width=box_w,
+    )
+    gate_table.add_column("Gate Invariant", style=f"bold {COLOR_FG_PRIMARY}", width=26)
+    gate_table.add_column("Evaluation", style=COLOR_FG_SECONDARY)
+    gate_table.add_column("State", justify="right", width=16)
+
+    details = getattr(result, "verification_details", None) or {}
+
+    # Extract test info from proof artifact or result
+    proof_art = getattr(result, "proof_artifact", None)
+    v_ev = getattr(proof_art, "verification", None) if proof_art else None
+    proc_ev = getattr(v_ev, "process_evidence", None) if v_ev else None
+
+    test_cmd_run = getattr(proc_ev, "command", None) or (getattr(v_ev, "test_command", None) if v_ev else None)
+    test_exit_code = getattr(proc_ev, "returncode", None) if proc_ev else (getattr(v_ev, "exit_code", None) if v_ev else None)
+
+    # Gate 1: Workspace Scope
+    scope_passed = details.get("workspace_scope", True)
+    scope_badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} PASSED[/bold {COLOR_SUCCESS}]" if scope_passed else f"[bold {COLOR_ERROR}]{SYM_ERROR} FAILED[/bold {COLOR_ERROR}]"
+    gate_table.add_row("Workspace Scope", "Planned file mutation boundary", scope_badge)
+
+    # Gate 2: Test Suite
+    if test_exit_code is not None or (test_cmd_run and test_cmd_run.strip()):
+        cmd_display = test_cmd_run or "test suite"
+        if test_exit_code == 0:
+            test_badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} PASSED (exit 0)[/bold {COLOR_SUCCESS}]"
+            gate_table.add_row("Domain Test Suite", f"`{cmd_display}`", test_badge)
+        else:
+            code_str = str(test_exit_code) if test_exit_code is not None else "failed"
+            test_badge = f"[bold {COLOR_ERROR}]{SYM_ERROR} FAILED (exit {code_str})[/bold {COLOR_ERROR}]"
+            gate_table.add_row("Domain Test Suite", f"`{cmd_display}`", test_badge)
+    else:
+        test_badge = f"[bold {COLOR_FG_MUTED}]— NOT RUN[/bold {COLOR_FG_MUTED}]"
+        gate_table.add_row("Domain Test Suite", "No test command configured/executed", test_badge)
+
+    # Gate 3: Transaction Integrity
+    tx_passed = details.get("transaction_integrity", False)
+    tx_badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} PASSED[/bold {COLOR_SUCCESS}]" if tx_passed else f"[bold {COLOR_ERROR}]{SYM_ERROR} FAILED[/bold {COLOR_ERROR}]"
+    tx_desc = "Atomic commit cleanly verified" if tx_passed else ("Mutations rolled back" if result.status == "ROLLED_BACK" else "Transaction uncommitted")
+    gate_table.add_row("Transaction Integrity", tx_desc, tx_badge)
+
+    # Gate 4: Execution Integrity
+    exec_passed = details.get("execution_integrity", True)
+    exec_badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} PASSED[/bold {COLOR_SUCCESS}]" if exec_passed else f"[bold {COLOR_ERROR}]{SYM_ERROR} FAILED[/bold {COLOR_ERROR}]"
+    gate_table.add_row("Execution Integrity", "Zero orphaned subprocesses", exec_badge)
+
+    # Gate 5: Trust Integrity
+    trust_passed = details.get("trust_integrity", True)
+    trust_badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} PASSED[/bold {COLOR_SUCCESS}]" if trust_passed else f"[bold {COLOR_ERROR}]{SYM_ERROR} FAILED[/bold {COLOR_ERROR}]"
+    gate_table.add_row("Trust & Channel Boundary", "Local CLI authority respected", trust_badge)
+
+    console.print()
+    console.print(Align.center(gate_table) if cols > 100 else gate_table)
+
+    # 3. Explanations for Failure / Rollback / Recovery
+    if getattr(result, "recovery_required", False):
+        rec_msg = (
+            f"🛑 [bold {COLOR_ERROR}]RECOVERY REQUIRED:[/bold {COLOR_ERROR}] {result.failure_reason or 'Crash or unfinalized commit intent detected.'}\n"
+            "The repository is in a recovery-required state. Run [bold]/recover[/bold] to inspect and reconcile intents."
         )
-        summary_table.add_column("Step", style=f"bold {COLOR_FG_PRIMARY}", no_wrap=True)
-        summary_table.add_column("Description", style=COLOR_FG_SECONDARY)
-        summary_table.add_column("Status", justify="right")
-        summary_table.add_column("Retries", justify="right", style=COLOR_FG_MUTED)
+        print_banner_box(rec_msg, level="error", title="Crash Recovery Required")
+    elif result.status == "ROLLED_BACK":
+        rb_msg = (
+            f"⚠️ [bold {COLOR_WARNING}]MUTATIONS ROLLED BACK:[/bold {COLOR_WARNING}] {result.failure_reason or 'Task did not satisfy verification criteria.'}\n"
+            "Pre-task working tree state was cleanly restored."
+        )
+        print_banner_box(rb_msg, level="warning", title="Transaction Rolled Back")
+    elif not result.verified:
+        if result.status == "REJECTED":
+            is_appr = "approval" in (result.failure_reason or "").lower() or "approval" in (result.summary or "").lower()
+            lvl = "warning" if is_appr else "error"
+            title = "Approval Required" if is_appr else "Permission Denied"
+            print_banner_box(result.summary or result.failure_reason or "Action rejected by security policy.", level=lvl, title=title)
+        else:
+            fail_msg = result.failure_reason or result.summary or "Task execution completed without passing verification criteria."
+            print_banner_box(fail_msg, level="error", title="Verification Failed")
 
-        for r in results:
-            is_success = r.outcome in ("diagnosed", "opened_pr", "drafted_pr")
-            badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} SUCCESS[/bold {COLOR_SUCCESS}]" if is_success else f"[bold {COLOR_WARNING}]{SYM_WARNING} {r.outcome.upper()}[/bold {COLOR_WARNING}]"
-            summary_table.add_row(f"Step {r.step.id}", r.step.description, badge, str(r.retries))
 
+def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
+    """Authoritative CLI display of Deterministic Proof Verification Report."""
+    cols, rows, box_w, margin, pad = get_layout_dims()
+
+    status_cfg = {
+        "VALID": {"color": COLOR_SUCCESS, "sym": SYM_SUCCESS, "label": "VALID"},
+        "INVALID": {"color": COLOR_ERROR, "sym": SYM_ERROR, "label": "INVALID"},
+        "INCOMPLETE": {"color": COLOR_WARNING, "sym": SYM_WARNING, "label": "INCOMPLETE"},
+    }
+    cfg = status_cfg.get(report.overall_status.value, status_cfg["INVALID"])
+
+    console.print()
+    summary_table = Table(
+        title=f" Deterministic Proof Verification: [{cfg['color']} bold]{cfg['sym']} {cfg['label']}[/{cfg['color']} bold] ",
+        box=box.ROUNDED,
+        border_style=cfg["color"] if report.overall_status.value == "VALID" else (COLOR_ERROR if report.overall_status.value == "INVALID" else COLOR_WARNING),
+        header_style=f"bold {COLOR_ACCENT}",
+        show_header=False,
+        padding=(0, 1),
+        width=box_w,
+    )
+    summary_table.add_column("Property", style=f"bold {COLOR_FG_PRIMARY}", width=26)
+    summary_table.add_column("Value", style=COLOR_FG_SECONDARY)
+
+    summary_table.add_row("Verification Status", f"[{cfg['color']} bold]{cfg['sym']} {cfg['label']}[/{cfg['color']} bold]")
+    summary_table.add_row("Target", report.target)
+    summary_table.add_row("Task ID", report.task_id or "—")
+
+    # Distinct Verdict vs Transaction Outcome
+    v_val = report.verdict_status or "UNKNOWN"
+    v_style = COLOR_SUCCESS if v_val == "VERIFIED" else COLOR_ERROR
+    summary_table.add_row("Task Verdict", f"[{v_style} bold]{v_val}[/{v_style} bold]")
+
+    tx_status = (report.transaction_status or "UNKNOWN").upper()
+    tx_style = (
+        COLOR_SUCCESS if tx_status == "COMMITTED"
+        else (COLOR_WARNING if tx_status in ("ROLLED_BACK", "CANCELLED") else COLOR_ERROR)
+    )
+    summary_table.add_row("Transaction Outcome", f"[{tx_style} bold]{tx_status}[/{tx_style} bold]")
+
+    # Proof artifact path
+    if report.proof_path:
+        try:
+            rel_path = str(Path(report.proof_path).relative_to(repo_dir.resolve()))
+        except Exception:
+            rel_path = str(report.proof_path)
+        summary_table.add_row("Proof Artifact (JSON)", f"[bold {COLOR_ACCENT}]{rel_path}[/bold {COLOR_ACCENT}]")
+    else:
+        summary_table.add_row("Proof Artifact (JSON)", f"[bold {COLOR_ERROR}]File not found[/bold {COLOR_ERROR}]")
+
+    # Git Provenance
+    if report.is_git:
+        sha_display = report.commit_sha or "none"
+        summary_table.add_row("Git Commit SHA", f"[bold {COLOR_INFO}]{sha_display}[/bold {COLOR_INFO}]")
+        if report.provenance_summary:
+            branch = report.provenance_summary.get("branch") or "detached"
+            summary_table.add_row("Git Branch", f"{branch}")
+    else:
+        summary_table.add_row("Git Provenance", "Non-git workspace")
+
+    console.print(Align.center(summary_table) if cols > 100 else summary_table)
+
+    # Breakdown of individual checks
+    checks_table = Table(
+        title=" Evidential & Consistency Check Breakdown ",
+        box=box.ROUNDED,
+        border_style=COLOR_FG_MUTED,
+        header_style=f"bold {COLOR_ACCENT}",
+        show_header=True,
+        padding=(0, 1),
+        width=box_w,
+    )
+    checks_table.add_column("Check Invariant", style=f"bold {COLOR_FG_PRIMARY}", width=30)
+    checks_table.add_column("State", justify="center", width=14)
+    checks_table.add_column("Diagnostics / Message", style=COLOR_FG_SECONDARY)
+
+    for c in report.checks:
+        c_cfg = status_cfg.get(c.status.value, status_cfg["INVALID"])
+        badge = f"[{c_cfg['color']} bold]{c_cfg['sym']} {c_cfg['label']}[/{c_cfg['color']} bold]"
+        checks_table.add_row(c.check_name, badge, c.message)
+
+    console.print()
+    console.print(Align.center(checks_table) if cols > 100 else checks_table)
+
+    # Actionable reasons for INVALID / INCOMPLETE
+    if report.reasons:
         console.print()
-        console.print(Align.center(summary_table) if cols > 100 else summary_table)
+        r_title = "Verification Failure Reasons" if report.is_invalid else "Verification Incompleteness Reasons"
+        r_level = "error" if report.is_invalid else "warning"
+        reasons_text = "\n".join(f"• {r}" for r in report.reasons)
+        print_banner_box(reasons_text, level=r_level, title=r_title)
 
-        # Render Proactive Suggestions (Post-Success Reflection)
-        for r in results:
-            if r.outcome in ("opened_pr", "drafted_pr") and getattr(r, "suggestion", None):
-                console.print()
-                step_suffix = f" (Step {r.step.id})" if len(results) > 1 else ""
-                console.print(Text.from_markup(f"[bold #FFB454]💡 Saran Proaktif{step_suffix}:[/bold #FFB454]"))
-                console.print(Text(f"  {r.suggestion}", style=COLOR_FG_PRIMARY))
+    # Execution authenticity boundary disclaimer
+    disclaimer = (
+        "ℹ Note: BrainFrog proof verification evaluates internal structural, gate, and provenance consistency.\n"
+        "Proofs are stored as JSON; offline verification asserts evidential consistency, not cryptographic hardware attestation."
+    )
+    console.print(
+        Align.center(Text(disclaimer, style=COLOR_FG_MUTED))
+        if cols > 100
+        else Text(disclaimer, style=COLOR_FG_MUTED)
+    )
+    console.print()
 
-    # Turn token & context window footer (left-aligned with text box)
+
+def verify_proof_cli(repo_dir: Path, target: str) -> int:
+    """CLI handler for deterministic proof verification. Returns exit code 0 (VALID), 1 (INVALID), 2 (INCOMPLETE)."""
+    from core.runtime.proof_verifier import (
+        DeterministicProofVerifier,
+        ProofVerificationStatus,
+    )
+    verifier = DeterministicProofVerifier(repo_dir)
+    report = verifier.verify(target)
+    print_proof_verification_report(report, repo_dir)
+
+    if report.overall_status == ProofVerificationStatus.VALID:
+        return 0
+    elif report.overall_status == ProofVerificationStatus.INVALID:
+        return 1
+    elif report.overall_status == ProofVerificationStatus.INCOMPLETE:
+        return 2
+    return 1
+
+
+def _print_turn_footer(chosen_model: str, provider_tag: str, box_w: int, right_margin: int, margin: int) -> None:
+    """Render token cost and context window footer aligned with layout dimensions."""
+    from system2 import usage_tracker
     task_usage = usage_tracker.reset_task()
-    provider_tag = getattr(system2, "provider_name", "claude")
     cost_str = "Google Auth (Active Session)" if provider_tag == "antigravity" else f"Est. Cost: ${task_usage.cost_usd:.4f}"
     ctx_info = usage_tracker.get_context_info(chosen_model)
 
@@ -559,14 +664,317 @@ def execute_task(
     else:
         console.print()
 
-    # Record turn in isolated session state
+
+def is_autonomous_coding_task(task: str, mode: str = "build", test_cmd: Optional[str] = None) -> bool:
+    """Determine whether a task invocation represents an autonomous coding task.
+
+    Autonomous coding tasks execute code modifications, run test verification,
+    and require durable proof generation.
+
+    Conversational paths (such as plan mode, conversational questions, or diagnosis)
+    bypass proof verification to preserve conversational interaction.
+    """
+    if mode != "build":
+        return False
+    if test_cmd and test_cmd.strip():
+        return True
+
+    # Use deterministic task classifier to detect pure non-coding inquiries
     try:
-        assistant_texts = [r.detail for r in results if getattr(r, "detail", None)]
-        session.record_interaction(user_text=task, assistant_text="\n\n".join(assistant_texts))
+        from core.runtime.task import Task
+        from core.runtime.task_classification import classify_task
+        c = classify_task(Task(task_id="classifier_probe", objective=task))
+        if c.task_type in ("analysis", "research", "documentation"):
+            return False
     except Exception:
         pass
 
-    return 0
+    lower = task.lower().strip()
+    if lower.startswith(("/plan", "/diagnose", "/help", "hello", "hi ", "explain ", "what is ", "how does ")):
+        return False
+    if "turn in" in lower and "conversation" in lower:
+        return False
+    if "architectural invariant" in lower and "verify" in lower and not test_cmd:
+        return False
+
+    return True
+
+
+# -------------------------------------------------------------------------
+# Execution Logic
+# -------------------------------------------------------------------------
+def execute_task(
+    task: str,
+    repo_dir: Path,
+    backend: str = "jev",
+    model: Optional[str] = None,
+    claude_model: Optional[str] = None,
+    provider: Optional[str] = None,
+    test_cmd: Optional[str] = None,
+    module_map: Optional[str] = None,
+    min_domain_confidence: float = 0.45,
+    auto_pr: bool = False,
+    pr_risk_ceiling: str = "medium",
+    max_retries: int = 3,
+    skill: Optional[str] = None,
+    mode: str = "build",
+    plan_context: Optional[str] = None,
+    attached_images: Optional[List[Any]] = None,
+    runtime: Optional[Any] = None,
+    user_id: str = "local",
+    conversation_id: str = "default",
+) -> int:
+    """Run a single task through the unified BrainFrogRuntime pipeline."""
+    from core.runtime import (
+        BrainFrogRuntime,
+        IncomingMessage,
+        TaskRequest,
+        TaskResult,
+        TaskReservationCoordinator,
+        TaskActiveError,
+        TaskRecoveryRequiredError,
+    )
+    from system2 import usage_tracker
+
+    if not (repo_dir / ".git").exists():
+        ensure_git_remote(repo_dir)
+        if not (repo_dir / ".git").exists():
+            print_banner_box(f"{repo_dir} is not a git repository.", level="error", title="Git Error")
+            return 1
+
+    if mode == "build" and not plan_context:
+        try:
+            from plans import get_latest_plan, format_plan_handoff
+            lp = get_latest_plan(repo_dir)
+            if lp:
+                plan_context = format_plan_handoff(lp, repo_dir)
+        except Exception:
+            pass
+
+    active_test_cmd = test_cmd or detect_default_test_cmd(repo_dir)
+    chosen_model = model or claude_model
+
+    if runtime is None:
+        try:
+            runtime = BrainFrogRuntime(
+                repo_dir=repo_dir,
+                default_backend=backend,
+                default_provider=provider,
+                default_model=chosen_model,
+                default_test_cmd=active_test_cmd,
+            )
+        except Exception as e:
+            print_banner_box(f"Runtime Initialization Error: {e}", level="error")
+            return 1
+
+    cols, rows, box_w, margin, pad = get_layout_dims()
+    right_margin = max(0, cols - box_w - margin)
+
+    def log_cli(msg: str) -> None:
+        clean = msg.strip()
+        if not clean:
+            return
+        if clean.startswith("=== Step") and clean.endswith("==="):
+            step_title = clean.strip("= ").strip()
+            console.print()
+            console.print(Text(f"▸ {step_title}", style=f"bold {COLOR_FG_PRIMARY}"))
+            console.print(Text("─" * 40, style=COLOR_ACCENT))
+            console.print()
+        else:
+            try:
+                txt = Text.from_markup(clean)
+            except Exception:
+                txt = Text(clean, style=COLOR_FG_MUTED)
+            console.print(txt)
+
+    provider_tag = provider or "claude"
+
+    # Route based on whether this is an autonomous coding task or conversational interaction
+    if is_autonomous_coding_task(task, mode=mode, test_cmd=active_test_cmd):
+        # Scope A: Canonical Autonomous Verification Pipeline
+        task_id = f"task_{secrets.token_hex(8)}"
+        coordinator = TaskReservationCoordinator(repo_dir)
+        reservation = None
+        try:
+            reservation = coordinator.reserve(task_id)
+        except TaskRecoveryRequiredError as rec_err:
+            print_banner_box(
+                f"Workspace requires recovery: {rec_err}.\nRun '/recover' or resolve unfinalized commit intents before submitting new tasks.",
+                level="error",
+                title="Recovery Required",
+            )
+            return 1
+        except (TaskActiveError, Exception) as active_err:
+            if isinstance(active_err, TaskActiveError):
+                print_banner_box(f"Task reservation conflict: {active_err}", level="error", title="Reservation Error")
+                return 1
+            # Propagate other reservation coordinator errors
+            print_banner_box(f"Task reservation error: {active_err}", level="error", title="Reservation Error")
+            return 1
+
+        parsed_test_cmd = shlex.split(active_test_cmd) if active_test_cmd and active_test_cmd.strip() else None
+
+        req_meta = {
+            "repo_dir": str(repo_dir),
+            "backend": backend,
+            "provider": provider,
+            "model": chosen_model,
+            "test_cmd": active_test_cmd,
+            "module_map": module_map,
+            "min_domain_confidence": min_domain_confidence,
+            "auto_pr": auto_pr,
+            "pr_risk_ceiling": pr_risk_ceiling,
+            "max_retries": max_retries,
+            "skill": skill,
+            "mode": mode,
+            "plan_context": plan_context,
+            "log_fn": log_cli,
+            "user_id": user_id,
+        }
+        if attached_images:
+            req_meta["attachments"] = list(attached_images)
+
+        task_request = TaskRequest(
+            task_id=task_id,
+            user_request=task,
+            workspace=repo_dir,
+            channel="cli",
+            session_id=conversation_id,
+            test_command=parsed_test_cmd,
+            max_retries=max_retries,
+            metadata=req_meta,
+        )
+
+        try:
+            task_res: TaskResult = execute_autonomous_task(runtime, task_request)
+        except KeyboardInterrupt:
+            print_banner_box("Task interrupted by user.", level="warning")
+            return 130
+        except Exception as exc:
+            print_banner_box(f"Runtime Error: {exc}", level="error")
+            return 1
+        finally:
+            if reservation is not None:
+                try:
+                    reservation.release()
+                except Exception:
+                    pass
+
+        print_task_verification_report(task_res, repo_dir)
+        _print_turn_footer(chosen_model or "claude", provider_tag, box_w, right_margin, margin)
+
+        # Return non-zero CLI exit code for failed verification or execution
+        return 0 if (task_res.verified and task_res.success) else 1
+
+    else:
+        # Conversational / Planning Mode (outside autonomous coding execution)
+        incoming = IncomingMessage(
+            text=task,
+            channel="cli",
+            user_id=user_id,
+            conversation_id=conversation_id,
+            attachments=list(attached_images or []),
+            metadata={
+                "repo_dir": str(repo_dir),
+                "backend": backend,
+                "provider": provider,
+                "model": chosen_model,
+                "test_cmd": active_test_cmd,
+                "module_map": module_map,
+                "min_domain_confidence": min_domain_confidence,
+                "auto_pr": auto_pr,
+                "pr_risk_ceiling": pr_risk_ceiling,
+                "max_retries": max_retries,
+                "skill": skill,
+                "mode": mode,
+                "plan_context": plan_context,
+            },
+        )
+
+        try:
+            out = runtime.handle_message(incoming, log_fn=log_cli)
+        except KeyboardInterrupt:
+            print_banner_box("Task interrupted by user.", level="warning")
+            return 130
+        except Exception as e:
+            print_banner_box(f"Runtime Error: {e}", level="error")
+            return 1
+
+        if out.status == "rejected":
+            print_banner_box(out.text or out.error or "Action rejected by security policy.", level="error", title="Permission Denied")
+            return 1
+        elif out.status == "pending_approval":
+            print_banner_box(out.text or "Operation requires approval before execution.", level="warning", title="Approval Required")
+            return 1
+        elif out.status == "error" and not out.metadata.get("results"):
+            print_banner_box(out.text or out.error or "Task failed.", level="error", title="Execution Error")
+            return 1
+
+        results = out.metadata.get("results") or []
+        chosen_model = out.metadata.get("model") or chosen_model
+        provider_tag = out.metadata.get("provider") or provider or "claude"
+
+        if not results and out.text and out.success:
+            console.print()
+            console.print(Markdown(out.text))
+            console.print()
+
+        # Render Diagnosis / Question Answer / Plan & PRD or Scope Clarification
+        for r in results:
+            if r.outcome == "diagnosed" and r.detail:
+                console.print()
+                ans_title = Text.from_markup(f"[{COLOR_ACCENT} bold]{SYM_ASSISTANT} BrainFrog ({chosen_model})[/{COLOR_ACCENT} bold]")
+                console.print(ans_title)
+                console.print(Text("─" * 40, style=COLOR_ACCENT))
+                console.print(Markdown(r.detail))
+                console.print()
+            elif r.outcome == "planned" and r.detail:
+                console.print()
+                plan_title = Text.from_markup(f"[bold #4EC9B0]📋 Plan & PRD ({chosen_model})[/bold #4EC9B0]")
+                console.print(plan_title)
+                console.print(Text("─" * 40, style="#4EC9B0"))
+                console.print(Markdown(r.detail))
+                console.print()
+            elif r.outcome == "needs_clarification" and r.detail:
+                print_banner_box(r.detail, level="warning", title="Scope Clarification")
+            elif r.outcome in ("escalated", "abandoned") and r.detail:
+                print_banner_box(r.detail, level="error", title=f"Step {r.step.id} {r.outcome.upper()}")
+
+        # Render Task Summary Table only for multi-step / code planning tasks
+        is_question_turn = len(results) == 1 and results[0].outcome in ("diagnosed", "needs_clarification", "planned")
+        if results and not is_question_turn:
+            summary_table = Table(
+                title=" Task Summary ",
+                box=box.ROUNDED,
+                border_style=COLOR_FG_MUTED,
+                header_style=f"bold {COLOR_ACCENT}",
+                show_header=True,
+                padding=(0, 1),
+                width=box_w,
+            )
+            summary_table.add_column("Step", style=f"bold {COLOR_FG_PRIMARY}", no_wrap=True)
+            summary_table.add_column("Description", style=COLOR_FG_SECONDARY)
+            summary_table.add_column("Status", justify="right")
+            summary_table.add_column("Retries", justify="right", style=COLOR_FG_MUTED)
+
+            for r in results:
+                is_step_success = r.outcome in ("diagnosed", "opened_pr", "drafted_pr", "verified")
+                badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} SUCCESS[/bold {COLOR_SUCCESS}]" if is_step_success else f"[bold {COLOR_WARNING}]{SYM_WARNING} {r.outcome.upper()}[/bold {COLOR_WARNING}]"
+                summary_table.add_row(f"Step {r.step.id}", r.step.description, badge, str(r.retries))
+
+            console.print()
+            console.print(Align.center(summary_table) if cols > 100 else summary_table)
+
+            # Render Proactive Suggestions (Post-Success Reflection)
+            for r in results:
+                if r.outcome in ("opened_pr", "drafted_pr") and getattr(r, "suggestion", None):
+                    console.print()
+                    step_suffix = f" (Step {r.step.id})" if len(results) > 1 else ""
+                    console.print(Text.from_markup(f"[bold #FFB454]💡 Saran Proaktif{step_suffix}:[/bold #FFB454]"))
+                    console.print(Text(f"  {r.suggestion}", style=COLOR_FG_PRIMARY))
+
+        _print_turn_footer(chosen_model or "claude", provider_tag, box_w, right_margin, margin)
+        return 0 if out.success else 1
 
 
 # -------------------------------------------------------------------------
@@ -1503,6 +1911,10 @@ def run_interactive(
             ("/skills", "Lihat daftar modular skill dan status aktifnya", "Skills"),
             ("/skill [name]", "Aktifkan atau nonaktifkan modular skill spesifik", "Skills"),
             ("/rules, /memory", "Tampilkan atau buat aturan proyek (BRAINFROG.md)", "Config"),
+            ("/works [active|done]", "Lihat daftar persistent work unit", "Work"),
+            ("/work <id>", "Lihat rincian status persistent work unit", "Work"),
+            ("/resume <id>", "Lanjutkan eksekusi work yang tertunda/crash", "Work"),
+            ("/cancel <id>", "Batalkan work unit yang sedang aktif", "Work"),
             ("/status", "Tampilkan status workspace, branch git, dan agen saat ini", "System"),
             ("/repo <path>", "Pindah direktori repositori target workspace", "Workspace"),
             ("/remote [url]", "Lihat atau atur Git remote repository GitHub", "Workspace"),
@@ -1526,6 +1938,15 @@ def run_interactive(
     print_splash(cols, rows)
     ensure_git_remote(repo_dir)
     is_first_turn[0] = True
+
+    from core.runtime import BrainFrogRuntime, IncomingMessage
+    runtime = BrainFrogRuntime(
+        repo_dir=repo_dir,
+        default_backend=active_backend,
+        default_provider=active_provider,
+        default_model=active_model,
+        default_test_cmd=active_test_cmd,
+    )
 
     while True:
         cols, rows = shutil.get_terminal_size(fallback=(95, 35))
@@ -1605,8 +2026,7 @@ def run_interactive(
             print_splash(cols, rows)
             continue
         elif lower in ("/new", "/reset"):
-            from core.runtime.session import session_manager
-            session_manager.reset("cli:local:default")
+            runtime.handle_message(IncomingMessage(text="/reset", channel="cli", user_id="local", conversation_id="default"))
             usage_tracker.reset_session()
             console.clear()
             is_first_turn[0] = True
@@ -1803,6 +2223,7 @@ def run_interactive(
                         max_retries=max_retries,
                         skill=active_skill,
                         mode="plan",
+                        runtime=runtime,
                     )
             else:
                 print_banner_box(
@@ -1860,6 +2281,7 @@ def run_interactive(
                         skill=active_skill,
                         mode="build",
                         plan_context=active_plan_context,
+                        runtime=runtime,
                     )
             else:
                 if lp:
@@ -1910,6 +2332,26 @@ def run_interactive(
                 f"[{COLOR_FG_PRIMARY}]Test Command:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_MUTED}]{active_test_cmd}[/{COLOR_FG_MUTED}]"
             )
             print_banner_box(status_text, level="info", title="System Status")
+            continue
+        elif lower.startswith(("/verify-proof", "/verify-proof ", "/verify ")):
+            parts = prompt.split(maxsplit=1)
+            if len(parts) > 1 and parts[1].strip():
+                verify_proof_cli(repo_dir, parts[1].strip())
+            else:
+                print_banner_box("Penggunaan: `/verify-proof <task_id atau path/to/proof.json>`", level="error", title="Missing Target")
+            continue
+        elif lower.startswith(("/works", "/work ", "/resume ", "/cancel ", "/approve ", "/reject ", "/approvals", "/transactions", "/transaction ", "/recover ", "/exec ", "/run ")):
+            incoming_cmd = IncomingMessage(
+                text=prompt,
+                channel="cli",
+                user_id="local",
+                conversation_id="default",
+                metadata={"repo_dir": str(repo_dir)},
+            )
+            out = runtime.handle_message(incoming_cmd)
+            lvl = "success" if out.success else ("warning" if out.status == "pending_approval" else "error")
+            title = "Approval Required" if out.status == "pending_approval" else None
+            print_banner_box(out.text, level=lvl, title=title)
             continue
         elif lower.startswith("/remote"):
             parts = prompt.split(maxsplit=1)
@@ -2440,6 +2882,13 @@ def run_interactive(
                             active_plan_context = format_plan_handoff(_lp, repo_dir) if _lp else None
                         except Exception:
                             active_plan_context = None
+                    runtime = BrainFrogRuntime(
+                        repo_dir=repo_dir,
+                        default_backend=active_backend,
+                        default_provider=active_provider,
+                        default_model=active_model,
+                        default_test_cmd=active_test_cmd,
+                    )
                 else:
                     print_banner_box(f"Direktori tidak ditemukan:\n{parts[1]}", level="error", title="Repo Error")
             else:
@@ -2631,6 +3080,7 @@ def run_interactive(
                 mode=active_mode,
                 plan_context=active_plan_context if active_mode == "build" else None,
                 attached_images=turn_images,
+                runtime=runtime,
             )
 
         # Clear staged images once submitted
@@ -2666,6 +3116,7 @@ def main() -> int:
     p.add_argument("--max-retries", type=int, default=3)
     p.add_argument("--module-map", default=None, help="Path to custom modules.json")
     p.add_argument("--min-domain-confidence", type=float, default=0.45)
+    p.add_argument("--verify-proof", default=None, help="Verify proof artifact consistency by task ID or path")
     p.add_argument("-v", "--version", action="version", version=f"BrainFrog {CLI_VERSION}")
 
     args = p.parse_args()
@@ -2673,10 +3124,27 @@ def main() -> int:
     repo_dir = find_git_root(Path(args.repo))
     load_all_envs(repo_dir)
 
+    if args.verify_proof:
+        return verify_proof_cli(repo_dir, args.verify_proof)
+
     raw_task = " ".join(args.task) if isinstance(args.task, list) and args.task else args.flag_task
     chosen_task = (raw_task or "").strip()
     if chosen_task in ("doctor", "/doctor"):
         return show_doctor(repo_dir)
+
+    if (
+        chosen_task.startswith("verify-proof")
+        or chosen_task.startswith("/verify-proof")
+        or chosen_task.startswith("verify ")
+        or chosen_task.startswith("/verify ")
+        or chosen_task in ("verify", "/verify")
+    ):
+        parts = chosen_task.split(maxsplit=1)
+        if len(parts) > 1 and parts[1].strip():
+            return verify_proof_cli(repo_dir, parts[1].strip())
+        else:
+            print_banner_box("Usage: brainfrog verify-proof <task_id or path/to/proof.json>", level="error", title="Missing Target")
+            return 1
 
     if chosen_task.startswith("gateway") or chosen_task.startswith("/gateway"):
         parts = chosen_task.split()

@@ -1,0 +1,19 @@
+{
+  "core": {
+    "description": "Core Python application logic, models, services, algorithms, utilities",
+    "paths": [
+      "src/",
+      "app/",
+      "*.py"
+    ],
+    "sensitive": false
+  },
+  "test": {
+    "description": "Pytest and unittest test suites",
+    "paths": [
+      "tests/",
+      "test_*.py"
+    ],
+    "sensitive": false
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "commit_marker": null,
+  "completed_at": 1791476890.8866684,
+  "contract_id": null,
+  "error": "Verification failed: Filesystem consistency checksum mismatch",
+  "failure_reason": "Verification failed: Filesystem consistency checksum mismatch",
+  "id": "tx_abe8e58fb721e19abb041cb005346138",
+  "metadata": {},
+  "operations": [
+    {
+      "after_state": {
+        "content": "class MobileNavbar: pass",
+        "is_text": true
+      },
+      "before_state": {
+        "content": "\"\"\"Mobile navbar component with broken responsive toggle for Phase 3 E2E test.\"\"\"\n\nclass MobileNavbar:\n    def __init__(self) -> None:\n        self.is_open: bool = False\n        self.breakpoint: int = 768\n\n    def toggle(self) -> None:\n        \"\"\"Toggle mobile navbar menu open state.\"\"\"\n        # BUG: Fails to toggle the state!\n        pass\n\n    def render(self, viewport_width: int) -> str:\n        \"\"\"Render navigation markup.\"\"\"\n        if viewport_width < self.breakpoint and self.is_open:\n            return \"<nav class='navbar mobile mobile-menu-active'></nav>\"\n        return \"<nav class='navbar desktop'></nav>\"\n",
+        "exists": true,
+        "is_text": true
+      },
+      "error": null,
+      "id": "op_404a958a6d462e35",
+      "new_target": null,
+      "result": "rolled_back",
+      "rollback_state": {
+        "action": "restore",
+        "state": {
+          "content": "\"\"\"Mobile navbar component with broken responsive toggle for Phase 3 E2E test.\"\"\"\n\nclass MobileNavbar:\n    def __init__(self) -> None:\n        self.is_open: bool = False\n        self.breakpoint: int = 768\n\n    def toggle(self) -> None:\n        \"\"\"Toggle mobile navbar menu open state.\"\"\"\n        # BUG: Fails to toggle the state!\n        pass\n\n    def render(self, viewport_width: int) -> str:\n        \"\"\"Render navigation markup.\"\"\"\n        if viewport_width < self.breakpoint and self.is_open:\n            return \"<nav class='navbar mobile mobile-menu-active'></nav>\"\n        return \"<nav class='navbar desktop'></nav>\"\n",
+          "exists": true,
+          "is_text": true
+        },
+        "target": "navbar.py"
+      },
+      "status": "rolled_back",
+      "target": "navbar.py",
+      "type": "modify_file"
+    }
+  ],
+  "plan_id": null,
+  "rollback_reason": "Verification failed: Filesystem consistency checksum mismatch",
+  "session_id": "cli:local:default",
+  "started_at": 1791476890.8455977,
+  "status": "rolled_back",
+  "updated_at": 1791476890.8866684,
+  "verification_result": {},
+  "work_id": null,
+  "workspace": "C:\\dame-project\\tools\\agentic_dev\\tests\\fixtures\\phase3_demo"
+}

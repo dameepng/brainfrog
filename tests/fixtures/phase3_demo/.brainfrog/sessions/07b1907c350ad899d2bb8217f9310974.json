@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "cli:local:session_lock_test_999",
+  "session_incarnation_id": "ae8429bedeaba1b808d77a7d807d56c2",
+  "revision": 1,
+  "channel": "cli",
+  "user_id": "local",
+  "conversation_id": "session_lock_test_999",
+  "created_at": 1791486719.5183616,
+  "last_active_at": 1791486719.5183616,
+  "active_mode": "build",
+  "active_skill": null,
+  "active_model": null,
+  "active_provider": null,
+  "plan_context": null,
+  "metadata": {},
+  "history": [],
+  "max_history_entries": 50,
+  "max_history_bytes": 262144,
+  "max_message_bytes": 32768
+}
