@@ -1807,7 +1807,3 @@ print(f"B_NONCE:{{handle_b.nonce}}")
         assert json_path.read_text(encoding="utf-8") == corrupt_payload
         # No bogus markdown was written
         assert not (proofs_dir / f"{task_id}.md").exists()
-
-
-
-
