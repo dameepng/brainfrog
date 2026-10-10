@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 import logging
 import os
+from pathlib import Path
 import secrets
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -33,6 +34,11 @@ from core.runtime.work import (
 from core.runtime.work_authorization import (
     authorize_work_execution_continuation,
     authorize_work_inspection,
+)
+from core.runtime.proof import FileProofStore
+from core.runtime.proof_verifier import (
+    DeterministicProofVerifier,
+    ProofVerificationStatus,
 )
 from core.runtime.workspace_lock import is_pid_running
 
@@ -274,23 +280,174 @@ def resume_work(
             return True, f"Work '{work_id}' is in EXECUTING state.", work
 
         elif work.status == WorkStatus.VERIFYING:
-            # Recovery from crash during verification
+            # Recovery from crash during verification:
+            # Enforce strict verification contract: NEVER synthesize a passing result.
+            # Must verify authoritative proof artifact before transitioning to DONE.
             d_meta = dict(work.resume_metadata or {})
             d_meta["claim_active"] = False
+
+            # 1. Resolve workspace
+            ws_path: Optional[Path] = None
+            if recovery_manager and getattr(recovery_manager, "workspace", None):
+                ws_path = Path(recovery_manager.workspace).resolve()
+            elif d_meta.get("workspace"):
+                ws_path = Path(d_meta["workspace"]).resolve()
+            elif hasattr(work_store, "repo_dir") and getattr(work_store, "repo_dir", None):
+                ws_path = Path(work_store.repo_dir).resolve()
+            elif hasattr(work_store, "works_dir") and getattr(work_store, "works_dir", None):
+                ws_path = Path(work_store.works_dir).parent.parent.resolve()
+
+            if ws_path is None or not ws_path.exists():
+                fail_msg = "Recovery failed: workspace boundary cannot be resolved for verification evidence."
+                try:
+                    work = work_store.save(work.transition(
+                        WorkStatus.FAILED,
+                        failure=WorkFailure(
+                            code="UNVERIFIED_RECOVERY",
+                            stage="verifying",
+                            summary=fail_msg,
+                            retryable=False,
+                        ),
+                        resume_metadata=d_meta,
+                    ))
+                except (InvalidWorkTransition, StaleWorkRevisionError):
+                    work = work_store.get(work_id) or work
+                _release_claim(work_store, work_id, claim_id)
+                return False, fail_msg, work
+
+            # 2. Check proof artifact existence
+            task_id = d_meta.get("task_id") or work.id
+            proof_explicit = d_meta.get("proof_path")
+            proof_target = proof_explicit if (proof_explicit and Path(proof_explicit).exists()) else task_id
+
+            proof_store = FileProofStore(ws_path)
+            proof_exists = proof_store.exists(task_id) or (proof_explicit is not None and Path(proof_explicit).is_file())
+
+            if not proof_exists:
+                fail_msg = f"Recovery failed: no authoritative verification evidence found for work '{work_id}'."
+                try:
+                    work = work_store.save(work.transition(
+                        WorkStatus.FAILED,
+                        failure=WorkFailure(
+                            code="UNVERIFIED_RECOVERY",
+                            stage="verifying",
+                            summary=fail_msg,
+                            retryable=False,
+                        ),
+                        resume_metadata=d_meta,
+                    ))
+                except (InvalidWorkTransition, StaleWorkRevisionError):
+                    work = work_store.get(work_id) or work
+                _release_claim(work_store, work_id, claim_id)
+                return False, fail_msg, work
+
+            # 3. Deterministically verify proof artifact
+            verifier = DeterministicProofVerifier(ws_path)
+            report = verifier.verify(proof_target)
+
+            if report.overall_status != ProofVerificationStatus.VALID:
+                reasons_str = "; ".join(report.reasons) if report.reasons else report.overall_status.value
+                fail_msg = f"Recovery failed: proof verification failed ({report.overall_status.value}): {reasons_str}"
+                try:
+                    work = work_store.save(work.transition(
+                        WorkStatus.FAILED,
+                        failure=WorkFailure(
+                            code="UNVERIFIED_RECOVERY",
+                            stage="verifying",
+                            summary=fail_msg,
+                            retryable=False,
+                        ),
+                        resume_metadata=d_meta,
+                    ))
+                except (InvalidWorkTransition, StaleWorkRevisionError):
+                    work = work_store.get(work_id) or work
+                _release_claim(work_store, work_id, claim_id)
+                return False, fail_msg, work
+
+            # 4. Validate cross-entity binding (transaction ID, task ID, verdict)
+            proof_obj = None
+            try:
+                if proof_store.exists(task_id):
+                    proof_obj = proof_store.load(task_id)
+                elif proof_explicit and Path(proof_explicit).is_file():
+                    import json
+                    proof_obj = ProofArtifact.from_dict(json.loads(Path(proof_explicit).read_text(encoding="utf-8")))
+            except Exception:
+                pass
+
+            if proof_obj is None:
+                fail_msg = f"Recovery failed: unreadable proof artifact for work '{work_id}'."
+                try:
+                    work = work_store.save(work.transition(
+                        WorkStatus.FAILED,
+                        failure=WorkFailure(
+                            code="UNVERIFIED_RECOVERY",
+                            stage="verifying",
+                            summary=fail_msg,
+                            retryable=False,
+                        ),
+                        resume_metadata=d_meta,
+                    ))
+                except (InvalidWorkTransition, StaleWorkRevisionError):
+                    work = work_store.get(work_id) or work
+                _release_claim(work_store, work_id, claim_id)
+                return False, fail_msg, work
+
+            if proof_obj.verdict.status != "VERIFIED":
+                fail_msg = f"Recovery failed: proof verdict is '{proof_obj.verdict.status}', expected 'VERIFIED'."
+                try:
+                    work = work_store.save(work.transition(
+                        WorkStatus.FAILED,
+                        failure=WorkFailure(
+                            code="UNVERIFIED_RECOVERY",
+                            stage="verifying",
+                            summary=fail_msg,
+                            retryable=False,
+                        ),
+                        resume_metadata=d_meta,
+                    ))
+                except (InvalidWorkTransition, StaleWorkRevisionError):
+                    work = work_store.get(work_id) or work
+                _release_claim(work_store, work_id, claim_id)
+                return False, fail_msg, work
+
+            if work.transaction_id and proof_obj.changes.transaction_id:
+                if proof_obj.changes.transaction_id != work.transaction_id:
+                    fail_msg = f"Recovery failed: proof transaction '{proof_obj.changes.transaction_id}' does not match work transaction '{work.transaction_id}'."
+                    try:
+                        work = work_store.save(work.transition(
+                            WorkStatus.FAILED,
+                            failure=WorkFailure(
+                                code="EVIDENCE_MISMATCH",
+                                stage="verifying",
+                                summary=fail_msg,
+                                retryable=False,
+                            ),
+                            resume_metadata=d_meta,
+                        ))
+                    except (InvalidWorkTransition, StaleWorkRevisionError):
+                        work = work_store.get(work_id) or work
+                    _release_claim(work_store, work_id, claim_id)
+                    return False, fail_msg, work
+
+            # 5. Authoritative verification passed: advance to DONE with verified evidence
+            passed_checks = len([c for c in report.checks if c.status == ProofVerificationStatus.VALID])
+            v_res = VerificationResult(
+                status=VerificationStatus.PASS,
+                passed=passed_checks,
+                failed=0,
+                summary=f"Authoritative proof verified ({report.task_id})",
+            )
             try:
                 work = work_store.save(work.transition(
                     WorkStatus.DONE,
-                    verification_result=VerificationResult(
-                        status="PASS",
-                        passed=1,
-                        failed=0,
-                        summary="Recovered verification completed",
-                    ),
+                    verification_result=v_res,
                     resume_metadata=d_meta,
                 ))
             except (InvalidWorkTransition, StaleWorkRevisionError):
                 work = work_store.get(work_id) or work
-            return True, f"Verification completed. Work '{work_id}' is now DONE.", work
+            _release_claim(work_store, work_id, claim_id)
+            return True, f"Authoritative verification verified. Work '{work_id}' is now DONE.", work
 
         elif work.status == WorkStatus.FAILED:
             _release_claim(work_store, work_id, claim_id)

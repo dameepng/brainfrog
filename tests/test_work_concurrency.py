@@ -355,11 +355,13 @@ class TestWorkConcurrency(unittest.TestCase):
             channel="cli",
             work_store=self.store,
         )
-        self.assertTrue(ok_v)
-        self.assertIn("now done", msg_v.lower())
+        self.assertFalse(ok_v)
+        self.assertIn("no authoritative verification evidence", msg_v.lower())
         final_ver = self.store.get("work_stale_lease")
         assert final_ver is not None
-        self.assertEqual(final_ver.status, WorkStatus.DONE)
+        self.assertEqual(final_ver.status, WorkStatus.FAILED)
+        assert final_ver.failure is not None
+        self.assertEqual(final_ver.failure.code, "UNVERIFIED_RECOVERY")
 
         # 2. Dead PID on crashed EXECUTING work -> recovers to VERIFYING immediately
         tx_store = InMemoryTransactionStore()

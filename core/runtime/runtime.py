@@ -224,7 +224,42 @@ class BrainFrogRuntime:
                     if work.status == WorkStatus.EXECUTING:
                         work = self.work_store.save(work.transition(WorkStatus.VERIFYING))
                     if work.status == WorkStatus.VERIFYING:
-                        self.work_store.save(work.transition(WorkStatus.DONE))
+                        from core.runtime.proof import FileProofStore
+                        from core.runtime.proof_verifier import DeterministicProofVerifier, ProofVerificationStatus
+                        proof_store = FileProofStore(self.repo_dir)
+                        task_id = (work.resume_metadata or {}).get("task_id") or work.id
+                        if proof_store.exists(task_id):
+                            verifier = DeterministicProofVerifier(self.repo_dir)
+                            rep = verifier.verify(task_id)
+                            if rep.overall_status == ProofVerificationStatus.VALID:
+                                passed_c = len([c for c in rep.checks if c.status == ProofVerificationStatus.VALID])
+                                v_res = VerificationResult(
+                                    status=VerificationStatus.PASS,
+                                    passed=passed_c,
+                                    failed=0,
+                                    summary=f"Authoritative proof verified ({task_id})",
+                                )
+                                self.work_store.save(work.transition(WorkStatus.DONE, verification_result=v_res))
+                            else:
+                                self.work_store.save(work.transition(
+                                    WorkStatus.FAILED,
+                                    failure=WorkFailure(
+                                        code="UNVERIFIED_RECOVERY",
+                                        stage="recovery",
+                                        summary=f"Startup recovery: proof verification failed ({rep.overall_status.value})",
+                                        retryable=False,
+                                    ),
+                                ))
+                        else:
+                            self.work_store.save(work.transition(
+                                WorkStatus.FAILED,
+                                failure=WorkFailure(
+                                    code="UNVERIFIED_RECOVERY",
+                                    stage="recovery",
+                                    summary="Startup recovery: committed transaction lacks authoritative verification proof",
+                                    retryable=False,
+                                ),
+                            ))
                 elif work.status in (WorkStatus.EXECUTING, WorkStatus.VERIFYING):
                     self.work_store.save(work.transition(
                         WorkStatus.FAILED,
@@ -281,7 +316,42 @@ class BrainFrogRuntime:
                             if work.status == WorkStatus.EXECUTING:
                                 work = self.work_store.save(work.transition(WorkStatus.VERIFYING))
                             if work.status == WorkStatus.VERIFYING:
-                                self.work_store.save(work.transition(WorkStatus.DONE))
+                                from core.runtime.proof import FileProofStore
+                                from core.runtime.proof_verifier import DeterministicProofVerifier, ProofVerificationStatus
+                                proof_store = FileProofStore(self.repo_dir)
+                                task_id = (work.resume_metadata or {}).get("task_id") or work.id
+                                if proof_store.exists(task_id):
+                                    verifier = DeterministicProofVerifier(self.repo_dir)
+                                    rep = verifier.verify(task_id)
+                                    if rep.overall_status == ProofVerificationStatus.VALID:
+                                        passed_c = len([c for c in rep.checks if c.status == ProofVerificationStatus.VALID])
+                                        v_res = VerificationResult(
+                                            status=VerificationStatus.PASS,
+                                            passed=passed_c,
+                                            failed=0,
+                                            summary=f"Authoritative proof verified ({task_id})",
+                                        )
+                                        self.work_store.save(work.transition(WorkStatus.DONE, verification_result=v_res))
+                                    else:
+                                        self.work_store.save(work.transition(
+                                            WorkStatus.FAILED,
+                                            failure=WorkFailure(
+                                                code="UNVERIFIED_RECOVERY",
+                                                stage="recovery",
+                                                summary=f"Startup recovery: proof verification failed ({rep.overall_status.value})",
+                                                retryable=False,
+                                            ),
+                                        ))
+                                else:
+                                    self.work_store.save(work.transition(
+                                        WorkStatus.FAILED,
+                                        failure=WorkFailure(
+                                            code="UNVERIFIED_RECOVERY",
+                                            stage="recovery",
+                                            summary="Startup recovery: committed transaction lacks authoritative verification proof",
+                                            retryable=False,
+                                        ),
+                                    ))
                         except (ValueError, KeyError, InvalidWorkTransition, StaleWorkRevisionError):
                             try:
                                 current = self.work_store.get(work.id)
