@@ -374,8 +374,8 @@ class ProofArtifact:
             ChangeRecord(
                 path=f["path"],
                 operation=f["operation"],
-                before_sha256=f.get("before_sha256"),
-                after_sha256=f.get("after_sha256"),
+                before_sha256=f.get("before_sha256") or f.get("sha256_before"),
+                after_sha256=f.get("after_sha256") or f.get("sha256_after"),
                 byte_count_delta=f.get("byte_count_delta", 0),
             )
             for f in c_data.get("files", [])

@@ -380,8 +380,8 @@ def resume_work(
 
             proof_target = canonical_task_id if proof_store.exists(canonical_task_id) else proof_explicit
 
-            # 3. Deterministically verify proof artifact
-            verifier = DeterministicProofVerifier(ws_path)
+            # 3. Deterministically verify proof artifact with current-workspace disk integrity
+            verifier = DeterministicProofVerifier(ws_path, verify_disk_integrity=True)
             report = verifier.verify(proof_target)
 
             if report.overall_status != ProofVerificationStatus.VALID:

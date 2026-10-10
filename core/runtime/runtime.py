@@ -237,7 +237,7 @@ class BrainFrogRuntime:
                         canonical_task_id = (work.resume_metadata or {}).get("task_id") or work.id
                         proof_store = FileProofStore(ws_dir)
                         if proof_store.exists(canonical_task_id):
-                            verifier = DeterministicProofVerifier(ws_dir)
+                            verifier = DeterministicProofVerifier(ws_dir, verify_disk_integrity=True)
                             rep = verifier.verify(canonical_task_id)
                             proof_obj = None
                             try:
@@ -368,7 +368,7 @@ class BrainFrogRuntime:
                                 canonical_task_id = (work.resume_metadata or {}).get("task_id") or work.id
                                 proof_store = FileProofStore(ws_dir)
                                 if proof_store.exists(canonical_task_id):
-                                    verifier = DeterministicProofVerifier(ws_dir)
+                                    verifier = DeterministicProofVerifier(ws_dir, verify_disk_integrity=True)
                                     rep = verifier.verify(canonical_task_id)
                                     proof_obj = None
                                     try:

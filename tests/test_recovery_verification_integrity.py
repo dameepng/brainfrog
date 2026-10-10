@@ -107,6 +107,9 @@ def _write_valid_proof(
 ) -> Path:
     """Write a structurally complete proof that passes DeterministicProofVerifier."""
     store = FileProofStore(repo_dir)
+    app_disk = repo_dir / "app.py"
+    import hashlib
+    app_sha = hashlib.sha256(app_disk.read_bytes()).hexdigest() if app_disk.exists() else "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     data = {
         "version": "1.0.0",
         "task": {
@@ -150,7 +153,8 @@ def _write_valid_proof(
                     "path": "app.py",
                     "operation": "MODIFY",
                     "sha256_before": None,
-                    "sha256_after": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "sha256_after": app_sha,
+                    "after_sha256": app_sha,
                     "bytes_changed": 10,
                 }
             ],
@@ -166,6 +170,7 @@ def _write_valid_proof(
         "reproducibility": {
             "environment": {"python": "3.12"},
             "execution_steps": [],
+            "expected_file_hashes": {"app.py": app_sha},
         },
     }
     pj = store.proof_json_path(task_id)

@@ -616,13 +616,13 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
     console.print()
 
 
-def verify_proof_cli(repo_dir: Path, target: str) -> int:
+def verify_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = False) -> int:
     """CLI handler for deterministic proof verification. Returns exit code 0 (VALID), 1 (INVALID), 2 (INCOMPLETE)."""
     from core.runtime.proof_verifier import (
         DeterministicProofVerifier,
         ProofVerificationStatus,
     )
-    verifier = DeterministicProofVerifier(repo_dir)
+    verifier = DeterministicProofVerifier(repo_dir, verify_disk_integrity=check_workspace)
     report = verifier.verify(target)
     print_proof_verification_report(report, repo_dir)
 
