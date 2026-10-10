@@ -49,7 +49,11 @@ from core.runtime.proof_verifier import (
 from core.runtime.transaction import (
     FileTransactionStore,
     InMemoryTransactionStore,
+    OperationStatus,
+    OperationType,
+    RecoveryResult,
     Transaction,
+    TransactionOperation,
     TransactionRecoveryManager,
     TransactionStatus,
 )
@@ -64,6 +68,20 @@ from core.runtime.work import (
     WorkStatus,
 )
 from core.runtime.work_continuation import cancel_work, resume_work
+from core.runtime.runtime import BrainFrogRuntime
+from core.runtime.child_work import ChildWork, save_child_work, get_child_work
+from core.runtime.delegation import DelegationContract
+from core.runtime.subagent import Subagent
+from core.runtime.capabilities import (
+    Capabilities,
+    FilesystemPolicy,
+    ShellPolicy,
+    NetworkPolicy,
+    GitPolicy,
+)
+from core.runtime.subagent_execution import (
+    SubagentExecutionCoordinator,
+)
 
 
 def _init_git_repo(repo_dir: Path) -> str:
@@ -82,9 +100,10 @@ def _write_valid_proof(
     repo_dir: Path,
     task_id: str,
     commit_sha: str,
-    transaction_id: str = "tx_001",
+    transaction_id: Optional[str] = "tx_001",
     test_command: str = "pytest -q tests/test_app.py",
     verdict_status: str = "VERIFIED",
+    changes_status: str = "COMMITTED",
 ) -> Path:
     """Write a structurally complete proof that passes DeterministicProofVerifier."""
     store = FileProofStore(repo_dir)
@@ -98,14 +117,14 @@ def _write_valid_proof(
         },
         "verdict": {
             "status": verdict_status,
-            "reason": "All 5 gates passed cleanly",
+            "reason": "All 5 gates passed cleanly" if verdict_status == "VERIFIED" else "Verification failed",
             "confidence": 1.0,
             "timestamp": "2026-10-10T10:00:00Z",
         },
         "verification": {
             "test_command": test_command,
             "exit_code": 0 if verdict_status == "VERIFIED" else 1,
-            "stdout_summary": "1 passed",
+            "stdout_summary": "1 passed" if verdict_status == "VERIFIED" else "1 failed",
             "stderr_summary": "",
             "process_evidence": {
                 "command": test_command,
@@ -124,7 +143,7 @@ def _write_valid_proof(
             },
         },
         "changes": {
-            "status": "COMMITTED",
+            "status": changes_status,
             "transaction_id": transaction_id,
             "files": [
                 {
@@ -623,6 +642,463 @@ class TestRecoveryVerificationIntegrity(unittest.TestCase):
             # Must not have a passing verification result
             if persisted.verification_result is not None:
                 self.assertNotEqual(persisted.verification_result.status, VerificationStatus.PASS)
+
+    # =========================================================================
+    # Phase D — Targeted Regression Tests (1 - 12)
+    # =========================================================================
+
+    def test_regression_01_structurally_valid_proof_with_failed_verdict_and_rolled_back_tx(self) -> None:
+        """Requirement 1: A structurally VALID proof with verdict FAILED and transaction ROLLED_BACK."""
+        task_id = "task_p0_01"
+        tx_id = "tx_p0_01"
+        _write_valid_proof(
+            self.repo_dir,
+            task_id,
+            self.commit_sha,
+            transaction_id=tx_id,
+            verdict_status="FAILED",
+            changes_status="ROLLED_BACK",
+        )
+        # Verify that DeterministicProofVerifier reports VALID overall structure
+        verifier = DeterministicProofVerifier(self.repo_dir)
+        rep = verifier.verify(task_id)
+        self.assertEqual(rep.overall_status, ProofVerificationStatus.VALID)
+        self.assertEqual(rep.verdict_status, "FAILED")
+
+        work = Work(
+            id="work_p0_01",
+            intent="Regression 1",
+            status=WorkStatus.VERIFYING,
+            actor_id="alice",
+            channel="cli",
+            transaction_id=tx_id,
+            resume_metadata={"workspace": str(self.repo_dir), "task_id": task_id},
+        )
+        self.work_store.create(work)
+
+        ok, msg, res_work = resume_work(
+            work_id="work_p0_01",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.work_store,
+            recovery_manager=self.recovery_mgr,
+        )
+        self.assertFalse(ok)
+        self.assertIn("proof verification failed", msg.lower())
+        persisted = self.work_store.get("work_p0_01")
+        assert persisted is not None
+        self.assertEqual(persisted.status, WorkStatus.FAILED)
+        assert persisted.failure is not None
+        self.assertEqual(persisted.failure.code, "UNVERIFIED_RECOVERY")
+        self.assertIsNone(persisted.verification_result)
+
+    def test_regression_02_valid_proof_task_a_supplied_while_recovering_task_b(self) -> None:
+        """Requirement 2: A valid proof belonging to task A supplied while recovering task B."""
+        task_a = "task_p0_02_A"
+        tx_a = "tx_p0_02_A"
+        proof_a_path = _write_valid_proof(self.repo_dir, task_a, self.commit_sha, transaction_id=tx_a)
+
+        work_b = Work(
+            id="work_p0_02_B",
+            intent="Regression 2",
+            status=WorkStatus.VERIFYING,
+            actor_id="alice",
+            channel="cli",
+            transaction_id="tx_p0_02_B",
+            resume_metadata={
+                "workspace": str(self.repo_dir),
+                "task_id": "task_p0_02_B",
+                "proof_path": str(proof_a_path),
+            },
+        )
+        self.work_store.create(work_b)
+
+        ok, msg, res_work = resume_work(
+            work_id="work_p0_02_B",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.work_store,
+            recovery_manager=self.recovery_mgr,
+        )
+        self.assertFalse(ok)
+        self.assertIn("does not match", msg.lower())
+        persisted = self.work_store.get("work_p0_02_B")
+        assert persisted is not None
+        self.assertEqual(persisted.status, WorkStatus.FAILED)
+        assert persisted.failure is not None
+        self.assertEqual(persisted.failure.code, "EVIDENCE_MISMATCH")
+
+    def test_regression_03_work_with_tx_id_paired_with_null_proof_tx_id(self) -> None:
+        """Requirement 3: A Work with a transaction ID paired with a proof whose transaction ID is null."""
+        task_id = "task_p0_03"
+        _write_valid_proof(
+            self.repo_dir,
+            task_id,
+            self.commit_sha,
+            transaction_id=None,
+        )
+        work = Work(
+            id="work_p0_03",
+            intent="Regression 3",
+            status=WorkStatus.VERIFYING,
+            actor_id="alice",
+            channel="cli",
+            transaction_id="tx_expected_03",
+            resume_metadata={"workspace": str(self.repo_dir), "task_id": task_id},
+        )
+        self.work_store.create(work)
+
+        ok, msg, res_work = resume_work(
+            work_id="work_p0_03",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.work_store,
+            recovery_manager=self.recovery_mgr,
+        )
+        self.assertFalse(ok)
+        self.assertIn("does not match", msg.lower())
+        persisted = self.work_store.get("work_p0_03")
+        assert persisted is not None
+        self.assertEqual(persisted.status, WorkStatus.FAILED)
+        assert persisted.failure is not None
+        self.assertEqual(persisted.failure.code, "EVIDENCE_MISMATCH")
+
+    def test_regression_04_cross_workspace_proof_presented_during_recovery_of_work_in_workspace_b(self) -> None:
+        """Requirement 4: A proof from Workspace A presented during recovery of a Work in Workspace B."""
+        temp_dir_a = tempfile.mkdtemp(prefix="bf_ws_a_")
+        try:
+            ws_a = Path(temp_dir_a).resolve()
+            sha_a = _init_git_repo(ws_a)
+            task_id = "task_p0_04"
+            tx_id = "tx_p0_04"
+            proof_a_path = _write_valid_proof(ws_a, task_id, sha_a, transaction_id=tx_id)
+
+            rec_mgr_a = TransactionRecoveryManager(workspace=ws_a, store=FileTransactionStore(workspace=ws_a))
+            work_b = Work(
+                id="work_p0_04",
+                intent="Regression 4",
+                status=WorkStatus.VERIFYING,
+                actor_id="alice",
+                channel="cli",
+                transaction_id=tx_id,
+                resume_metadata={"workspace": str(self.repo_dir), "task_id": task_id},
+            )
+            self.work_store.create(work_b)
+
+            ok, msg, res_work = resume_work(
+                work_id="work_p0_04",
+                actor_id="alice",
+                channel="cli",
+                work_store=self.work_store,
+                recovery_manager=rec_mgr_a,
+            )
+            self.assertFalse(ok)
+            self.assertIn("workspace mismatch", msg.lower())
+            persisted = self.work_store.get("work_p0_04")
+            assert persisted is not None
+            self.assertEqual(persisted.status, WorkStatus.FAILED)
+            assert persisted.failure is not None
+            self.assertEqual(persisted.failure.code, "EVIDENCE_MISMATCH")
+        finally:
+            shutil.rmtree(temp_dir_a, ignore_errors=True)
+
+    def test_regression_05_startup_reconciliation_of_failed_proof(self) -> None:
+        """Requirement 5: Startup reconciliation of a FAILED proof fails closed."""
+        task_id = "task_p0_05"
+        tx_id = "tx_p0_05"
+        _write_valid_proof(
+            self.repo_dir,
+            task_id,
+            self.commit_sha,
+            transaction_id=tx_id,
+            verdict_status="FAILED",
+            changes_status="ROLLED_BACK",
+        )
+        tx = Transaction(id=tx_id, work_id="work_p0_05", workspace=str(self.repo_dir), status=TransactionStatus.COMMITTED)
+        self.tx_store.save(tx)
+
+        work = Work(
+            id="work_p0_05",
+            intent="Regression 5",
+            status=WorkStatus.VERIFYING,
+            transaction_id=tx_id,
+            actor_id="alice",
+            channel="cli",
+            resume_metadata={"task_id": task_id, "workspace": str(self.repo_dir)},
+        )
+        self.work_store.create(work)
+
+        runtime = BrainFrogRuntime(repo_dir=self.repo_dir, persist_sessions=False, auto_recover_transactions=False)
+        runtime.startup_recovery_results = [
+            RecoveryResult(
+                transaction_id=tx_id,
+                previous_status=TransactionStatus.COMMITTED,
+                final_status=TransactionStatus.COMMITTED,
+                recovered=True,
+                rolled_back=False,
+            )
+        ]
+        runtime._reconcile_recovered_work()
+
+        final_work = runtime.work_store.get("work_p0_05")
+        assert final_work is not None
+        self.assertEqual(final_work.status, WorkStatus.FAILED)
+        assert final_work.failure is not None
+        self.assertEqual(final_work.failure.code, "UNVERIFIED_RECOVERY")
+        self.assertIn("proof verification failed", final_work.failure.summary.lower())
+
+    def test_regression_06_child_work_crash_recovery_with_missing_verification_evidence(self) -> None:
+        """Requirement 6: ChildWork crash recovery with missing verification evidence fails closed."""
+        now = time.time()
+        parent = Work(id="p_cw_06", intent="Parent", actor_id="alice", channel="cli", session_id="sess_06", session_incarnation_id="inc_06")
+        self.work_store.create(parent)
+        sub = Subagent(subagent_id="sub_06", parent_work_id=parent.id, session_id="sess_06", session_incarnation_id="inc_06", actor="alice", role="role", purpose="purpose", created_at=now, updated_at=now)
+        caps = Capabilities(filesystem=FilesystemPolicy(read=("app.py",), write=("app.py",)), shell=ShellPolicy(execute=False), network=NetworkPolicy(access=False), git=GitPolicy(read=True, commit=False))
+        delg = DelegationContract(delegation_id="delg_06", parent_work_id=parent.id, child_subagent_id=sub.id, actor="alice", session_id="sess_06", session_incarnation_id="inc_06", capabilities=caps, target_scope=("app.py",), expires_at=now + 600, created_at=now)
+        cw = ChildWork.create(parent_work=parent, subagent=sub, delegation=delg, child_work_id="cw_p0_06", created_at=now)
+        save_child_work(self.work_store, cw)
+
+        cw = save_child_work(self.work_store, cw.transition(WorkStatus.PLANNING))
+        cw = save_child_work(self.work_store, cw.transition(WorkStatus.APPROVAL_REQUIRED))
+        cw = save_child_work(self.work_store, cw.transition(WorkStatus.EXECUTING, transaction_id="tx_cw_06"))
+
+        op = TransactionOperation(type=OperationType.MODIFY_FILE, target="app.py", status=OperationStatus.EXECUTED, before_state={"exists": True}, after_state={"exists": True})
+        tx = Transaction(id="tx_cw_06", work_id=cw.id, workspace=str(self.repo_dir), status=TransactionStatus.EXECUTING, operations=[op], verification_result=None)
+        self.tx_store.save(tx)
+
+        coord = SubagentExecutionCoordinator(work_store=self.work_store, repo_dir=self.repo_dir, transaction_store=self.tx_store)
+        res = coord.reconcile_child(cw.id)
+
+        self.assertFalse(res.success)
+        self.assertEqual(res.status, WorkStatus.FAILED)
+        loaded_cw = self.work_store.get(cw.id)
+        assert loaded_cw is not None
+        self.assertEqual(loaded_cw.status, WorkStatus.FAILED)
+        assert loaded_cw.failure is not None
+        self.assertEqual(loaded_cw.failure.code, "UNVERIFIED_CHILD_RECOVERY")
+
+    def test_regression_07_child_work_crash_recovery_with_invalid_evidence(self) -> None:
+        """Requirement 7: ChildWork crash recovery with invalid evidence fails closed."""
+        now = time.time()
+        parent = Work(id="p_cw_07", intent="Parent", actor_id="alice", channel="cli", session_id="sess_07", session_incarnation_id="inc_07")
+        self.work_store.create(parent)
+        sub = Subagent(subagent_id="sub_07", parent_work_id=parent.id, session_id="sess_07", session_incarnation_id="inc_07", actor="alice", role="role", purpose="purpose", created_at=now, updated_at=now)
+        caps = Capabilities(filesystem=FilesystemPolicy(read=("app.py",), write=("app.py",)), shell=ShellPolicy(execute=False), network=NetworkPolicy(access=False), git=GitPolicy(read=True, commit=False))
+        delg = DelegationContract(delegation_id="delg_07", parent_work_id=parent.id, child_subagent_id=sub.id, actor="alice", session_id="sess_07", session_incarnation_id="inc_07", capabilities=caps, target_scope=("app.py",), expires_at=now + 600, created_at=now)
+        cw = ChildWork.create(parent_work=parent, subagent=sub, delegation=delg, child_work_id="cw_p0_07", created_at=now)
+        save_child_work(self.work_store, cw)
+
+        cw = save_child_work(self.work_store, cw.transition(WorkStatus.PLANNING))
+        cw = save_child_work(self.work_store, cw.transition(WorkStatus.APPROVAL_REQUIRED))
+        cw = save_child_work(self.work_store, cw.transition(WorkStatus.EXECUTING, transaction_id="tx_cw_07"))
+
+        op = TransactionOperation(type=OperationType.MODIFY_FILE, target="app.py", status=OperationStatus.EXECUTED, before_state={"exists": True}, after_state={"exists": True})
+        tx = Transaction(
+            id="tx_cw_07",
+            work_id=cw.id,
+            workspace=str(self.repo_dir),
+            status=TransactionStatus.EXECUTING,
+            operations=[op],
+            verification_result={"status": "FAIL", "passed": False, "failed": 1},
+        )
+        self.tx_store.save(tx)
+
+        coord = SubagentExecutionCoordinator(work_store=self.work_store, repo_dir=self.repo_dir, transaction_store=self.tx_store)
+        res = coord.reconcile_child(cw.id)
+
+        self.assertFalse(res.success)
+        self.assertEqual(res.status, WorkStatus.FAILED)
+        loaded_cw = self.work_store.get(cw.id)
+        assert loaded_cw is not None
+        self.assertEqual(loaded_cw.status, WorkStatus.FAILED)
+        assert loaded_cw.failure is not None
+        self.assertEqual(loaded_cw.failure.code, "UNVERIFIED_CHILD_RECOVERY")
+
+    def test_regression_08_final_save_occ_collision_where_durable_work_remains_verifying(self) -> None:
+        """Requirement 8: A final-save OCC collision where the durable Work remains VERIFYING."""
+        task_id = "task_p0_08"
+        tx_id = "tx_p0_08"
+        _write_valid_proof(self.repo_dir, task_id, self.commit_sha, transaction_id=tx_id)
+
+        work = Work(
+            id="work_p0_08",
+            intent="Regression 8",
+            status=WorkStatus.VERIFYING,
+            actor_id="alice",
+            channel="cli",
+            transaction_id=tx_id,
+            resume_metadata={"workspace": str(self.repo_dir), "task_id": task_id},
+        )
+        self.work_store.create(work)
+
+        orig_save = self.work_store.save
+        def mock_save(work_obj, expected_revision=None):
+            if work_obj.status == WorkStatus.DONE:
+                raise StaleWorkRevisionError("Simulated final save collision")
+            return orig_save(work_obj, expected_revision=expected_revision)
+
+        self.work_store.save = mock_save
+
+        ok, msg, res_work = resume_work(
+            work_id="work_p0_08",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.work_store,
+            recovery_manager=self.recovery_mgr,
+        )
+        self.assertFalse(ok)
+        self.assertIn("conflict", msg.lower())
+        persisted = self.work_store.get("work_p0_08")
+        assert persisted is not None
+        self.assertEqual(persisted.status, WorkStatus.VERIFYING)
+        self.assertIsNone(persisted.verification_result)
+
+    def test_regression_09_valid_proof_with_matching_task_transaction_workspace_and_verified_verdict(self) -> None:
+        """Requirement 9: A valid proof with matching task, transaction, workspace, and VERIFIED verdict."""
+        task_id = "task_p0_09"
+        tx_id = "tx_p0_09"
+        _write_valid_proof(self.repo_dir, task_id, self.commit_sha, transaction_id=tx_id, verdict_status="VERIFIED")
+
+        work = Work(
+            id="work_p0_09",
+            intent="Regression 9",
+            status=WorkStatus.VERIFYING,
+            actor_id="alice",
+            channel="cli",
+            transaction_id=tx_id,
+            resume_metadata={"workspace": str(self.repo_dir), "task_id": task_id},
+        )
+        self.work_store.create(work)
+
+        ok, msg, res_work = resume_work(
+            work_id="work_p0_09",
+            actor_id="alice",
+            channel="cli",
+            work_store=self.work_store,
+            recovery_manager=self.recovery_mgr,
+        )
+        self.assertTrue(ok)
+        self.assertIn("now done", msg.lower())
+        persisted = self.work_store.get("work_p0_09")
+        assert persisted is not None
+        self.assertEqual(persisted.status, WorkStatus.DONE)
+        assert persisted.verification_result is not None
+        self.assertEqual(persisted.verification_result.status, VerificationStatus.PASS)
+
+    def test_regression_10_corrupt_or_missing_proof_evidence(self) -> None:
+        """Requirement 10: Corrupt or missing proof evidence fails closed."""
+        # Part A: Missing
+        work_missing = Work(
+            id="work_p0_10_miss",
+            intent="Regression 10 Missing",
+            status=WorkStatus.VERIFYING,
+            actor_id="alice",
+            channel="cli",
+            resume_metadata={"workspace": str(self.repo_dir), "task_id": "non_existent_10"},
+        )
+        self.work_store.create(work_missing)
+        ok1, msg1, _ = resume_work(work_id="work_p0_10_miss", actor_id="alice", channel="cli", work_store=self.work_store, recovery_manager=self.recovery_mgr)
+        self.assertFalse(ok1)
+        persisted1 = self.work_store.get("work_p0_10_miss")
+        assert persisted1 is not None
+        self.assertEqual(persisted1.status, WorkStatus.FAILED)
+        self.assertEqual(persisted1.failure.code, "UNVERIFIED_RECOVERY")
+
+        # Part B: Corrupted
+        pj = FileProofStore(self.repo_dir).proof_json_path("corrupt_task_10")
+        pj.parent.mkdir(parents=True, exist_ok=True)
+        pj.write_text("{ not json at all...", encoding="utf-8")
+        work_corrupt = Work(
+            id="work_p0_10_corr",
+            intent="Regression 10 Corrupt",
+            status=WorkStatus.VERIFYING,
+            actor_id="alice",
+            channel="cli",
+            resume_metadata={"workspace": str(self.repo_dir), "task_id": "corrupt_task_10"},
+        )
+        self.work_store.create(work_corrupt)
+        ok2, msg2, _ = resume_work(work_id="work_p0_10_corr", actor_id="alice", channel="cli", work_store=self.work_store, recovery_manager=self.recovery_mgr)
+        self.assertFalse(ok2)
+        persisted2 = self.work_store.get("work_p0_10_corr")
+        assert persisted2 is not None
+        self.assertEqual(persisted2.status, WorkStatus.FAILED)
+        self.assertEqual(persisted2.failure.code, "UNVERIFIED_RECOVERY")
+
+    def test_regression_11_concurrent_recovery_attempts_and_stale_worker_writes(self) -> None:
+        """Requirement 11: Concurrent recovery attempts and stale-worker writes."""
+        task_id = "task_p0_11"
+        tx_id = "tx_p0_11"
+        _write_valid_proof(self.repo_dir, task_id, self.commit_sha, transaction_id=tx_id)
+
+        work = Work(
+            id="work_p0_11",
+            intent="Regression 11",
+            status=WorkStatus.VERIFYING,
+            actor_id="alice",
+            channel="cli",
+            transaction_id=tx_id,
+            resume_metadata={"workspace": str(self.repo_dir), "task_id": task_id},
+            revision=2,
+        )
+        self.work_store.create(work)
+
+        results = []
+        def attempt():
+            return resume_work(work_id="work_p0_11", actor_id="alice", channel="cli", work_store=self.work_store, recovery_manager=self.recovery_mgr)[:2]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+            futs = [ex.submit(attempt) for _ in range(5)]
+            for f in concurrent.futures.as_completed(futs):
+                results.append(f.result())
+
+        self.assertEqual(len([r for r in results if r[0] is True]), 1)
+        persisted = self.work_store.get("work_p0_11")
+        assert persisted is not None
+        self.assertEqual(persisted.status, WorkStatus.DONE)
+
+        # Stale worker write
+        stale_w = work.transition(WorkStatus.FAILED, failure=WorkFailure(code="STALE", summary="stale"))
+        with self.assertRaises(StaleWorkRevisionError):
+            self.work_store.save(stale_w, expected_revision=2)
+
+    def test_regression_12_proof_persistence_or_finalization_failure_after_transaction_commit(self) -> None:
+        """Requirement 12: Proof persistence or finalization failure after transaction commit."""
+        tx_id = "tx_p0_12"
+        tx = Transaction(id=tx_id, work_id="work_p0_12", workspace=str(self.repo_dir), status=TransactionStatus.COMMITTED)
+        self.tx_store.save(tx)
+
+        work = Work(
+            id="work_p0_12",
+            intent="Regression 12",
+            status=WorkStatus.EXECUTING,
+            actor_id="alice",
+            channel="cli",
+            transaction_id=tx_id,
+            resume_metadata={"workspace": str(self.repo_dir)},
+        )
+        self.work_store.create(work)
+
+        # Resuming in EXECUTING with committed tx transitions to VERIFYING
+        ok1, msg1, w1 = resume_work(work_id="work_p0_12", actor_id="alice", channel="cli", work_store=self.work_store, transaction_store=self.tx_store, recovery_manager=self.recovery_mgr)
+        self.assertTrue(ok1)
+        self.assertEqual(w1.status, WorkStatus.VERIFYING)
+
+        # Simulate crash during verification (worker dead / lease expired)
+        curr = self.work_store.get("work_p0_12")
+        assert curr is not None
+        meta = dict(curr.resume_metadata or {})
+        meta["active_pid"] = 99999999
+        meta["claim_active"] = False
+        meta["resumed_at"] = time.time() - 3600
+        self.work_store.save(curr.with_update(resume_metadata=meta))
+
+        # Subsequent resume with missing proof fails closed
+        ok2, msg2, w2 = resume_work(work_id="work_p0_12", actor_id="alice", channel="cli", work_store=self.work_store, transaction_store=self.tx_store, recovery_manager=self.recovery_mgr)
+        self.assertFalse(ok2)
+        persisted = self.work_store.get("work_p0_12")
+        assert persisted is not None
+        self.assertEqual(persisted.status, WorkStatus.FAILED)
+        self.assertEqual(persisted.failure.code, "UNVERIFIED_RECOVERY")
 
 
 if __name__ == "__main__":

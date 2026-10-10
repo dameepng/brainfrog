@@ -226,27 +226,66 @@ class BrainFrogRuntime:
                     if work.status == WorkStatus.VERIFYING:
                         from core.runtime.proof import FileProofStore
                         from core.runtime.proof_verifier import DeterministicProofVerifier, ProofVerificationStatus
-                        proof_store = FileProofStore(self.repo_dir)
-                        task_id = (work.resume_metadata or {}).get("task_id") or work.id
-                        if proof_store.exists(task_id):
-                            verifier = DeterministicProofVerifier(self.repo_dir)
-                            rep = verifier.verify(task_id)
-                            if rep.overall_status == ProofVerificationStatus.VALID:
+
+                        # Resolve canonical workspace
+                        meta_ws = (work.resume_metadata or {}).get("workspace")
+                        if meta_ws and Path(meta_ws).exists():
+                            ws_dir = Path(meta_ws).resolve()
+                        else:
+                            ws_dir = Path(self.repo_dir).resolve()
+
+                        canonical_task_id = (work.resume_metadata or {}).get("task_id") or work.id
+                        proof_store = FileProofStore(ws_dir)
+                        if proof_store.exists(canonical_task_id):
+                            verifier = DeterministicProofVerifier(ws_dir)
+                            rep = verifier.verify(canonical_task_id)
+                            proof_obj = None
+                            try:
+                                proof_obj = proof_store.load(canonical_task_id)
+                            except Exception:
+                                pass
+
+                            # Strict verification contract:
+                            # 1. Structural validity
+                            # 2. Authoritative verdict must be VERIFIED
+                            # 3. Task identity must match canonical task ID
+                            # 4. Transaction binding must match if work has transaction_id
+                            # 5. Transaction status must be COMMITTED
+                            is_valid = (
+                                rep.overall_status == ProofVerificationStatus.VALID
+                                and rep.verdict_status == "VERIFIED"
+                                and proof_obj is not None
+                                and proof_obj.verdict.status == "VERIFIED"
+                                and proof_obj.changes.status == "COMMITTED"
+                                and proof_obj.task.task_id == canonical_task_id
+                            )
+                            if is_valid and (work.transaction_id or (proof_obj and proof_obj.changes.transaction_id)):
+                                if not proof_obj.changes.transaction_id or proof_obj.changes.transaction_id != work.transaction_id:
+                                    is_valid = False
+                                if tx.id != work.transaction_id or recovery.transaction_id != work.transaction_id:
+                                    is_valid = False
+
+                            if is_valid:
                                 passed_c = len([c for c in rep.checks if c.status == ProofVerificationStatus.VALID])
                                 v_res = VerificationResult(
                                     status=VerificationStatus.PASS,
                                     passed=passed_c,
                                     failed=0,
-                                    summary=f"Authoritative proof verified ({task_id})",
+                                    summary=f"Authoritative proof verified ({canonical_task_id})",
                                 )
                                 self.work_store.save(work.transition(WorkStatus.DONE, verification_result=v_res))
                             else:
+                                fail_summary = (
+                                    f"Startup recovery: proof verification failed ({rep.overall_status.value}, verdict: {rep.verdict_status})"
+                                    if rep.overall_status != ProofVerificationStatus.VALID or rep.verdict_status != "VERIFIED"
+                                    else "Startup recovery: proof identity or transaction binding mismatch"
+                                )
                                 self.work_store.save(work.transition(
                                     WorkStatus.FAILED,
                                     failure=WorkFailure(
-                                        code="UNVERIFIED_RECOVERY",
+                                        code="UNVERIFIED_RECOVERY" if "identity" not in fail_summary else "EVIDENCE_MISMATCH",
                                         stage="recovery",
-                                        summary=f"Startup recovery: proof verification failed ({rep.overall_status.value})",
+                                        summary=fail_summary,
                                         retryable=False,
                                     ),
                                 ))
@@ -318,27 +357,60 @@ class BrainFrogRuntime:
                             if work.status == WorkStatus.VERIFYING:
                                 from core.runtime.proof import FileProofStore
                                 from core.runtime.proof_verifier import DeterministicProofVerifier, ProofVerificationStatus
-                                proof_store = FileProofStore(self.repo_dir)
-                                task_id = (work.resume_metadata or {}).get("task_id") or work.id
-                                if proof_store.exists(task_id):
-                                    verifier = DeterministicProofVerifier(self.repo_dir)
-                                    rep = verifier.verify(task_id)
-                                    if rep.overall_status == ProofVerificationStatus.VALID:
+
+                                # Resolve canonical workspace
+                                meta_ws = (work.resume_metadata or {}).get("workspace")
+                                if meta_ws and Path(meta_ws).exists():
+                                    ws_dir = Path(meta_ws).resolve()
+                                else:
+                                    ws_dir = Path(self.repo_dir).resolve()
+
+                                canonical_task_id = (work.resume_metadata or {}).get("task_id") or work.id
+                                proof_store = FileProofStore(ws_dir)
+                                if proof_store.exists(canonical_task_id):
+                                    verifier = DeterministicProofVerifier(ws_dir)
+                                    rep = verifier.verify(canonical_task_id)
+                                    proof_obj = None
+                                    try:
+                                        proof_obj = proof_store.load(canonical_task_id)
+                                    except Exception:
+                                        pass
+
+                                    is_valid = (
+                                        rep.overall_status == ProofVerificationStatus.VALID
+                                        and rep.verdict_status == "VERIFIED"
+                                        and proof_obj is not None
+                                        and proof_obj.verdict.status == "VERIFIED"
+                                        and proof_obj.changes.status == "COMMITTED"
+                                        and proof_obj.task.task_id == canonical_task_id
+                                    )
+                                    if is_valid and (work.transaction_id or (proof_obj and proof_obj.changes.transaction_id)):
+                                        if not proof_obj.changes.transaction_id or proof_obj.changes.transaction_id != work.transaction_id:
+                                            is_valid = False
+                                        if tx.id != work.transaction_id:
+                                            is_valid = False
+
+                                    if is_valid:
                                         passed_c = len([c for c in rep.checks if c.status == ProofVerificationStatus.VALID])
                                         v_res = VerificationResult(
                                             status=VerificationStatus.PASS,
                                             passed=passed_c,
                                             failed=0,
-                                            summary=f"Authoritative proof verified ({task_id})",
+                                            summary=f"Authoritative proof verified ({canonical_task_id})",
                                         )
                                         self.work_store.save(work.transition(WorkStatus.DONE, verification_result=v_res))
                                     else:
+                                        fail_summary = (
+                                            f"Startup recovery: proof verification failed ({rep.overall_status.value}, verdict: {rep.verdict_status})"
+                                            if rep.overall_status != ProofVerificationStatus.VALID or rep.verdict_status != "VERIFIED"
+                                            else "Startup recovery: proof identity or transaction binding mismatch"
+                                        )
                                         self.work_store.save(work.transition(
                                             WorkStatus.FAILED,
                                             failure=WorkFailure(
-                                                code="UNVERIFIED_RECOVERY",
+                                                code="UNVERIFIED_RECOVERY" if "identity" not in fail_summary else "EVIDENCE_MISMATCH",
                                                 stage="recovery",
-                                                summary=f"Startup recovery: proof verification failed ({rep.overall_status.value})",
+                                                summary=fail_summary,
                                                 retryable=False,
                                             ),
                                         ))
