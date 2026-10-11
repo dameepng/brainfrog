@@ -217,6 +217,7 @@ class VerificationGate:
         tx_res: Optional[TransactionResult],
         tracked_pids: Optional[Sequence[int]] = None,
         channel: str = "cli",
+        contract: Optional[Any] = None,
     ) -> Tuple[bool, Dict[str, bool], List[str]]:
         """Evaluate all verification criteria and return (verified, details, errors)."""
         errors: List[str] = []
@@ -285,8 +286,13 @@ class VerificationGate:
                 details["execution_integrity"] = False
                 errors.append(f"Execution integrity violated: lingering processes detected: {lingering}.")
 
-        # E. Trust Integrity: CLI is local, remote channels cannot execute arbitrary code
-        if channel not in ("cli", "local", "terminal"):
+        # E. Trust Integrity: CLI is local, remote channels require an approved execution contract
+        is_local_channel = channel.lower().strip() in ("cli", "local", "terminal")
+        is_approved_remote = (
+            channel.lower().strip() in ("telegram", "whatsapp")
+            and contract is not None
+        )
+        if not (is_local_channel or is_approved_remote):
             details["trust_integrity"] = False
             errors.append(f"Trust integrity violated: channel '{channel}' is not trusted for autonomous execution.")
 

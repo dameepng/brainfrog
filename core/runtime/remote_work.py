@@ -59,6 +59,8 @@ class RemoteWorkResult:
     plan_id: Optional[str] = None
     transaction_id: Optional[str] = None
     error_code: Optional[str] = None
+    proof_path: Optional[str] = None
+    verification_passed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
@@ -68,6 +70,8 @@ class RemoteWorkResult:
             "approval_request_id": self.approval_request_id,
             "plan_id": self.plan_id, "transaction_id": self.transaction_id,
             "error_code": self.error_code,
+            "proof_path": self.proof_path,
+            "verification_passed": self.verification_passed,
         }
         reject_secrets(data)
         return data
@@ -142,15 +146,37 @@ class RemoteWorkCoordinator:
         work_id = self._approval_index.get(approval_request_id)
         return self._contexts.get(work_id) if work_id else None
 
-    def transition_for_approval(self, approval_request_id: str,
-                                status: WorkStatus) -> Optional[Work]:
+    def transition_for_approval(
+        self,
+        approval_request_id: str,
+        status: WorkStatus,
+        *,
+        verification_result: Optional[Any] = None,
+        failure: Optional[Any] = None,
+        resume_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Work]:
         context = self.context_for_approval(approval_request_id)
         if context is None:
             return None
         work = self.work_store.get(context.work_id)
-        if work is None or work.status == status:
+        if (
+            work is None
+            or (
+                work.status == status
+                and verification_result is None
+                and failure is None
+                and resume_metadata is None
+            )
+        ):
             return work
-        return self.work_store.save(work.transition(status))
+        return self.work_store.save(
+            work.transition(
+                status,
+                verification_result=verification_result,
+                failure=failure,
+                resume_metadata=resume_metadata,
+            )
+        )
 
     def bind_transaction(self, approval_request_id: str, transaction_id: str) -> None:
         context = self.context_for_approval(approval_request_id)
@@ -168,16 +194,31 @@ class RemoteWorkCoordinator:
             except Exception:
                 pass
 
-    def result(self, approval_request_id: str, status: str, message: str,
-               *, error_code: Optional[str] = None) -> Optional[RemoteWorkResult]:
+    def result(
+        self,
+        approval_request_id: str,
+        status: str,
+        message: str,
+        *,
+        error_code: Optional[str] = None,
+        proof_path: Optional[str] = None,
+        verification_passed: bool = False,
+    ) -> Optional[RemoteWorkResult]:
         context = self.context_for_approval(approval_request_id)
         if context is None:
             return None
         return RemoteWorkResult(
-            request_id=context.request.request_id, work_id=context.work_id,
-            plan_id=context.plan_id, approval_request_id=approval_request_id,
-            transaction_id=context.transaction_id, status=status, message=message,
-            approval_required=status == "approval_required", error_code=error_code,
+            request_id=context.request.request_id,
+            work_id=context.work_id,
+            plan_id=context.plan_id,
+            approval_request_id=approval_request_id,
+            transaction_id=context.transaction_id,
+            status=status,
+            message=message,
+            approval_required=status == "approval_required",
+            error_code=error_code,
+            proof_path=proof_path,
+            verification_passed=verification_passed,
         )
 
 

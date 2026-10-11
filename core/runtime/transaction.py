@@ -1005,7 +1005,7 @@ class TransactionCoordinator:
                         raise ValueError(f"Operation '{op.id}' has no after_state staged")
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     if op.after_state.get("is_text", True):
-                        target_path.write_text(op.after_state["content"], encoding="utf-8")
+                        target_path.write_text(op.after_state["content"], encoding="utf-8", newline="\n")
                     else:
                         raw = base64.b64decode(op.after_state["content_b64"].encode("ascii"))
                         target_path.write_bytes(raw)

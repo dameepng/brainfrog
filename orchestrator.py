@@ -1511,13 +1511,53 @@ class Orchestrator:
         )
 
         if self.cfg.execution_contract is not None:
-            self._safe_write_files(new_files)
-            tx_res = self.cfg.last_transaction_result
-            if tx_res is None or not tx_res.success:
-                raise RuntimeError("Transactional verification did not commit")
-            return StepResult(step, "verified", 0,
-                              "Approved files were transactionally applied and verified. "
-                              "Shell, Git, and browser operations were not authorized.")
+            active_coordinator = self._stage_and_execute_transaction(new_files)
+            try:
+                if self.cfg.test_command and self.cfg.test_command != ["forbidden"]:
+                    test_proc = self._run_test_suite()
+                    self.cfg.last_test_result = test_proc
+                    if test_proc.returncode != 0 or getattr(test_proc, "is_timeout", False) or getattr(test_proc, "is_cancelled", False):
+                        fail_reason = (
+                            "Domain test suite timed out"
+                            if getattr(test_proc, "is_timeout", False)
+                            else (
+                                "Domain test suite cancelled"
+                                if getattr(test_proc, "is_cancelled", False)
+                                else f"Domain test suite failed with exit code {test_proc.returncode}"
+                            )
+                        )
+                        rb_res = active_coordinator.rollback(reason=fail_reason)
+                        self.cfg.last_transaction_result = rb_res
+                        raise RuntimeError(fail_reason)
+
+                verified = active_coordinator.verify()
+                if not verified:
+                    fail_reason = f"Filesystem transaction verification failed: {active_coordinator.tx.failure_reason}"
+                    self.cfg.last_transaction_result = TransactionResult(
+                        transaction_id=active_coordinator.tx.id,
+                        status=active_coordinator.tx.status,
+                        committed=False,
+                        rolled_back=(active_coordinator.tx.status == TransactionStatus.ROLLED_BACK),
+                        operations=tuple(active_coordinator.tx.operations),
+                        error=active_coordinator.tx.failure_reason,
+                        rollback_error=active_coordinator.tx.rollback_reason,
+                    )
+                    raise RuntimeError(fail_reason)
+
+                tx_res = active_coordinator.commit()
+                self.cfg.last_transaction_result = tx_res
+                if tx_res is None or not tx_res.success:
+                    raise RuntimeError("Transactional verification did not commit")
+                return StepResult(step, "verified", 0,
+                                  "Approved files were transactionally applied and verified. "
+                                  "Shell, Git, and browser operations were not authorized.")
+            except BaseException as exc:
+                if not active_coordinator.tx.is_terminal:
+                    try:
+                        self.cfg.last_transaction_result = active_coordinator.rollback(reason=f"Execution aborted: {exc}")
+                    except Exception:
+                        pass
+                raise
 
         # Code-side Step Scope Enforcement:
         if step.files:

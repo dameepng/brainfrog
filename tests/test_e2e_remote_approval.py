@@ -726,6 +726,7 @@ class TestEndToEndRuntimeIntegration(unittest.TestCase):
             approval_service=self.service,
             require_approval=True,
             two_man_rule_enabled=True,
+            default_test_cmd=['python', '-c', 'pass'],
         )
 
     def tearDown(self) -> None:

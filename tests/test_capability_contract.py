@@ -351,6 +351,7 @@ class CapabilityContractTests(unittest.TestCase):
             system1_factory=lambda b: MockSystem1(),
             system2_factory=lambda **kw: MockSystem2({"src/auth.py": "e2e_pass"}),
             require_approval=True,
+            default_test_cmd=['python', '-c', 'pass'],
         )
         req_msg = IncomingMessage(
             text="write_file src/auth.py", channel="telegram", user_id="alice",
