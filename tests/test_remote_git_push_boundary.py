@@ -599,6 +599,7 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
             system1_factory=lambda b: mock_s1,
             system2_factory=lambda **kw: mock_s2,
             require_approval=True,
+            default_test_cmd='python -c "pass"',
         )
 
         user_id = "tg_dev_1001"
@@ -683,6 +684,7 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
             system1_factory=lambda b: mock_s1,
             system2_factory=lambda **kw: mock_s2,
             require_approval=True,
+            default_test_cmd='python -c "pass"',
         )
 
         user_id = "wa_dev_888"

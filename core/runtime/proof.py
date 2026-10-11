@@ -374,8 +374,8 @@ class ProofArtifact:
             ChangeRecord(
                 path=f["path"],
                 operation=f["operation"],
-                before_sha256=f.get("before_sha256"),
-                after_sha256=f.get("after_sha256"),
+                before_sha256=f.get("before_sha256") or f.get("sha256_before"),
+                after_sha256=f.get("after_sha256") or f.get("sha256_after"),
                 byte_count_delta=f.get("byte_count_delta", 0),
             )
             for f in c_data.get("files", [])
@@ -643,18 +643,17 @@ def build_change_records(
         # Compute hash if missing and content present
         if not before_hash and before_state.get("content"):
             before_hash = hashlib.sha256(before_state["content"].encode("utf-8")).hexdigest()
-        if not after_hash and after_state.get("content"):
-            after_hash = hashlib.sha256(after_state["content"].encode("utf-8")).hexdigest()
-
-        # If committed file exists on disk, derive final state if after_state lacked hash
+        # Derive final after_state hash: prefer committed disk state if file exists on disk
         file_disk = (ws_res / rel_path)
-        if not after_hash and file_disk.exists() and file_disk.is_file():
+        if file_disk.exists() and file_disk.is_file():
             try:
                 raw = file_disk.read_bytes()
                 after_hash = hashlib.sha256(raw).hexdigest()
                 after_bytes = len(raw)
             except Exception:
                 pass
+        elif not after_hash and after_state.get("content"):
+            after_hash = hashlib.sha256(after_state["content"].encode("utf-8")).hexdigest()
 
         byte_delta = int(after_bytes - before_bytes)
 

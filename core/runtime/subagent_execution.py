@@ -1064,9 +1064,10 @@ class SubagentExecutionCoordinator:
         error_msg: str,
         delg: DelegationContract,
         now: float,
+        failure_code: str = "ERR_SUBAGENT_EXECUTION_FAILED",
     ) -> ChildWork:
         """Advance ChildWork to FAILED with attached WorkFailure."""
-        fail_obj = WorkFailure(code="ERR_SUBAGENT_EXECUTION_FAILED", summary=error_msg)
+        fail_obj = WorkFailure(code=failure_code, summary=error_msg)
         curr = cw.transition(WorkStatus.FAILED, failure=fail_obj, delegation=delg, current_time=now)
         return save_child_work(self.work_store, curr)
 
@@ -1076,6 +1077,7 @@ class SubagentExecutionCoordinator:
         step_results: Sequence[Any],
         delg: DelegationContract,
         now: float,
+        verification_result: Optional[VerificationResult] = None,
     ) -> ChildWork:
         """Advance ChildWork through VERIFYING to DONE with VerificationResult, saving each step."""
         curr = cw
@@ -1083,7 +1085,21 @@ class SubagentExecutionCoordinator:
             curr = curr.transition(WorkStatus.VERIFYING, delegation=delg, current_time=now)
             curr = save_child_work(self.work_store, curr)
         if curr.status == WorkStatus.VERIFYING:
-            v_res = VerificationResult(status=VerificationStatus.PASS, summary="Execution steps verified")
+            v_res = verification_result
+            if v_res is None:
+                for sr in step_results:
+                    v = getattr(sr, "verification", None)
+                    if isinstance(v, VerificationResult) and v.status == VerificationStatus.PASS:
+                        v_res = v
+                        break
+                    elif isinstance(v, dict) and v.get("status") in (VerificationStatus.PASS, "PASS"):
+                        v_res = VerificationResult.from_dict(v)
+                        break
+            if v_res is None:
+                if step_results and not any(getattr(sr, "exit_code", 0) != 0 for sr in step_results):
+                    v_res = VerificationResult(status=VerificationStatus.PASS, summary=f"Execution steps verified ({len(step_results)} steps)")
+                else:
+                    raise ValueError("Cannot advance ChildWork to DONE without authoritative verification evidence")
             curr = curr.transition(WorkStatus.DONE, verification_result=v_res, delegation=delg, current_time=now)
             curr = save_child_work(self.work_store, curr)
         return curr
@@ -1176,6 +1192,46 @@ class SubagentExecutionCoordinator:
                 created_at=now,
             )
 
+        # Invariant (Sprint 1.1.2 Phase B #5):
+        # A recovery path must NEVER synthesize VerificationResult(PASS) merely because
+        # execution steps or filesystem operations appear complete.
+        # Check if transaction contains authoritative verification evidence.
+        tx_vr = tx.verification_result
+        v_res_obj: Optional[VerificationResult] = None
+
+        if isinstance(tx_vr, dict):
+            status_val = tx_vr.get("status")
+            passed_val = tx_vr.get("passed")
+            if (status_val in (VerificationStatus.PASS, "PASS") or passed_val is True) and tx_vr.get("failed", 0) == 0:
+                v_res_obj = VerificationResult(
+                    status=VerificationStatus.PASS,
+                    passed=tx_vr.get("passed", 1) if isinstance(tx_vr.get("passed"), int) else 1,
+                    failed=0,
+                    summary=tx_vr.get("summary", "Transaction verified by authoritative check"),
+                )
+        elif isinstance(tx_vr, VerificationResult) and tx_vr.status == VerificationStatus.PASS:
+            v_res_obj = tx_vr
+
+        if v_res_obj is None:
+            fail_msg = "Crash recovery failed: missing or non-passing authoritative verification evidence for child transaction"
+            cw_failed = self._advance_to_failed(
+                cw,
+                fail_msg,
+                delg,
+                now,
+                failure_code="UNVERIFIED_CHILD_RECOVERY",
+            )
+            return SubagentExecutionResult(
+                child_work_id=cw_failed.id,
+                subagent_id=cw_failed.subagent_id,
+                parent_work_id=cw_failed.parent_work_id,
+                status=WorkStatus.FAILED,
+                success=False,
+                summary=fail_msg,
+                failure=cw_failed.work.failure,
+                created_at=now,
+            )
+
         # 4. If verified, finalize transaction commit
         if tx.status != TransactionStatus.COMMITTED:
             tx.commit_marker = {
@@ -1191,15 +1247,15 @@ class SubagentExecutionCoordinator:
             if self.transaction_store is not None:
                 self.transaction_store.save(tx)
 
-        # 5. Advance ChildWork to DONE without re-executing
-        cw_done = self._advance_to_done(cw, [], delg, now)
+        # 5. Advance ChildWork to DONE with authoritative verification result
+        cw_done = self._advance_to_done(cw, [], delg, now, verification_result=v_res_obj)
         return SubagentExecutionResult(
             child_work_id=cw_done.id,
             subagent_id=cw_done.subagent_id,
             parent_work_id=cw_done.parent_work_id,
             status=WorkStatus.DONE,
             success=True,
-            summary="Crash recovery reconciled executed transaction to DONE without re-execution",
+            summary="Crash recovery reconciled executed transaction with verified evidence to DONE",
             verification_status="PASS",
             created_at=now,
         )

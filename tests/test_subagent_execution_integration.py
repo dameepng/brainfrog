@@ -871,6 +871,7 @@ class TestCrashRecoveryIntegration(BaseIntegrationTestCase):
             workspace=str(self.repo_dir),
             status=TransactionStatus.EXECUTING,
             operations=[op],
+            verification_result={"status": "PASS", "passed": True, "summary": "Auth verification passed"},
         )
         self.transaction_store.save(tx)
 
@@ -925,6 +926,7 @@ class TestCrashRecoveryIntegration(BaseIntegrationTestCase):
             workspace=str(self.repo_dir),
             status=TransactionStatus.EXECUTING,
             operations=[op],
+            verification_result={"status": "PASS", "passed": True, "summary": "Repeat auth verified"},
         )
         self.transaction_store.save(tx)
 

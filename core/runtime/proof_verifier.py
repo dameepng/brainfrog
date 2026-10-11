@@ -21,6 +21,7 @@ Status model:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -174,10 +175,20 @@ class ProofVerificationReport:
 class DeterministicProofVerifier:
     """Deterministic, read-only proof verification engine."""
 
-    def __init__(self, workspace: Union[str, Path]) -> None:
+    def __init__(
+        self,
+        workspace: Union[str, Path],
+        *,
+        verify_disk_integrity: bool = False,
+    ) -> None:
         self.workspace = Path(workspace).resolve()
+        self.verify_disk_integrity = verify_disk_integrity
         self.finalization = TaskFinalizationCoordinator(self.workspace)
         self.store = FileProofStore(self.workspace)
+
+    def verify_workspace_integrity(self, target: Union[str, Path]) -> ProofVerificationReport:
+        """Verify proof artifact and validate that current workspace matches verified post-task state."""
+        return self.verify(target, verify_disk_integrity=True)
 
     def _resolve_target_path(self, target: Union[str, Path]) -> Tuple[Path, Optional[str]]:
         """Resolve target string or Path to an existing or expected JSON proof file."""
@@ -217,11 +228,19 @@ class DeterministicProofVerifier:
         # Fallback path if task_id doesn't exist
         return as_json_in_store, as_json_in_store.stem
 
-    def verify(self, target: Union[str, Path]) -> ProofVerificationReport:
+    def verify(
+        self,
+        target: Union[str, Path],
+        *,
+        verify_disk_integrity: Optional[bool] = None,
+    ) -> ProofVerificationReport:
         """Inspect and verify a proof artifact by task ID or filepath.
 
         Execution is strictly read-only: does not modify or delete any file.
+        When verify_disk_integrity is True, also verifies that the current workspace matches
+        the verified post-task state.
         """
+        check_disk = self.verify_disk_integrity if verify_disk_integrity is None else verify_disk_integrity
         target_str = str(target)
         if "\0" in target_str:
             safe_display = target_str.replace("\0", "\\x00")
@@ -1030,15 +1049,338 @@ class DeterministicProofVerifier:
             )
         )
 
+        # -----------------------------------------------------------------
+        # Check 12: Current Workspace Disk Integrity Verification
+        # -----------------------------------------------------------------
+        if check_disk:
+            self._verify_workspace_disk_integrity(data, report)
+
+        return report
+
+    def _verify_workspace_disk_integrity(
+        self,
+        data: Dict[str, Any],
+        report: ProofVerificationReport,
+    ) -> None:
+        """Deterministically verify that current workspace matches the verified post-task state."""
+        changes_sec = data.get("changes") or {}
+        if not isinstance(changes_sec, dict):
+            return
+
+        files_list = changes_sec.get("files")
+        if not isinstance(files_list, list):
+            return
+
+        repro_sec = data.get("reproducibility") or {}
+        expected_file_hashes = repro_sec.get("expected_file_hashes") if isinstance(repro_sec, dict) else {}
+        if not isinstance(expected_file_hashes, dict):
+            expected_file_hashes = {}
+
+        # 1. Enforce evidence provenance: expected_file_hashes must not contain unclaimed files
+        claimed_paths_norm: Set[str] = set()
+        for f in files_list:
+            if isinstance(f, dict) and isinstance(f.get("path"), str):
+                claimed_paths_norm.add(f.get("path").replace("\\", "/"))
+
+        unclaimed_hashes = [
+            p for p in expected_file_hashes.keys()
+            if isinstance(p, str) and p.replace("\\", "/") not in claimed_paths_norm
+        ]
+        if unclaimed_hashes:
+            msg = (
+                f"Reproducibility evidence includes expected hash for '{unclaimed_hashes}', "
+                f"which is not recorded in transaction change records."
+            )
+            report.checks.append(
+                VerificationCheckResult(
+                    check_name="disk_integrity_unclaimed_expected_hash",
+                    status=ProofVerificationStatus.INVALID,
+                    message=msg,
+                    details={"unclaimed_paths": unclaimed_hashes},
+                )
+            )
+            report.reasons.append(msg)
+            report.overall_status = ProofVerificationStatus.INVALID
+
+        ws_resolved = self.workspace.resolve()
+        verified_records: List[Dict[str, Any]] = []
+        has_failure = False
+        has_incomplete = False
+
+        for f in files_list:
+            if not isinstance(f, dict):
+                has_failure = True
+                continue
+            raw_path = f.get("path")
+            if not isinstance(raw_path, str) or not is_safe_workspace_relative_path(raw_path):
+                has_failure = True
+                continue
+
+            # 2. Canonical workspace boundary & symlink escape check
+            target_path = ws_resolved / raw_path
+            try:
+                resolved_target = target_path.resolve()
+            except Exception as res_err:
+                msg = f"Path resolution failed for '{raw_path}': {res_err}"
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_path_resolution",
+                        status=ProofVerificationStatus.INVALID,
+                        message=msg,
+                        details={"path": raw_path},
+                    )
+                )
+                report.reasons.append(msg)
+                report.overall_status = ProofVerificationStatus.INVALID
+                has_failure = True
+                continue
+
+            try:
+                is_inside = resolved_target.is_relative_to(ws_resolved)
+            except AttributeError:
+                try:
+                    resolved_target.relative_to(ws_resolved)
+                    is_inside = True
+                except ValueError:
+                    is_inside = False
+
+            if not is_inside:
+                msg = f"Path '{raw_path}' resolves to '{resolved_target}', escaping workspace boundary '{ws_resolved}'."
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_workspace_escape",
+                        status=ProofVerificationStatus.INVALID,
+                        message=msg,
+                        details={"path": raw_path, "resolved": str(resolved_target)},
+                    )
+                )
+                report.reasons.append(msg)
+                report.overall_status = ProofVerificationStatus.INVALID
+                has_failure = True
+                continue
+
+            op = str(f.get("operation", "MODIFY")).upper()
+            rec_after = f.get("after_sha256") or f.get("sha256_after")
+            raw_norm = raw_path.replace("\\", "/")
+            repro_after = expected_file_hashes.get(raw_path) or expected_file_hashes.get(raw_norm)
+
+            # 3. Intentional deletion check
+            if op == "DELETE":
+                if repro_after is not None:
+                    msg = (
+                        f"Contradiction: file '{raw_path}' is marked DELETE in change records, "
+                        f"but has an expected post-task hash in reproducibility evidence."
+                    )
+                    report.checks.append(
+                        VerificationCheckResult(
+                            check_name="disk_integrity_deleted_file_hash_conflict",
+                            status=ProofVerificationStatus.INVALID,
+                            message=msg,
+                            details={"path": raw_path},
+                        )
+                    )
+                    report.reasons.append(msg)
+                    report.overall_status = ProofVerificationStatus.INVALID
+                    has_failure = True
+                    continue
+
+                if target_path.exists() or target_path.is_symlink():
+                    msg = (
+                        f"Disk integrity check failed: file '{raw_path}' was expected to be deleted by task, "
+                        f"but still exists on disk."
+                    )
+                    report.checks.append(
+                        VerificationCheckResult(
+                            check_name="disk_integrity_deleted_file_exists",
+                            status=ProofVerificationStatus.INVALID,
+                            message=msg,
+                            details={"path": raw_path},
+                        )
+                    )
+                    report.reasons.append(msg)
+                    report.overall_status = ProofVerificationStatus.INVALID
+                    has_failure = True
+                    continue
+                else:
+                    verified_records.append({
+                        "path": raw_path,
+                        "operation": op,
+                        "status": "CONFIRMED_DELETED",
+                    })
+                    continue
+
+            # 4. Created / Modified / Renamed files check
+            if rec_after and repro_after and str(rec_after).lower() != str(repro_after).lower():
+                msg = (
+                    f"Contradictory expected hashes for '{raw_path}': change record specifies '{rec_after}', "
+                    f"while reproducibility evidence specifies '{repro_after}'."
+                )
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_hash_conflict",
+                        status=ProofVerificationStatus.INVALID,
+                        message=msg,
+                        details={"path": raw_path, "change_record_sha": str(rec_after), "reproducibility_sha": str(repro_after)},
+                    )
+                )
+                report.reasons.append(msg)
+                report.overall_status = ProofVerificationStatus.INVALID
+                has_failure = True
+                continue
+
+            expected_sha = str(rec_after or repro_after or "").strip().lower()
+            if not expected_sha:
+                msg = f"Missing required expected post-task SHA-256 hash for changed file '{raw_path}'."
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_missing_hash",
+                        status=ProofVerificationStatus.INCOMPLETE,
+                        message=msg,
+                        details={"path": raw_path},
+                    )
+                )
+                report.reasons.append(msg)
+                if report.overall_status != ProofVerificationStatus.INVALID:
+                    report.overall_status = ProofVerificationStatus.INCOMPLETE
+                has_incomplete = True
+                continue
+
+            if not re.match(r"^[0-9a-fA-F]{64}$", expected_sha):
+                msg = f"Malformed expected SHA-256 hash for changed file '{raw_path}': '{expected_sha}' (must be 64-char hex)."
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_malformed_hash",
+                        status=ProofVerificationStatus.INVALID,
+                        message=msg,
+                        details={"path": raw_path, "expected_sha": expected_sha},
+                    )
+                )
+                report.reasons.append(msg)
+                report.overall_status = ProofVerificationStatus.INVALID
+                has_failure = True
+                continue
+
+            if not target_path.exists():
+                msg = f"Disk integrity check failed: file '{raw_path}' is expected to exist, but is missing from disk."
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_file_missing",
+                        status=ProofVerificationStatus.INVALID,
+                        message=msg,
+                        details={"path": raw_path, "expected_sha256": expected_sha},
+                    )
+                )
+                report.reasons.append(msg)
+                report.overall_status = ProofVerificationStatus.INVALID
+                has_failure = True
+                continue
+
+            if not target_path.is_file():
+                msg = f"Disk integrity check failed: target '{raw_path}' exists but is not a regular file (e.g. directory)."
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_not_regular_file",
+                        status=ProofVerificationStatus.INVALID,
+                        message=msg,
+                        details={"path": raw_path},
+                    )
+                )
+                report.reasons.append(msg)
+                report.overall_status = ProofVerificationStatus.INVALID
+                has_failure = True
+                continue
+
+            try:
+                content = target_path.read_bytes()
+                actual_sha = hashlib.sha256(content).hexdigest().lower()
+            except PermissionError as perm_err:
+                msg = f"Permission denied reading file '{raw_path}': {perm_err}"
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_read_error",
+                        status=ProofVerificationStatus.INVALID,
+                        message=msg,
+                        details={"path": raw_path, "error": str(perm_err)},
+                    )
+                )
+                report.reasons.append(msg)
+                report.overall_status = ProofVerificationStatus.INVALID
+                has_failure = True
+                continue
+            except OSError as os_err:
+                msg = f"OS error reading file '{raw_path}': {os_err}"
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_read_error",
+                        status=ProofVerificationStatus.INVALID,
+                        message=msg,
+                        details={"path": raw_path, "error": str(os_err)},
+                    )
+                )
+                report.reasons.append(msg)
+                report.overall_status = ProofVerificationStatus.INVALID
+                has_failure = True
+                continue
+
+            if actual_sha != expected_sha:
+                msg = (
+                    f"Disk integrity mismatch for '{raw_path}': file content on disk has mutated since verification. "
+                    f"Expected SHA-256 '{expected_sha}', but found '{actual_sha}'."
+                )
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="disk_integrity_hash_mismatch",
+                        status=ProofVerificationStatus.INVALID,
+                        message=msg,
+                        details={"path": raw_path, "expected_sha256": expected_sha, "actual_sha256": actual_sha},
+                    )
+                )
+                report.reasons.append(msg)
+                report.overall_status = ProofVerificationStatus.INVALID
+                has_failure = True
+                continue
+
+            verified_records.append({
+                "path": raw_path,
+                "operation": op,
+                "status": "VERIFIED_MATCH",
+                "sha256": actual_sha,
+            })
+
+        if not has_failure and not has_incomplete and not unclaimed_hashes:
+            report.checks.append(
+                VerificationCheckResult(
+                    check_name="current_workspace_disk_integrity",
+                    status=ProofVerificationStatus.VALID,
+                    message=f"Current workspace disk integrity verified for all {len(files_list)} changed file(s).",
+                    details={"verified_files_count": len(verified_records), "files": verified_records},
+                )
+            )
+        else:
+            final_status = ProofVerificationStatus.INVALID if has_failure or unclaimed_hashes else ProofVerificationStatus.INCOMPLETE
+            report.checks.append(
+                VerificationCheckResult(
+                    check_name="current_workspace_disk_integrity",
+                    status=final_status,
+                    message=(
+                        f"Current workspace disk integrity verification failed: "
+                        f"{len(verified_records)}/{len(files_list)} files verified."
+                    ),
+                    details={"verified_files_count": len(verified_records), "total_expected": len(files_list)},
+                )
+            )
+
         return report
 
 
 def verify_proof(
     workspace: Union[str, Path],
     target: Union[str, Path],
+    *,
+    verify_disk_integrity: bool = False,
 ) -> ProofVerificationReport:
     """Convenience functional API to verify a proof artifact by task ID or path."""
-    verifier = DeterministicProofVerifier(workspace=workspace)
+    verifier = DeterministicProofVerifier(workspace=workspace, verify_disk_integrity=verify_disk_integrity)
     return verifier.verify(target)
 
 

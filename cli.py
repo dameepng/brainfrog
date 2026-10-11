@@ -616,13 +616,13 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
     console.print()
 
 
-def verify_proof_cli(repo_dir: Path, target: str) -> int:
+def verify_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = False) -> int:
     """CLI handler for deterministic proof verification. Returns exit code 0 (VALID), 1 (INVALID), 2 (INCOMPLETE)."""
     from core.runtime.proof_verifier import (
         DeterministicProofVerifier,
         ProofVerificationStatus,
     )
-    verifier = DeterministicProofVerifier(repo_dir)
+    verifier = DeterministicProofVerifier(repo_dir, verify_disk_integrity=check_workspace)
     report = verifier.verify(target)
     print_proof_verification_report(report, repo_dir)
 
@@ -2336,9 +2336,18 @@ def run_interactive(
         elif lower.startswith(("/verify-proof", "/verify-proof ", "/verify ")):
             parts = prompt.split(maxsplit=1)
             if len(parts) > 1 and parts[1].strip():
-                verify_proof_cli(repo_dir, parts[1].strip())
+                raw_target = parts[1].strip()
+                check_ws = False
+                tokens = raw_target.split()
+                if "--check-workspace" in tokens:
+                    check_ws = True
+                    raw_target = " ".join([t for t in tokens if t != "--check-workspace"]).strip()
+                if raw_target:
+                    verify_proof_cli(repo_dir, raw_target, check_workspace=check_ws)
+                else:
+                    print_banner_box("Usage: `/verify-proof <task_id or path/to/proof.json> [--check-workspace]`", level="error", title="Missing Target")
             else:
-                print_banner_box("Penggunaan: `/verify-proof <task_id atau path/to/proof.json>`", level="error", title="Missing Target")
+                print_banner_box("Usage: `/verify-proof <task_id or path/to/proof.json> [--check-workspace]`", level="error", title="Missing Target")
             continue
         elif lower.startswith(("/works", "/work ", "/resume ", "/cancel ", "/approve ", "/reject ", "/approvals", "/transactions", "/transaction ", "/recover ", "/exec ", "/run ")):
             incoming_cmd = IncomingMessage(
@@ -3117,6 +3126,12 @@ def main() -> int:
     p.add_argument("--module-map", default=None, help="Path to custom modules.json")
     p.add_argument("--min-domain-confidence", type=float, default=0.45)
     p.add_argument("--verify-proof", default=None, help="Verify proof artifact consistency by task ID or path")
+    p.add_argument(
+        "--check-workspace",
+        action="store_true",
+        default=False,
+        help="Verify current workspace disk integrity against post-proof file hashes",
+    )
     p.add_argument("-v", "--version", action="version", version=f"BrainFrog {CLI_VERSION}")
 
     args = p.parse_args()
@@ -3125,7 +3140,7 @@ def main() -> int:
     load_all_envs(repo_dir)
 
     if args.verify_proof:
-        return verify_proof_cli(repo_dir, args.verify_proof)
+        return verify_proof_cli(repo_dir, args.verify_proof, check_workspace=args.check_workspace)
 
     raw_task = " ".join(args.task) if isinstance(args.task, list) and args.task else args.flag_task
     chosen_task = (raw_task or "").strip()
@@ -3141,9 +3156,18 @@ def main() -> int:
     ):
         parts = chosen_task.split(maxsplit=1)
         if len(parts) > 1 and parts[1].strip():
-            return verify_proof_cli(repo_dir, parts[1].strip())
+            raw_target = parts[1].strip()
+            check_ws = args.check_workspace
+            if "--check-workspace" in raw_target.split():
+                check_ws = True
+                raw_target = " ".join([tok for tok in raw_target.split() if tok != "--check-workspace"]).strip()
+            if raw_target:
+                return verify_proof_cli(repo_dir, raw_target, check_workspace=check_ws)
+            else:
+                print_banner_box("Usage: brainfrog verify-proof <task_id or path/to/proof.json> [--check-workspace]", level="error", title="Missing Target")
+                return 1
         else:
-            print_banner_box("Usage: brainfrog verify-proof <task_id or path/to/proof.json>", level="error", title="Missing Target")
+            print_banner_box("Usage: brainfrog verify-proof <task_id or path/to/proof.json> [--check-workspace]", level="error", title="Missing Target")
             return 1
 
     if chosen_task.startswith("gateway") or chosen_task.startswith("/gateway"):
