@@ -415,6 +415,15 @@ def print_task_verification_report(result: Any, repo_dir: Path) -> None:
         "Verification Verdict", f"[{verdict_color} bold]{verdict_sym} {verdict_text}[/{verdict_color} bold]"
     )
 
+    # Git Provenance / Finalization Outcome
+    proof_art = getattr(result, "proof_artifact", None)
+    prov = getattr(proof_art, "provenance", None) if proof_art else None
+    commit_sha = getattr(prov, "commit_sha", None) if prov else None
+    if commit_sha:
+        verdict_table.add_row("Git Finalization", f"[bold {COLOR_SUCCESS}]COMMITTED ({commit_sha[:8]})[/bold {COLOR_SUCCESS}]")
+    elif result.status == "COMMITTED":
+        verdict_table.add_row("Git Finalization", "[dim]No Git commit created[/dim]")
+
     # Resolve safe relative proof paths
     json_rel = _resolve_relative_proof_path(result.proof_path, repo_dir, result.task_id)
     md_rel = _resolve_relative_proof_path(result.proof_markdown_path, repo_dir, result.task_id)
@@ -443,7 +452,6 @@ def print_task_verification_report(result: Any, repo_dir: Path) -> None:
     details = getattr(result, "verification_details", None) or {}
 
     # Extract test info from proof artifact or result
-    proof_art = getattr(result, "proof_artifact", None)
     v_ev = getattr(proof_art, "verification", None) if proof_art else None
     proc_ev = getattr(v_ev, "process_evidence", None) if v_ev else None
 
@@ -488,27 +496,151 @@ def print_task_verification_report(result: Any, repo_dir: Path) -> None:
     console.print()
     console.print(Align.center(gate_table) if cols > 100 else gate_table)
 
-    # 3. Explanations for Failure / Rollback / Recovery
+    # 3. Post-Task File Changes Table
+    from core.runtime.proof import redact_secrets
+    from core.runtime.task import FileMutationStatus
+
+    changes_table = Table(
+        title=" Post-Task File Changes ",
+        box=box.ROUNDED,
+        border_style=COLOR_FG_MUTED,
+        header_style=f"bold {COLOR_ACCENT}",
+        show_header=True,
+        padding=(0, 1),
+    )
+    changes_table.add_column("Path", style=f"bold {COLOR_FG_PRIMARY}")
+    changes_table.add_column("Operation", style=COLOR_FG_SECONDARY)
+    changes_table.add_column("Mutation Status", justify="center")
+    changes_table.add_column("Staged SHA", style="dim")
+    changes_table.add_column("Final SHA", style="dim")
+    changes_table.add_column("Delta", justify="right")
+    changes_table.add_column("Details", style=COLOR_FG_SECONDARY)
+
+    file_changes = getattr(result, "file_changes", None)
+    if file_changes:
+        for fc in file_changes:
+            raw_path = getattr(fc, "path", "")
+            safe_path = escape(redact_secrets(sanitize_surrogates(str(raw_path))))
+
+            raw_op = getattr(fc, "operation", "UNKNOWN")
+            safe_op = escape(str(raw_op).upper())
+
+            raw_st = getattr(fc, "status", None)
+            st_val = getattr(raw_st, "value", str(raw_st)).upper()
+
+            if st_val == "COMMITTED":
+                st_badge = f"[bold {COLOR_SUCCESS}]COMMITTED[/bold {COLOR_SUCCESS}]"
+            elif st_val == "ROLLED_BACK":
+                st_badge = f"[bold {COLOR_WARNING}]ROLLED_BACK[/bold {COLOR_WARNING}]"
+            elif st_val == "ROLLBACK_FAILED":
+                st_badge = f"[bold {COLOR_ERROR}]ROLLBACK_FAILED[/bold {COLOR_ERROR}]"
+            elif st_val == "UNCHANGED":
+                st_badge = f"[bold {COLOR_FG_MUTED}]UNCHANGED[/bold {COLOR_FG_MUTED}]"
+            else:
+                st_badge = f"[bold {COLOR_ERROR}]UNKNOWN[/bold {COLOR_ERROR}]"
+
+            s_sha = getattr(fc, "staged_sha256", None)
+            s_sha_str = s_sha[:10] if s_sha else "—"
+
+            f_sha = getattr(fc, "final_sha256", None)
+            if f_sha:
+                f_sha_str = f_sha[:10]
+            elif safe_op == "DELETE" and st_val == "COMMITTED":
+                f_sha_str = "(deleted)"
+            elif st_val == "ROLLED_BACK" and safe_op == "CREATE":
+                f_sha_str = "(removed)"
+            else:
+                f_sha_str = "—"
+
+            b_delta = getattr(fc, "byte_count_delta", 0)
+            if b_delta > 0:
+                delta_str = f"+{b_delta} B"
+            elif b_delta < 0:
+                delta_str = f"{b_delta} B"
+            else:
+                delta_str = "0 B"
+
+            err_str = getattr(fc, "error", None)
+            if err_str:
+                details_str = f"[bold {COLOR_ERROR}]{escape(redact_secrets(sanitize_surrogates(str(err_str))))}[/bold {COLOR_ERROR}]"
+            elif st_val == "ROLLED_BACK":
+                details_str = "Restored to baseline"
+            elif st_val == "ROLLBACK_FAILED":
+                details_str = f"[bold {COLOR_ERROR}]Rollback failed / uncertain[/bold {COLOR_ERROR}]"
+            elif st_val == "UNCHANGED":
+                details_str = "No content change"
+            else:
+                details_str = ""
+
+            changes_table.add_row(safe_path, safe_op, st_badge, s_sha_str, f_sha_str, delta_str, details_str)
+    else:
+        # Distinguish positive evidence of zero mutations vs unknown/unrecorded
+        tx_id = getattr(result, "transaction_id", None)
+        tx_stat = getattr(result, "transaction_status", None)
+        res_stat = getattr(result, "status", None)
+
+        is_evidenced_no_mut = (
+            tx_id is not None
+            and tx_stat in ("committed", "rolled_back", "prepared", "active")
+            and res_stat in ("COMMITTED", "ROLLED_BACK")
+        )
+
+        if is_evidenced_no_mut:
+            changes_table.add_row(
+                "(none)",
+                "—",
+                f"[bold {COLOR_FG_MUTED}]UNCHANGED[/bold {COLOR_FG_MUTED}]",
+                "—",
+                "—",
+                "0 B",
+                "Positive transaction evidence: zero mutations attempted/recorded",
+            )
+        else:
+            changes_table.add_row(
+                "(unrecorded)",
+                "—",
+                f"[bold {COLOR_ERROR}]UNKNOWN[/bold {COLOR_ERROR}]",
+                "—",
+                "—",
+                "—",
+                "[dim]No transaction evidence available (unrecorded / pre-transaction failure)[/dim]",
+            )
+
+    console.print()
+    console.print(Align.center(changes_table) if cols > 100 else changes_table)
+
+    # 4. Explanations for Failure / Rollback / Recovery
     if getattr(result, "recovery_required", False):
         rec_msg = (
-            f"🛑 [bold {COLOR_ERROR}]RECOVERY REQUIRED:[/bold {COLOR_ERROR}] {result.failure_reason or 'Crash or unfinalized commit intent detected.'}\n"
+            f"🛑 [bold {COLOR_ERROR}]RECOVERY REQUIRED:[/bold {COLOR_ERROR}] {escape(redact_secrets(sanitize_surrogates(str(result.failure_reason or 'Crash or unfinalized commit intent detected.'))))}\n"
             "The repository is in a recovery-required state. Run [bold]/recover[/bold] to inspect and reconcile intents."
         )
         print_banner_box(rec_msg, level="error", title="Crash Recovery Required")
     elif result.status == "ROLLED_BACK":
-        rb_msg = (
-            f"⚠️ [bold {COLOR_WARNING}]MUTATIONS ROLLED BACK:[/bold {COLOR_WARNING}] {result.failure_reason or 'Task did not satisfy verification criteria.'}\n"
-            "Pre-task working tree state was cleanly restored."
+        has_failed_rb = any(
+            getattr(fc, "status", None) == FileMutationStatus.ROLLBACK_FAILED
+            for fc in (getattr(result, "file_changes", None) or ())
         )
-        print_banner_box(rb_msg, level="warning", title="Transaction Rolled Back")
+        if has_failed_rb:
+            rb_msg = (
+                f"⚠️ [bold {COLOR_ERROR}]PARTIAL ROLLBACK DETECTED:[/bold {COLOR_ERROR}] {escape(redact_secrets(sanitize_surrogates(str(result.failure_reason or 'Task did not satisfy verification criteria.'))))}\n"
+                "Some files could not be verified as restored; manual inspection required."
+            )
+            print_banner_box(rb_msg, level="error", title="Rollback Incomplete")
+        else:
+            rb_msg = (
+                f"⚠️ [bold {COLOR_WARNING}]MUTATIONS ROLLED BACK:[/bold {COLOR_WARNING}] {escape(redact_secrets(sanitize_surrogates(str(result.failure_reason or 'Task did not satisfy verification criteria.'))))}\n"
+                "Pre-task working tree state was cleanly restored."
+            )
+            print_banner_box(rb_msg, level="warning", title="Transaction Rolled Back")
     elif not result.verified:
         if result.status == "REJECTED":
             is_appr = "approval" in (result.failure_reason or "").lower() or "approval" in (result.summary or "").lower()
             lvl = "warning" if is_appr else "error"
             title = "Approval Required" if is_appr else "Permission Denied"
-            print_banner_box(result.summary or result.failure_reason or "Action rejected by security policy.", level=lvl, title=title)
+            print_banner_box(escape(redact_secrets(sanitize_surrogates(str(result.summary or result.failure_reason or "Action rejected by security policy.")))), level=lvl, title=title)
         else:
-            fail_msg = result.failure_reason or result.summary or "Task execution completed without passing verification criteria."
+            fail_msg = escape(redact_secrets(sanitize_surrogates(str(result.failure_reason or result.summary or "Task execution completed without passing verification criteria."))))
             print_banner_box(fail_msg, level="error", title="Verification Failed")
 
 

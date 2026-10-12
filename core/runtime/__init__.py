@@ -120,6 +120,7 @@ from .transaction import (
     TransactionStatus,
     TransactionStore,
     TransactionVerifier,
+    build_file_change_summaries,
     recover_incomplete_transaction,
 )
 from .remote_work import (
@@ -211,6 +212,8 @@ from .agent_profile import (
 )
 from .task import (
     CURRENT_TASK_SCHEMA_VERSION,
+    FileChangeSummary,
+    FileMutationStatus,
     Task,
     TaskAuthorityViolationError,
     TaskError,
@@ -445,6 +448,7 @@ __all__ = [
     "TransactionStatus",
     "TransactionStore",
     "TransactionVerifier",
+    "build_file_change_summaries",
     "recover_incomplete_transaction",
     "RemoteWorkContext",
     "RemoteWorkCoordinator",
@@ -526,6 +530,8 @@ __all__ = [
     "resolve_profile",
     "validate_agent_profile_id",
     "CURRENT_TASK_SCHEMA_VERSION",
+    "FileChangeSummary",
+    "FileMutationStatus",
     "Task",
     "TaskAuthorityViolationError",
     "TaskError",

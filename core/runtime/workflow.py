@@ -22,11 +22,13 @@ from core.runtime.messages import IncomingMessage, OutgoingMessage
 from core.runtime.permissions import ChannelTrustLevel, PermissionAction
 from core.runtime.process import HardenedProcessResult
 from core.runtime.workspace_lock import is_pid_running
+from core.runtime.task import FileChangeSummary, FileMutationStatus
 from core.runtime.transaction import (
     FileTransactionStore,
     TransactionCoordinator,
     TransactionResult,
     TransactionStatus,
+    build_file_change_summaries,
 )
 from core.runtime.proof import (
     ChangeRecord,
@@ -127,6 +129,7 @@ class TaskResult:
     tests_passed: bool = False
     test_output: str = ""
     changed_files: List[str] = field(default_factory=list)
+    file_changes: Tuple[FileChangeSummary, ...] = field(default_factory=tuple)
     transaction_id: Optional[str] = None
     transaction_status: Optional[str] = None
     failure_reason: Optional[str] = None
@@ -156,6 +159,12 @@ class TaskResult:
             lines.append("Plan:")
             for s in self.plan.steps:
                 lines.append(f"{s.id}. {s.description}")
+            lines.append("")
+
+        if self.file_changes:
+            lines.append("File Changes:")
+            for fc in self.file_changes:
+                lines.append(f"- {fc.path} [{fc.operation}] ({fc.status.value})")
             lines.append("")
 
         if self.changed_files:
@@ -663,7 +672,9 @@ def _do_execute_autonomous_task(
     recovery_req = (tx_status == "failed" or (tx_res is not None and getattr(tx_res, "is_recovery_required", False)))
 
     # Fallback synthesize tx_res for transaction metadata if needed
+    is_synthesized_tx = False
     if tx_res is None and tx_status:
+        is_synthesized_tx = True
         tx_res = TransactionResult(
             transaction_id=tx_id or "tx_unknown",
             status=TransactionStatus(tx_status) if tx_status in [s.value for s in TransactionStatus] else TransactionStatus.COMMITTED,
@@ -671,6 +682,17 @@ def _do_execute_autonomous_task(
             rolled_back=is_tx_rolled_back,
             operations=tuple(),
         )
+
+    file_change_summaries = build_file_change_summaries(
+        tx_res, workspace, is_synthesized=is_synthesized_tx
+    )
+    committed_target_files = [
+        fc.path for fc in file_change_summaries if fc.status == FileMutationStatus.COMMITTED
+    ]
+    if committed_target_files:
+        effective_changed_files = committed_target_files
+    else:
+        effective_changed_files = list(dict.fromkeys(changed_files))
 
     if request.test_command:
         emit_event("TEST_STARTED", transaction_id=tx_id, payload={"command": " ".join(request.test_command)})
@@ -832,7 +854,8 @@ def _do_execute_autonomous_task(
             recovery_required=True,
             tests_passed=tests_passed,
             test_output=test_output,
-            changed_files=list(dict.fromkeys(changed_files)),
+            changed_files=effective_changed_files,
+            file_changes=file_change_summaries,
             transaction_id=tx_id,
             transaction_status=tx_status,
             verification_details=v_details,
@@ -860,7 +883,8 @@ def _do_execute_autonomous_task(
                 plan=plan,
                 tests_passed=True,
                 test_output=test_output,
-                changed_files=list(dict.fromkeys(changed_files)),
+                changed_files=effective_changed_files,
+                file_changes=file_change_summaries,
                 transaction_id=tx_id,
                 transaction_status=tx_status,
                 verification_details=v_details,
@@ -878,6 +902,8 @@ def _do_execute_autonomous_task(
                 status="CANCELLED",
                 summary="⚠️ Task cancelled by user.",
                 failure_reason="Execution cancelled by cancellation token",
+                changed_files=[] if is_tx_rolled_back else effective_changed_files,
+                file_changes=file_change_summaries,
                 verification_details=v_details,
                 proof_path=proof_path_str,
                 proof_markdown_path=proof_md_path_str,
@@ -896,7 +922,8 @@ def _do_execute_autonomous_task(
             plan=plan,
             tests_passed=True,
             test_output=test_output,
-            changed_files=list(dict.fromkeys(changed_files)),
+            changed_files=effective_changed_files,
+            file_changes=file_change_summaries,
             transaction_id=tx_id,
             transaction_status=tx_status,
             verification_details=v_details,
@@ -935,7 +962,8 @@ def _do_execute_autonomous_task(
         plan=plan,
         tests_passed=tests_passed,
         test_output=test_output,
-        changed_files=[] if is_tx_rolled_back else list(dict.fromkeys(changed_files)),
+        changed_files=[] if is_tx_rolled_back else effective_changed_files,
+        file_changes=file_change_summaries,
         transaction_id=tx_id,
         transaction_status=tx_status,
         failure_reason=fail_reason,

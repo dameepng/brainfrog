@@ -30,6 +30,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Protocol, Sequence, Set
 
 from core.runtime.contract import ApprovedExecutionContract, reject_secrets
 from core.runtime.session import scrub_secrets
+from core.runtime.task import FileChangeSummary, FileMutationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -467,6 +468,389 @@ class TransactionResult:
         """Indicates whether manual or automated recovery is required due to incomplete/failed rollback."""
         return bool(self.rollback_error) or (not self.committed and not self.rolled_back)
 
+    def to_change_summaries(self, workspace: Optional[Union[str, Path]] = None) -> Tuple[FileChangeSummary, ...]:
+        """Construct typed FileChangeSummary records from this transaction result."""
+        return build_file_change_summaries(self, workspace)
+
+
+def build_file_change_summaries(
+    tx_res: Optional[TransactionResult],
+    workspace: Optional[Union[str, Path]] = None,
+    *,
+    is_synthesized: bool = False,
+) -> Tuple[FileChangeSummary, ...]:
+    """Construct immutable FileChangeSummary records from authoritative transaction evidence.
+
+    Distinguishes:
+    - COMMITTED: transaction committed and operation executed cleanly.
+    - ROLLED_BACK: operation cleanly rolled back and independently verified against baseline.
+    - ROLLBACK_FAILED: rollback failed or final disk state is inconsistent with baseline.
+    - UNCHANGED: positively evidenced that a transaction ran with zero operations.
+    - UNKNOWN: missing transaction journal or insufficient evidence.
+
+    Derives:
+    - before_sha256: baseline hash prior to mutation.
+    - staged_sha256: intended mutation payload hash.
+    - final_sha256: independently observed final disk hash (or baseline for clean rollback).
+    """
+    if tx_res is None or is_synthesized:
+        return tuple()
+
+    if not tx_res.operations:
+        return tuple()
+
+    ws_path = Path(workspace).resolve() if workspace else None
+    summaries: List[FileChangeSummary] = []
+
+    for op in tx_res.operations:
+        raw_target = op.target
+        clean_target = raw_target.replace("\\", "/").strip().lstrip("/")
+        raw_new_target = getattr(op, "new_target", None)
+        clean_new_target = raw_new_target.replace("\\", "/").strip().lstrip("/") if raw_new_target else None
+
+        # 1. Operation type
+        op_type = getattr(op, "type", OperationType.MODIFY_FILE)
+        op_val = getattr(op_type, "value", str(op_type))
+        op_lower = str(op_val).lower()
+        if "create" in op_lower:
+            op_str = "CREATE"
+        elif "modify" in op_lower:
+            op_str = "MODIFY"
+        elif "delete" in op_lower:
+            op_str = "DELETE"
+        elif "rename" in op_lower:
+            op_str = "RENAME"
+        else:
+            op_str = op_lower.upper()
+
+        # 2. Before SHA & bytes
+        before_state = getattr(op, "before_state", None) or {}
+        before_sha: Optional[str] = None
+        before_bytes: int = 0
+        if before_state.get("exists", True) and op_str != "CREATE":
+            if before_state.get("content_b64"):
+                raw_b = base64.b64decode(before_state["content_b64"].encode("ascii"))
+                before_sha = hashlib.sha256(raw_b).hexdigest()
+                before_bytes = len(raw_b)
+            elif before_state.get("is_text", True):
+                b_text = before_state.get("content", "")
+                if b_text is not None:
+                    raw_b = b_text.encode("utf-8")
+                    before_sha = hashlib.sha256(raw_b).hexdigest()
+                    before_bytes = len(raw_b)
+            else:
+                b_b64 = before_state.get("content_b64", "")
+                if b_b64:
+                    raw_b = base64.b64decode(b_b64.encode("ascii"))
+                    before_sha = hashlib.sha256(raw_b).hexdigest()
+                    before_bytes = len(raw_b)
+            if not before_sha and before_state.get("content_hash"):
+                before_sha = before_state["content_hash"]
+                before_bytes = before_state.get("size", 0)
+
+        # 3. Staged SHA & bytes
+        after_state = getattr(op, "after_state", None) or {}
+        staged_sha: Optional[str] = None
+        staged_bytes: int = 0
+        if op_str in ("CREATE", "MODIFY"):
+            if after_state.get("content_b64"):
+                raw_a = base64.b64decode(after_state["content_b64"].encode("ascii"))
+                staged_sha = hashlib.sha256(raw_a).hexdigest()
+                staged_bytes = len(raw_a)
+            elif after_state.get("is_text", True):
+                a_text = after_state.get("content", "")
+                if a_text is not None:
+                    raw_a = a_text.encode("utf-8")
+                    staged_sha = hashlib.sha256(raw_a).hexdigest()
+                    staged_bytes = len(raw_a)
+            else:
+                a_b64 = after_state.get("content_b64", "")
+                if a_b64:
+                    raw_a = base64.b64decode(a_b64.encode("ascii"))
+                    staged_sha = hashlib.sha256(raw_a).hexdigest()
+                    staged_bytes = len(raw_a)
+            if not staged_sha and after_state.get("content_hash"):
+                staged_sha = after_state["content_hash"]
+                staged_bytes = after_state.get("size", 0)
+        elif op_str == "DELETE":
+            staged_sha = None
+            staged_bytes = 0
+        elif op_str == "RENAME":
+            staged_sha = before_sha
+            staged_bytes = before_bytes
+
+        # 4. Independent disk inspection (tri-state: VERIFIED_PRESENT, VERIFIED_ABSENT, INDETERMINATE)
+        disk_sha: Optional[str] = None
+        disk_bytes_len: int = 0
+        disk_state: str = "INDETERMINATE"
+        inspection_error: Optional[str] = None
+
+        dest_disk_sha: Optional[str] = None
+        dest_disk_bytes_len: int = 0
+        dest_disk_state: str = "INDETERMINATE"
+        dest_inspection_error: Optional[str] = None
+
+        if ws_path is not None:
+            try:
+                target_disk = (ws_path / clean_target).resolve()
+                if not target_disk.is_relative_to(ws_path):
+                    disk_state = "INDETERMINATE"
+                    inspection_error = "Target path resolves outside workspace boundary."
+                else:
+                    if target_disk.is_file():
+                        d_bytes = target_disk.read_bytes()
+                        disk_sha = hashlib.sha256(d_bytes).hexdigest()
+                        disk_bytes_len = len(d_bytes)
+                        disk_state = "VERIFIED_PRESENT"
+                    elif not target_disk.exists():
+                        disk_state = "VERIFIED_ABSENT"
+                    else:
+                        disk_state = "INDETERMINATE"
+                        inspection_error = "Target path exists but is not a regular file."
+            except (OSError, ValueError) as exc:
+                disk_state = "INDETERMINATE"
+                inspection_error = f"Filesystem inspection failed: {exc.__class__.__name__}: {scrub_secrets(str(exc))}"
+
+            if clean_new_target:
+                try:
+                    dest_disk = (ws_path / clean_new_target).resolve()
+                    if not dest_disk.is_relative_to(ws_path):
+                        dest_disk_state = "INDETERMINATE"
+                        dest_inspection_error = "Rename target path resolves outside workspace boundary."
+                    else:
+                        if dest_disk.is_file():
+                            dest_b = dest_disk.read_bytes()
+                            dest_disk_sha = hashlib.sha256(dest_b).hexdigest()
+                            dest_disk_bytes_len = len(dest_b)
+                            dest_disk_state = "VERIFIED_PRESENT"
+                        elif not dest_disk.exists():
+                            dest_disk_state = "VERIFIED_ABSENT"
+                        else:
+                            dest_disk_state = "INDETERMINATE"
+                            dest_inspection_error = "Rename target path exists but is not a regular file."
+                except (OSError, ValueError) as exc:
+                    dest_disk_state = "INDETERMINATE"
+                    dest_inspection_error = f"Filesystem inspection failed: {exc.__class__.__name__}: {scrub_secrets(str(exc))}"
+
+        # 5. Status determination & final hash
+        status: FileMutationStatus
+        final_sha: Optional[str]
+        error: Optional[str] = None
+        byte_delta: int = 0
+
+        op_status_val = getattr(op.status, "value", str(op.status)).lower()
+
+        if op_status_val in ("staged", "prepared"):
+            # Operation was staged in memory but never executed on disk
+            status = FileMutationStatus.UNCHANGED
+            final_sha = before_sha if before_sha is not None else disk_sha
+            byte_delta = 0
+
+        elif tx_res.committed and op_status_val == "executed":
+            if op_str == "DELETE":
+                if ws_path is not None and disk_state == "INDETERMINATE":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = None
+                    error = inspection_error or "Disk verification indeterminate: could not verify file absence on disk."
+                    byte_delta = 0
+                elif disk_state == "VERIFIED_PRESENT":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = disk_sha
+                    error = "Disk verification failed: deleted file still present on disk."
+                    byte_delta = 0
+                else:
+                    status = FileMutationStatus.COMMITTED
+                    final_sha = None
+                    byte_delta = -before_bytes
+            elif op_str == "RENAME":
+                if ws_path is not None and (dest_disk_state == "INDETERMINATE" or disk_state == "INDETERMINATE"):
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = dest_disk_sha
+                    error = dest_inspection_error or inspection_error or "Disk verification indeterminate: could not verify rename state."
+                    byte_delta = 0
+                elif dest_disk_state == "VERIFIED_PRESENT" and disk_state == "VERIFIED_ABSENT":
+                    if dest_disk_sha is not None and staged_sha is not None and dest_disk_sha.lower() != staged_sha.lower():
+                        status = FileMutationStatus.UNKNOWN
+                        final_sha = dest_disk_sha
+                        error = "Disk verification failed: renamed file hash differs from staged content."
+                    else:
+                        status = FileMutationStatus.COMMITTED
+                        final_sha = dest_disk_sha if dest_disk_sha is not None else staged_sha
+                    byte_delta = 0
+                elif ws_path is None:
+                    status = FileMutationStatus.COMMITTED
+                    final_sha = staged_sha
+                    byte_delta = 0
+                else:
+                    final_sha = dest_disk_sha
+                    status = FileMutationStatus.UNKNOWN
+                    error = "Disk verification failed: rename target not found or source still exists."
+                    byte_delta = 0
+            else:
+                # CREATE or MODIFY
+                if ws_path is not None and disk_state == "INDETERMINATE":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = staged_sha
+                    error = inspection_error or "Disk verification indeterminate: could not verify file on disk."
+                    byte_delta = staged_bytes - before_bytes
+                elif ws_path is not None and disk_state == "VERIFIED_ABSENT":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = None
+                    error = "Disk verification failed: committed file not found on disk."
+                    byte_delta = 0
+                elif disk_state == "VERIFIED_PRESENT":
+                    final_sha = disk_sha
+                    if staged_sha is not None and disk_sha.lower() != staged_sha.lower():
+                        status = FileMutationStatus.UNKNOWN
+                        error = "Disk verification failed: file on disk differs from committed staged payload."
+                    elif before_sha is not None and staged_sha is not None and before_sha.lower() == staged_sha.lower():
+                        status = FileMutationStatus.UNCHANGED
+                    else:
+                        status = FileMutationStatus.COMMITTED
+                    byte_delta = staged_bytes - before_bytes
+                else:
+                    final_sha = staged_sha
+                    if before_sha is not None and staged_sha is not None and before_sha.lower() == staged_sha.lower():
+                        status = FileMutationStatus.UNCHANGED
+                    else:
+                        status = FileMutationStatus.COMMITTED
+                    byte_delta = staged_bytes - before_bytes
+
+        elif op_status_val == "rolled_back":
+            # Verification of restored state
+            if op_str == "CREATE":
+                if ws_path is not None and disk_state == "INDETERMINATE":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = None
+                    error = inspection_error or "Disk verification indeterminate: could not verify removal of created file after rollback."
+                    byte_delta = 0
+                elif disk_state == "VERIFIED_PRESENT":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = disk_sha
+                    error = "Post-rollback disk state differs: created file observed on disk after rollback."
+                    byte_delta = staged_bytes
+                else:
+                    status = FileMutationStatus.ROLLED_BACK
+                    final_sha = None
+                    byte_delta = 0
+            elif op_str == "MODIFY":
+                if ws_path is not None and disk_state == "INDETERMINATE":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = None
+                    error = inspection_error or "Disk verification indeterminate: could not verify restored file on disk."
+                    byte_delta = 0
+                elif ws_path is not None and disk_state == "VERIFIED_ABSENT":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = None
+                    error = "Post-rollback disk state differs: modified file not found on disk after rollback."
+                    byte_delta = -before_bytes
+                elif disk_state == "VERIFIED_PRESENT":
+                    final_sha = disk_sha
+                    if before_sha is not None and disk_sha.lower() != before_sha.lower():
+                        status = FileMutationStatus.UNKNOWN
+                        error = "Post-rollback disk state differs: observed content differs from baseline hash."
+                        byte_delta = 0
+                    else:
+                        status = FileMutationStatus.ROLLED_BACK
+                        final_sha = before_sha if before_sha is not None else disk_sha
+                        byte_delta = 0
+                else:
+                    status = FileMutationStatus.ROLLED_BACK
+                    final_sha = before_sha
+                    byte_delta = 0
+            elif op_str == "DELETE":
+                if ws_path is not None and disk_state == "INDETERMINATE":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = None
+                    error = inspection_error or "Disk verification indeterminate: could not verify restored file on disk."
+                    byte_delta = 0
+                elif ws_path is not None and disk_state == "VERIFIED_ABSENT":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = None
+                    error = "Post-rollback disk state differs: restored file not found on disk after rollback."
+                    byte_delta = 0
+                elif disk_state == "VERIFIED_PRESENT":
+                    final_sha = disk_sha
+                    if before_sha is not None and disk_sha.lower() != before_sha.lower():
+                        status = FileMutationStatus.UNKNOWN
+                        error = "Post-rollback disk state differs: restored file content differs from baseline hash."
+                        byte_delta = 0
+                    else:
+                        status = FileMutationStatus.ROLLED_BACK
+                        final_sha = before_sha if before_sha is not None else disk_sha
+                        byte_delta = 0
+                else:
+                    status = FileMutationStatus.ROLLED_BACK
+                    final_sha = before_sha
+                    byte_delta = 0
+            elif op_str == "RENAME":
+                if ws_path is not None and (dest_disk_state == "INDETERMINATE" or disk_state == "INDETERMINATE"):
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = None
+                    error = dest_inspection_error or inspection_error or "Disk verification indeterminate: could not verify rename rollback on disk."
+                    byte_delta = 0
+                elif dest_disk_state == "VERIFIED_PRESENT":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = disk_sha
+                    error = "Post-rollback disk state differs: rename destination file still observed on disk after rollback."
+                    byte_delta = 0
+                elif ws_path is not None and disk_state == "VERIFIED_ABSENT":
+                    status = FileMutationStatus.UNKNOWN
+                    final_sha = None
+                    error = "Post-rollback disk state differs: restored source file not found on disk after rollback."
+                    byte_delta = 0
+                elif disk_state == "VERIFIED_PRESENT":
+                    final_sha = disk_sha
+                    if before_sha is not None and disk_sha.lower() != before_sha.lower():
+                        status = FileMutationStatus.UNKNOWN
+                        error = "Post-rollback disk state differs: restored source file differs from baseline hash."
+                        byte_delta = 0
+                    else:
+                        status = FileMutationStatus.ROLLED_BACK
+                        final_sha = before_sha if before_sha is not None else disk_sha
+                        byte_delta = 0
+                else:
+                    status = FileMutationStatus.ROLLED_BACK
+                    final_sha = before_sha
+                    byte_delta = 0
+            else:
+                status = FileMutationStatus.ROLLED_BACK
+                final_sha = before_sha if before_sha is not None else disk_sha
+                byte_delta = 0
+
+        elif op_status_val == "failed" or (
+            op_status_val != "rolled_back"
+            and (
+                tx_res.status in (TransactionStatus.FAILED, TransactionStatus.ROLLING_BACK)
+                or tx_res.rollback_error is not None
+            )
+        ):
+            status = FileMutationStatus.ROLLBACK_FAILED
+            final_sha = disk_sha if disk_sha is not None else staged_sha
+            error = getattr(op, "error", None) or tx_res.rollback_error or "Rollback failed for this operation."
+            byte_delta = staged_bytes - before_bytes
+
+        else:
+            status = FileMutationStatus.UNKNOWN
+            final_sha = disk_sha
+            error = getattr(op, "error", None)
+            byte_delta = 0
+
+        summaries.append(
+            FileChangeSummary(
+                path=clean_target,
+                operation=op_str,
+                status=status,
+                before_sha256=before_sha,
+                staged_sha256=staged_sha,
+                final_sha256=final_sha,
+                byte_count_delta=byte_delta,
+                error=error,
+            )
+        )
+
+    return tuple(summaries)
+
 
 # =============================================================================
 # 4. Verification Abstraction
@@ -814,17 +1198,23 @@ class TransactionCoordinator:
                 raise TransactionResourceLimitError(
                     f"File '{path}' size ({size} bytes) exceeds snapshot limit ({MAX_FILE_SNAPSHOT_BYTES} bytes)"
                 )
+            raw_bytes = path.read_bytes()
+            b64_str = base64.b64encode(raw_bytes).decode("ascii")
             try:
-                # Attempt reading as UTF-8 string
-                text = path.read_text(encoding="utf-8")
-                return {"exists": True, "is_text": True, "content": text}
+                # Attempt decoding as UTF-8 string without newline translation
+                text = raw_bytes.decode("utf-8")
+                return {
+                    "exists": True,
+                    "is_text": True,
+                    "content": text,
+                    "content_b64": b64_str,
+                }
             except UnicodeDecodeError:
                 # Binary fallback
-                raw_bytes = path.read_bytes()
                 return {
                     "exists": True,
                     "is_text": False,
-                    "content_b64": base64.b64encode(raw_bytes).decode("ascii"),
+                    "content_b64": b64_str,
                 }
         return {"exists": True, "is_dir": True}
 
@@ -1169,8 +1559,11 @@ class TransactionCoordinator:
                     target_path.unlink()
             else:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
-                if before.get("is_text", True):
-                    target_path.write_text(before.get("content", ""), encoding="utf-8")
+                if before.get("content_b64"):
+                    raw = base64.b64decode(before["content_b64"].encode("ascii"))
+                    target_path.write_bytes(raw)
+                elif before.get("is_text", True):
+                    target_path.write_text(before.get("content", ""), encoding="utf-8", newline="")
                 else:
                     raw = base64.b64decode(before.get("content_b64", "").encode("ascii"))
                     target_path.write_bytes(raw)
@@ -1184,8 +1577,11 @@ class TransactionCoordinator:
             before = op.before_state or {}
             if before.get("exists", False):
                 target_path.parent.mkdir(parents=True, exist_ok=True)
-                if before.get("is_text", True):
-                    target_path.write_text(before.get("content", ""), encoding="utf-8")
+                if before.get("content_b64"):
+                    raw = base64.b64decode(before["content_b64"].encode("ascii"))
+                    target_path.write_bytes(raw)
+                elif before.get("is_text", True):
+                    target_path.write_text(before.get("content", ""), encoding="utf-8", newline="")
                 else:
                     raw = base64.b64decode(before.get("content_b64", "").encode("ascii"))
                     target_path.write_bytes(raw)
@@ -1343,8 +1739,11 @@ class TransactionRecoveryManager:
             return
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        if before_state.get("is_text", True):
-            target_path.write_text(before_state.get("content", ""), encoding="utf-8")
+        if before_state.get("content_b64"):
+            raw = base64.b64decode(before_state["content_b64"].encode("ascii"))
+            target_path.write_bytes(raw)
+        elif before_state.get("is_text", True):
+            target_path.write_text(before_state.get("content", ""), encoding="utf-8", newline="")
         else:
             raw = base64.b64decode(before_state.get("content_b64", "").encode("ascii"))
             target_path.write_bytes(raw)
