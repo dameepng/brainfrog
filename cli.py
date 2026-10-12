@@ -42,6 +42,7 @@ from rich import box
 from rich.align import Align
 from rich.console import Console, Group
 from rich.markdown import Markdown
+from rich.markup import escape
 
 from rich.rule import Rule
 from rich.syntax import Syntax
@@ -714,6 +715,100 @@ def show_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = False
     result = inspect_proof(repo_dir, target, check_workspace=check_workspace)
     print_proof_inspection(result, console=console)
     return result.exit_code
+
+
+def list_proofs_cli(repo_dir: Path) -> int:
+    """CLI handler for listing all local verification proof artifacts.
+
+    Discovers proofs using FileProofStore, surfaces recorded task outcomes,
+    formats a clean Rich overview table, and preserves secret redaction.
+
+    Returns:
+      0: Successfully rendered proofs or cleanly reported empty store.
+    """
+    from core.runtime.proof import FileProofStore, redact_secrets
+
+    store = FileProofStore(repo_dir)
+    summaries = store.list_summaries()
+
+    if not summaries:
+        print_banner_box(
+            f"No proof artifacts found in storage directory:\n`{store.proofs_dir}`\n\n"
+            "Run an autonomous task with test verification to generate proof artifacts.",
+            level="info",
+            title="No Proof Artifacts",
+        )
+        return 0
+
+    cols, rows, box_w, margin, pad = get_layout_dims()
+
+    table = Table(
+        title=" Verification Proof Artifacts ",
+        box=box.ROUNDED,
+        border_style=COLOR_FG_MUTED,
+        header_style=f"bold {COLOR_ACCENT}",
+        show_header=True,
+        padding=(0, 1),
+        width=box_w,
+    )
+    table.add_column("Task ID", style=f"bold {COLOR_FG_PRIMARY}", no_wrap=True)
+    table.add_column("Timestamp", style=COLOR_FG_SECONDARY, no_wrap=True)
+    table.add_column("Task Verdict", justify="center", width=18)
+    table.add_column("Transaction", justify="center", width=14)
+    table.add_column("Proof Artifact (Path)", style=f"bold {COLOR_ACCENT}")
+
+    for s in summaries:
+        tid = escape(redact_secrets(sanitize_surrogates(s["task_id"])))
+        ts = escape(redact_secrets(sanitize_surrogates(s["timestamp"])))
+
+        v_raw = s["verdict_status"]
+        v_clean = redact_secrets(sanitize_surrogates(str(v_raw)))
+        v_escaped = escape(v_clean)
+
+        if v_raw == "VERIFIED":
+            v_badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} VERIFIED[/bold {COLOR_SUCCESS}]"
+        elif v_raw == "FAILED":
+            v_badge = f"[bold {COLOR_ERROR}]{SYM_ERROR} FAILED[/bold {COLOR_ERROR}]"
+        elif v_raw in ("CANCELLED", "RECOVERY_REQUIRED"):
+            v_badge = f"[bold {COLOR_WARNING}]{SYM_WARNING} {v_escaped}[/bold {COLOR_WARNING}]"
+        elif s["is_corrupt"] or v_raw == "INVALID":
+            v_badge = f"[bold {COLOR_ERROR}]{SYM_ERROR} INVALID[/bold {COLOR_ERROR}]"
+        else:
+            v_badge = f"[{COLOR_FG_MUTED}]{v_escaped}[/{COLOR_FG_MUTED}]"
+
+        tx_raw = s["transaction_status"]
+        tx_clean = redact_secrets(sanitize_surrogates(str(tx_raw)))
+        tx_escaped = escape(tx_clean)
+
+        if tx_raw == "COMMITTED":
+            tx_badge = f"[bold {COLOR_SUCCESS}]COMMITTED[/bold {COLOR_SUCCESS}]"
+        elif tx_raw in ("ROLLED_BACK", "CANCELLED"):
+            tx_badge = f"[bold {COLOR_WARNING}]{tx_escaped}[/bold {COLOR_WARNING}]"
+        else:
+            tx_badge = f"[{COLOR_FG_MUTED}]{tx_escaped}[/{COLOR_FG_MUTED}]"
+
+        try:
+            rel_path = str(s["path"].relative_to(repo_dir.resolve()))
+        except Exception:
+            rel_path = str(s["path"])
+        rel_path = escape(redact_secrets(sanitize_surrogates(rel_path)))
+
+        table.add_row(tid, ts, v_badge, tx_badge, rel_path)
+
+    console.print()
+    console.print(Align.center(table) if cols > 100 else table)
+    console.print()
+
+    has_corrupt = any(s["is_corrupt"] for s in summaries)
+    if has_corrupt:
+        print_banner_box(
+            "One or more proof artifacts on disk contain malformed JSON syntax.\n"
+            "Use `brainfrog verify-proof <task_id>` to inspect integrity diagnostics.",
+            level="warning",
+            title="Corrupted Proof Warning",
+        )
+
+    return 0
 
 
 
@@ -2450,6 +2545,12 @@ def run_interactive(
             else:
                 print_banner_box("Usage: `/verify-proof <task_id or path/to/proof.json> [--check-workspace]`", level="error", title="Missing Target")
             continue
+        elif (
+            lower in ("/list-proofs", "/proofs")
+            or lower.startswith(("/list-proofs ", "/proofs "))
+        ):
+            list_proofs_cli(repo_dir)
+            continue
         elif lower.startswith(("/works", "/work ", "/resume ", "/cancel ", "/approve ", "/reject ", "/approvals", "/transactions", "/transaction ", "/recover ", "/exec ", "/run ")):
             incoming_cmd = IncomingMessage(
                 text=prompt,
@@ -3228,6 +3329,8 @@ def main() -> int:
     p.add_argument("--min-domain-confidence", type=float, default=0.45)
     p.add_argument("--verify-proof", default=None, help="Verify proof artifact consistency by task ID or path")
     p.add_argument("--show-proof", default=None, help="Inspect detailed verification proof evidence for task ID or path")
+    p.add_argument("--list-proofs", action="store_true", default=False, help="List all local verification proof artifacts")
+    p.add_argument("--proofs", action="store_true", default=False, help="Alias for --list-proofs")
     p.add_argument(
         "--check-workspace",
         action="store_true",
@@ -3241,6 +3344,8 @@ def main() -> int:
     repo_dir = find_git_root(Path(args.repo))
     load_all_envs(repo_dir)
 
+    if args.list_proofs or args.proofs:
+        return list_proofs_cli(repo_dir)
     if args.verify_proof:
         return verify_proof_cli(repo_dir, args.verify_proof, check_workspace=args.check_workspace)
     if args.show_proof:
@@ -3250,6 +3355,12 @@ def main() -> int:
     chosen_task = (raw_task or "").strip()
     if chosen_task in ("doctor", "/doctor"):
         return show_doctor(repo_dir)
+
+    if (
+        chosen_task in ("list-proofs", "/list-proofs", "proofs", "/proofs")
+        or chosen_task.startswith(("list-proofs ", "/list-proofs ", "proofs ", "/proofs "))
+    ):
+        return list_proofs_cli(repo_dir)
 
     if (
         chosen_task in ("show-proof", "/show-proof", "proof", "/proof")

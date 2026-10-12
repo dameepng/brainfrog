@@ -17,33 +17,65 @@ When an autonomous agent makes changes to code, developers must not rely on conv
 
 ## 1. CLI Commands
 
+### Proof Discovery (`list-proofs`)
+List all local verification proof artifacts in `.brainfrog/proofs/`:
+```bash
+brainfrog list-proofs
+# Or using the alias:
+brainfrog proofs
+# Or flag syntax:
+brainfrog --list-proofs
+brainfrog --proofs
+```
+
 ### Detailed Proof Inspection (`show-proof`)
 Full two-section inspection report displaying historical evidence and live state re-verification:
 ```bash
 brainfrog show-proof <task_id>
+# Or inspect the newest local proof:
+brainfrog show-proof latest
 # Or passing path to proof JSON:
 brainfrog show-proof .brainfrog/proofs/<task_id>.json
 # With workspace disk integrity check:
 brainfrog show-proof <task_id> --check-workspace
+brainfrog show-proof latest --check-workspace
 ```
 
 ### Deterministic Proof Verification Gate (`verify-proof`)
 Fast deterministic verification evaluating structural integrity, gate invariants, and recorded task outcome:
 ```bash
 brainfrog verify-proof <task_id>
+# Or verify the newest local proof:
+brainfrog verify-proof latest
 # Or with workspace disk integrity check:
 brainfrog verify-proof <task_id> --check-workspace
+brainfrog verify-proof latest --check-workspace
 # Alternative flag syntax:
 brainfrog --verify-proof <task_id> [--check-workspace]
+brainfrog --verify-proof latest [--check-workspace]
 ```
 
 ### REPL Slash Commands
 Inside the interactive REPL:
 ```text
-/show-proof <task_id> [--check-workspace]
-/proof <task_id>
-/verify-proof <task_id> [--check-workspace]
+/list-proofs
+/proofs
+/show-proof <task_id | latest> [--check-workspace]
+/proof <task_id | latest>
+/verify-proof <task_id | latest> [--check-workspace]
 ```
+
+### Latest Target Selection Semantics
+When `latest` is supplied as the target to `show-proof` or `verify-proof`, BrainFrog deterministically resolves the newest eligible local JSON proof artifact in `.brainfrog/proofs/`:
+
+1. **Candidate Scope**: All non-hidden regular `.json` files directly inside `.brainfrog/proofs/`.
+2. **Sort Hierarchy (`_candidate_sort_key`)**:
+   - **Primary (Effective Timestamp)**: Evaluates recorded task completion time (`task.completed_at`), falling back to creation time (`task.created_at`). For unparseable or malformed JSON files, falls back to filesystem modification time (`st_mtime`). This ensures copied older proofs never displace genuinely newer runs, while newly written malformed proofs rank by write time so they fail closed.
+   - **Secondary (Filesystem Nanoseconds)**: Uses filesystem nanosecond modification time (`st_mtime_ns`) to break ties between artifacts with identical recorded ISO timestamps.
+   - **Tertiary (Deterministic Stem Tiebreaker)**: Lexicographically compares filename stems (task IDs) to guarantee a completely stable choice if timestamps and modification times are identical.
+3. **Fail-Closed Guarantees**:
+   - If the newest proof artifact is corrupt or malformed, it is selected and fails closed as `INVALID` (exit code `1`), never silently falling back to an older valid artifact.
+   - If the proof storage directory is empty or contains no eligible `.json` files, `latest` fails closed with exit code `2` (`INCOMPLETE / MISSING`).
 
 ---
 

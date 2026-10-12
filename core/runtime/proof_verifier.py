@@ -238,6 +238,15 @@ class DeterministicProofVerifier:
         target_str = str(target)
         if "\0" in target_str:
             raise ValueError("Target path contains embedded null bytes")
+
+        target_clean = target_str.strip()
+        if target_clean.lower() == "latest":
+            latest_path = self.store.get_latest_proof_path()
+            if latest_path is not None:
+                return latest_path, latest_path.stem
+            # Empty store: return canonical non-existent path so caller fails closed cleanly
+            return self.store.proof_json_path("latest"), "latest"
+
         target_path = Path(target)
         if target_path.is_file():
             resolved = target_path.resolve()
@@ -349,7 +358,10 @@ class DeterministicProofVerifier:
                     "Transaction may have committed with failed proof persistence or pending recovery."
                 )
             else:
-                msg = f"Proof artifact JSON file not found at '{proof_path}'."
+                if str(target).strip().lower() == "latest":
+                    msg = f"No proof artifacts found in storage directory '{self.store.proofs_dir}' for target 'latest'."
+                else:
+                    msg = f"Proof artifact JSON file not found at '{proof_path}'."
 
             report.checks.append(
                 VerificationCheckResult(

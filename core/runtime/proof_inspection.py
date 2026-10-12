@@ -148,9 +148,14 @@ def inspect_proof(
 
     # 2. Check existence of proof file
     if not resolved_path.exists():
-        msg = f"Proof artifact not found for '{target_clean}' at '{resolved_path}'."
+        if target_clean.lower() == "latest":
+            msg = f"No proof artifacts found in storage directory '{resolved_path.parent}' for target 'latest'."
+        else:
+            msg = f"Proof artifact not found for '{target_clean}' at '{resolved_path}'."
         if report.reasons:
-            msg = f"{msg} ({'; '.join(report.reasons)})"
+            distinct_reasons = [r for r in report.reasons if r.strip() != msg.strip()]
+            if distinct_reasons:
+                msg = f"{msg} ({'; '.join(distinct_reasons)})"
         return ProofInspectionResult(
             target=target_clean,
             state=ProofInspectionState.MISSING,
