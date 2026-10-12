@@ -1,6 +1,6 @@
 """Reproducible Demo for BrainFrog Verification Proof UX.
 
-Implements BrainFrog Sprint 1.2: Reproducible Demo.
+Implements BrainFrog Sprint 1.2 & 1.3B: Reproducible Demo with Canonical Workflow.
 Product thesis: "Don't just trust the agent. Verify it."
 
 Demonstrates three concrete, verifiable scenarios in an isolated workspace:
@@ -16,11 +16,12 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional
 
 # Ensure UTF-8 output on Windows consoles
 if sys.platform == "win32":
@@ -37,28 +38,120 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from core.runtime.process import run_hardened_subprocess
-from core.runtime.proof import (
-    ChangeRecord,
-    ChangesEvidence,
-    FileProofStore,
-    ProcessEvidence,
-    ProofArtifact,
-    ProofVerdict,
-    ReproducibilityEvidence,
-    TaskEvidence,
-    VerificationEvidence,
-    capture_bounded_output,
-    compute_proof_verdict,
+from core.runtime import (
+    BrainFrogRuntime,
+    TaskRequest,
+    TaskResult,
 )
 from core.runtime.proof_inspection import inspect_proof, print_proof_inspection
-from core.runtime.proof_markdown import render_proof_markdown
-from core.runtime.task_finalization import TaskFinalizationCoordinator
-from core.runtime.transaction import (
-    FileTransactionStore,
-    TransactionCoordinator,
-    TransactionStatus,
-)
+from system1.base import Answer
+from system2 import PlanStep
+
+
+def remove_readonly(func: Any, path: str, exc: Any) -> None:
+    """Clear the read-only attribute on Windows files/directories and retry removal."""
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        func(path)
+    except Exception:
+        raise
+
+
+def cleanup_temporary_workspace(ws: Path) -> None:
+    """Clean up temporary workspace reliably across platforms.
+
+    Handles read-only files (e.g. .git/objects on Windows).
+    Surfaces a clear RuntimeError if cleanup fails so failures are not silently ignored.
+    """
+    if not ws.exists():
+        return
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(ws, onexc=remove_readonly)
+        else:
+            shutil.rmtree(ws, onerror=lambda f, p, e: remove_readonly(f, p, e[1]))
+    except Exception as exc:
+        if ws.exists():
+            raise RuntimeError(
+                f"Failed to cleanly remove temporary workspace at '{ws}': {exc}"
+            ) from exc
+
+
+class DeterministicDemoSystem1:
+    """Deterministic System 1 client for reproducible demo execution."""
+
+    def __init__(self, name: str = "jev_demo_deterministic") -> None:
+        self.name = name
+
+    def decide(self, state: Dict[str, Any], questions: Dict[str, Any]) -> Dict[str, Answer]:
+        answers: Dict[str, Answer] = {}
+        for q_name in questions:
+            if q_name == "likely_domain":
+                answers[q_name] = Answer(choice="math", confidence=0.95)
+            elif q_name == "change_type":
+                answers[q_name] = Answer(choice="code_change", confidence=0.95)
+            elif q_name == "is_sensitive":
+                answers[q_name] = Answer(noul=0.0)
+            elif q_name == "complexity":
+                answers[q_name] = Answer(score="low", confidence=0.95)
+            elif q_name == "needs_tests":
+                answers[q_name] = Answer(noul=0.8)
+            elif q_name == "tests_passing":
+                test_passed = bool(state.get("test_passed", True))
+                answers[q_name] = Answer(
+                    choice="yes" if test_passed else "no",
+                    noul=1.0 if test_passed else 0.0,
+                )
+            elif q_name == "diff_complete":
+                answers[q_name] = Answer(choice="yes", noul=1.0)
+            elif q_name == "failure_fixable":
+                answers[q_name] = Answer(choice="no", noul=0.0)
+            elif q_name == "retry_concern":
+                answers[q_name] = Answer(score="within_normal", confidence=0.95)
+            elif q_name == "diff_risk":
+                answers[q_name] = Answer(score=0, choice="low", confidence=0.95)
+            elif q_name == "safe_to_proceed":
+                answers[q_name] = Answer(noul=1.0, choice="yes")
+        return answers
+
+
+class DeterministicDemoSystem2:
+    """Deterministic System 2 client for proposing code modifications."""
+
+    def __init__(
+        self,
+        plan_desc: str,
+        code_proposal: Dict[str, str],
+        retry_proposal: Optional[Dict[str, str]] = None,
+        pr_title: str = "feat(math): update math_utils",
+    ) -> None:
+        self.provider_name = "claude_demo_deterministic"
+        self.guidelines = ""
+        self._plan_desc = plan_desc
+        self._code_proposal = code_proposal
+        self._retry_proposal = retry_proposal or code_proposal
+        self._pr_title = pr_title
+
+    def plan_task(self, *args: Any, **kwargs: Any) -> List[PlanStep]:
+        return [
+            PlanStep(
+                id="1",
+                description=self._plan_desc,
+                files=list(self._code_proposal.keys()),
+            )
+        ]
+
+    def write_code(self, *args: Any, **kwargs: Any) -> Dict[str, str]:
+        return dict(self._code_proposal)
+
+    def review_and_fix(self, *args: Any, **kwargs: Any) -> Dict[str, str]:
+        return dict(self._retry_proposal)
+
+    def draft_pr(self, *args: Any, **kwargs: Any) -> Dict[str, str]:
+        return {
+            "title": self._pr_title,
+            "body": f"Automated PR proposal for: {self._plan_desc}",
+        }
 
 
 def _init_git_workspace(ws: Path) -> str:
@@ -76,7 +169,7 @@ def _init_git_workspace(ws: Path) -> str:
     return res.stdout.strip()
 
 
-def run_scenario_1_verified(ws: Path, commit_sha: str) -> str:
+def run_scenario_1_verified(ws: Path) -> str:
     """Scenario 1: Successful change with actual test command and VERIFIED proof."""
     print("\n" + "=" * 70)
     print("[SCENARIO 1] Successful change with real test suite -> VERIFIED Proof")
@@ -104,107 +197,48 @@ def run_scenario_1_verified(ws: Path, commit_sha: str) -> str:
         encoding="utf-8",
     )
 
-    # 2. Stage changes within an isolated TransactionCoordinator
-    tx_store = FileTransactionStore(ws)
-    coord = TransactionCoordinator(ws, store=tx_store, task_id=task_id)
+    subprocess.run(["git", "add", "."], cwd=ws, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial test suite requiring multiply"], cwd=ws, capture_output=True, check=True)
 
-    # Apply implementation of multiply
-    new_code = (
-        "def add(a: int, b: int) -> int:\n    return a + b\n\n"
-        "def multiply(a: int, b: int) -> int:\n    return a * b\n"
-    )
-    coord.stage_modify("math_utils.py", new_code)
-    executed = coord.execute()
-    assert executed is True
-
-    # 3. Execute real test suite via subprocess
     test_cmd = [sys.executable, "-m", "unittest", "tests/test_math_utils.py"]
-    test_res = run_hardened_subprocess(test_cmd, cwd=ws, timeout=10.0)
 
-    print(f"Executed test command: {' '.join(test_cmd)}")
-    print(f"Test exit code: {test_res.returncode}")
-    print(f"Captured stdout:\n{test_res.stdout.strip()}")
-
-    assert test_res.returncode == 0, f"Expected real unittest to pass, got exit code {test_res.returncode}"
-
-    # 4. Verify and commit transaction
-    verified = coord.verify()
-    assert verified is True
-    tx_res = coord.commit()
-    assert tx_res.committed is True
-
-    # 5. Build and save durable proof artifact
-    proof_store = FileProofStore(ws)
-    finalizer = TaskFinalizationCoordinator(ws)
-    finalizer.record_commit_intent(task_id, transaction_id=tx_res.transaction_id)
-    finalizer.record_commit_success(task_id, commit_sha=commit_sha)
-
-    from core.runtime.proof import build_change_records, capture_git_provenance
-    change_records = build_change_records(tx_res.operations, ws)
-    git_prov = capture_git_provenance(ws, initial_head_sha=commit_sha, commit_sha=commit_sha)
-
-    verdict = compute_proof_verdict(
-        tx_status="COMMITTED",
-        tests_passed=True,
-        gate_passed=True,
-        gate_details={
-            "workspace_scope": True,
-            "test_suite": True,
-            "transaction_integrity": True,
-            "execution_integrity": True,
-            "trust_integrity": True,
+    # 2. Wire and execute via canonical BrainFrogRuntime workflow
+    s1 = DeterministicDemoSystem1()
+    s2 = DeterministicDemoSystem2(
+        plan_desc="Implement multiply function in math_utils.py",
+        code_proposal={
+            "math_utils.py": (
+                "def add(a: int, b: int) -> int:\n    return a + b\n\n"
+                "def multiply(a: int, b: int) -> int:\n    return a * b\n"
+            )
         },
+        pr_title="feat(math): implement multiply function",
+    )
+    runtime = BrainFrogRuntime(
+        repo_dir=ws,
+        persist_sessions=False,
+        default_test_cmd=test_cmd,
+        system1_factory=lambda b: s1,
+        system2_factory=lambda **k: s2,
     )
 
-    proof = ProofArtifact(
-        task=TaskEvidence(
-            task_id=task_id,
-            session_id="session_demo_01",
-            description="Implement multiply function in math_utils.py with passing unit tests",
-            created_at="2026-10-12T00:00:00Z",
-            completed_at="2026-10-12T00:00:02Z",
-            duration_ms=1850,
-        ),
-        verdict=verdict,
-        provenance=git_prov,
-        verification=VerificationEvidence(
-            test_command="python -m unittest tests/test_math_utils.py",
-            exit_code=0,
-            stdout_summary=test_res.stdout.strip(),
-            stderr_summary=test_res.stderr.strip(),
-            gate_checks={
-                "workspace_scope": True,
-                "test_suite": True,
-                "transaction_integrity": True,
-                "execution_integrity": True,
-                "trust_integrity": True,
-            },
-            process_evidence=ProcessEvidence(
-                task_id=task_id,
-                transaction_id=tx_res.transaction_id,
-                command="python -m unittest tests/test_math_utils.py",
-                returncode=0,
-                status="success",
-                duration_ms=1850,
-            ),
-        ),
-        changes=ChangesEvidence(
-            transaction_id=tx_res.transaction_id,
-            status="COMMITTED",
-            files=change_records,
-        ),
-        reproducibility=ReproducibilityEvidence(
-            command="python -m unittest tests/test_math_utils.py",
-            expected_exit_code=0,
-            expected_file_hashes={r.path: r.after_sha256 for r in change_records if r.after_sha256},
-        ),
+    task_req = TaskRequest(
+        task_id=task_id,
+        user_request="Implement multiply function in math_utils.py with passing unit tests",
+        workspace=ws,
+        test_command=test_cmd,
     )
 
-    md_content = render_proof_markdown(proof)
-    proof_store.save(proof, markdown_content=md_content)
-    finalizer.finalize_proof(task_id)
+    print(f"Executing canonical production workflow for '{task_id}' via BrainFrogRuntime...")
+    task_res: TaskResult = runtime.execute_autonomous_task(task_req)
 
-    # 6. Run proof inspection
+    print(f"Workflow outcome: status={task_res.status}, success={task_res.success}, verified={task_res.verified}")
+    assert task_res.success is True, f"Expected task to succeed, got: {task_res.summary}"
+    assert task_res.verified is True, f"Expected task to be verified, got: {task_res.failure_reason}"
+    assert task_res.status == "COMMITTED"
+    assert task_res.proof_path is not None, "Expected proof artifact to be generated and persisted"
+
+    # 3. Run proof inspection UX
     res = inspect_proof(ws, task_id, check_workspace=True)
     print_proof_inspection(res)
 
@@ -213,7 +247,7 @@ def run_scenario_1_verified(ws: Path, commit_sha: str) -> str:
     return task_id
 
 
-def run_scenario_2_failed_rollback(ws: Path, commit_sha: str) -> str:
+def run_scenario_2_failed_rollback(ws: Path) -> str:
     """Scenario 2: Failing test with truthful failure reporting and rollback behavior."""
     print("\n" + "=" * 70)
     print("[SCENARIO 2] Failing test suite -> Truthful Failure & Rollback")
@@ -237,101 +271,57 @@ def run_scenario_2_failed_rollback(ws: Path, commit_sha: str) -> str:
         "    unittest.main()\n",
         encoding="utf-8",
     )
+    subprocess.run(["git", "add", "tests/test_math_utils.py"], cwd=ws, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "Require divide function in tests"], cwd=ws, capture_output=True, check=True)
 
-    # Begin transaction
-    tx_store = FileTransactionStore(ws)
-    coord = TransactionCoordinator(ws, store=tx_store, task_id=task_id)
-
-    # Stage buggy implementation returning 0
-    faulty_code = pre_content + "\ndef divide(a: int, b: int) -> int:\n    return 0  # BUGGY\n"
-    coord.stage_modify("math_utils.py", faulty_code)
-    executed = coord.execute()
-    assert executed is True
-
-    # Execute real test suite
     test_cmd = [sys.executable, "-m", "unittest", "tests/test_math_utils.py"]
-    test_res = run_hardened_subprocess(test_cmd, cwd=ws, timeout=10.0)
 
-    print(f"Executed test command: {' '.join(test_cmd)}")
-    print(f"Test exit code: {test_res.returncode}")
-    print(f"Captured stderr:\n{test_res.stderr.strip()}")
+    # Wire System 2 that proposes buggy code returning 0
+    s1 = DeterministicDemoSystem1()
+    s2_fail = DeterministicDemoSystem2(
+        plan_desc="Implement divide function (proposes buggy implementation)",
+        code_proposal={
+            "math_utils.py": (
+                pre_content + "\ndef divide(a: int, b: int) -> int:\n    return 0  # BUGGY: always returns 0\n"
+            )
+        },
+        retry_proposal={
+            "math_utils.py": (
+                pre_content + "\ndef divide(a: int, b: int) -> int:\n    return 0  # STILL BUGGY\n"
+            )
+        },
+        pr_title="feat(math): add buggy divide function",
+    )
 
-    assert test_res.returncode != 0, "Test suite was expected to fail"
+    runtime = BrainFrogRuntime(
+        repo_dir=ws,
+        persist_sessions=False,
+        default_test_cmd=test_cmd,
+        system1_factory=lambda b: s1,
+        system2_factory=lambda **k: s2_fail,
+    )
 
-    # Roll back transaction because tests failed
-    tx_res = coord.rollback(reason=f"Tests failed with exit code {test_res.returncode}")
-    assert tx_res.rolled_back is True
+    task_req = TaskRequest(
+        task_id=task_id,
+        user_request="Implement divide function (fails unit tests and rolls back)",
+        workspace=ws,
+        test_command=test_cmd,
+        max_retries=1,
+    )
 
-    # Confirm disk state is cleanly restored
+    print(f"Executing canonical production workflow for '{task_id}' via BrainFrogRuntime...")
+    task_res: TaskResult = runtime.execute_autonomous_task(task_req)
+
+    print(f"Workflow outcome: status={task_res.status}, success={task_res.success}, verified={task_res.verified}")
+    assert task_res.success is False, "Expected task to fail due to failing unit tests"
+    assert task_res.verified is False
+    assert task_res.status == "ROLLED_BACK", f"Expected transaction to be ROLLED_BACK, got: {task_res.status}"
+    assert task_res.proof_path is not None, "Expected durable proof of failure to be persisted"
+
+    # Confirm disk state is cleanly restored by TransactionCoordinator rollback
     current_content = src_file.read_text(encoding="utf-8")
     assert current_content == pre_content, "Rollback failed to restore pre-task file content!"
     print("Confirmed: Workspace filesystem was cleanly rolled back.")
-
-    # Record proof of failure
-    proof_store = FileProofStore(ws)
-
-    from core.runtime.proof import build_change_records, capture_git_provenance
-    change_records = build_change_records(tx_res.operations, ws)
-    git_prov = capture_git_provenance(ws, initial_head_sha=commit_sha, commit_sha=commit_sha)
-
-    verdict = compute_proof_verdict(
-        tx_status="ROLLED_BACK",
-        tests_passed=False,
-        gate_passed=False,
-        gate_details={
-            "workspace_scope": True,
-            "test_suite": False,
-            "transaction_integrity": True,
-            "execution_integrity": True,
-            "trust_integrity": True,
-        },
-    )
-
-    proof = ProofArtifact(
-        task=TaskEvidence(
-            task_id=task_id,
-            session_id="session_demo_02",
-            description="Implement divide function (fails unit tests and rolls back)",
-            created_at="2026-10-12T00:01:00Z",
-            completed_at="2026-10-12T00:01:02Z",
-            duration_ms=1420,
-        ),
-        verdict=verdict,
-        provenance=git_prov,
-        verification=VerificationEvidence(
-            test_command="python -m unittest tests/test_math_utils.py",
-            exit_code=test_res.returncode,
-            stdout_summary=test_res.stdout.strip(),
-            stderr_summary=test_res.stderr.strip(),
-            gate_checks={
-                "workspace_scope": True,
-                "test_suite": False,
-                "transaction_integrity": True,
-                "execution_integrity": True,
-                "trust_integrity": True,
-            },
-            process_evidence=ProcessEvidence(
-                task_id=task_id,
-                transaction_id=tx_res.transaction_id,
-                command="python -m unittest tests/test_math_utils.py",
-                returncode=test_res.returncode,
-                status="failed",
-                duration_ms=1420,
-            ),
-        ),
-        changes=ChangesEvidence(
-            transaction_id=tx_res.transaction_id,
-            status="ROLLED_BACK",
-            files=[],
-        ),
-        reproducibility=ReproducibilityEvidence(
-            command="python -m unittest tests/test_math_utils.py",
-            expected_exit_code=1,
-        ),
-    )
-
-    md_content = render_proof_markdown(proof)
-    proof_store.save(proof, markdown_content=md_content)
 
     # Run proof inspection
     res = inspect_proof(ws, task_id, check_workspace=True)
@@ -386,11 +376,11 @@ def main() -> int:
 
     try:
         print(f"Using isolated demo workspace: {ws}")
-        commit_sha = _init_git_workspace(ws)
+        _init_git_workspace(ws)
 
         # Run the 3 scenarios sequentially
-        task_1_id = run_scenario_1_verified(ws, commit_sha)
-        task_2_id = run_scenario_2_failed_rollback(ws, commit_sha)
+        task_1_id = run_scenario_1_verified(ws)
+        task_2_id = run_scenario_2_failed_rollback(ws)
         run_scenario_3_tamper_detection(ws, task_1_id)
 
         print("\n" + "=" * 70)
@@ -399,7 +389,7 @@ def main() -> int:
         return 0
     finally:
         if clean_up and ws.exists():
-            shutil.rmtree(ws, ignore_errors=True)
+            cleanup_temporary_workspace(ws)
 
 
 if __name__ == "__main__":
