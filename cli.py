@@ -635,6 +635,26 @@ def verify_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = Fal
     return 1
 
 
+def show_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = False) -> int:
+    """CLI handler for proof inspection UX.
+
+    Loads the authoritative proof artifact, displays full task evidence,
+    and performs fresh deterministic verification and workspace integrity checks.
+
+    Returns:
+      0: VERIFIED (proof valid and verdict VERIFIED)
+      1: INVALID (corrupted, tampered, contradictory, or disk integrity failure)
+      2: INCOMPLETE / MISSING (proof artifact missing or required evidence incomplete)
+      3: FAILED (truthful recorded failure, cancellation, or recovery required)
+    """
+    from core.runtime.proof_inspection import inspect_proof, print_proof_inspection
+
+    result = inspect_proof(repo_dir, target, check_workspace=check_workspace)
+    print_proof_inspection(result, console=console)
+    return result.exit_code
+
+
+
 def _print_turn_footer(chosen_model: str, provider_tag: str, box_w: int, right_margin: int, margin: int) -> None:
     """Render token cost and context window footer aligned with layout dimensions."""
     from system2 import usage_tracker
@@ -2333,6 +2353,22 @@ def run_interactive(
             )
             print_banner_box(status_text, level="info", title="System Status")
             continue
+        elif lower.startswith(("/show-proof", "/show-proof ", "/show ", "/proof ")):
+            parts = prompt.split(maxsplit=1)
+            if len(parts) > 1 and parts[1].strip():
+                raw_target = parts[1].strip()
+                check_ws = False
+                tokens = raw_target.split()
+                if "--check-workspace" in tokens:
+                    check_ws = True
+                    raw_target = " ".join([t for t in tokens if t != "--check-workspace"]).strip()
+                if raw_target:
+                    show_proof_cli(repo_dir, raw_target, check_workspace=check_ws)
+                else:
+                    print_banner_box("Usage: `/show-proof <task_id or path/to/proof.json> [--check-workspace]`", level="error", title="Missing Target")
+            else:
+                print_banner_box("Usage: `/show-proof <task_id or path/to/proof.json> [--check-workspace]`", level="error", title="Missing Target")
+            continue
         elif lower.startswith(("/verify-proof", "/verify-proof ", "/verify ")):
             parts = prompt.split(maxsplit=1)
             if len(parts) > 1 and parts[1].strip():
@@ -3126,6 +3162,7 @@ def main() -> int:
     p.add_argument("--module-map", default=None, help="Path to custom modules.json")
     p.add_argument("--min-domain-confidence", type=float, default=0.45)
     p.add_argument("--verify-proof", default=None, help="Verify proof artifact consistency by task ID or path")
+    p.add_argument("--show-proof", default=None, help="Inspect detailed verification proof evidence for task ID or path")
     p.add_argument(
         "--check-workspace",
         action="store_true",
@@ -3141,11 +3178,38 @@ def main() -> int:
 
     if args.verify_proof:
         return verify_proof_cli(repo_dir, args.verify_proof, check_workspace=args.check_workspace)
+    if args.show_proof:
+        return show_proof_cli(repo_dir, args.show_proof, check_workspace=args.check_workspace)
 
     raw_task = " ".join(args.task) if isinstance(args.task, list) and args.task else args.flag_task
     chosen_task = (raw_task or "").strip()
     if chosen_task in ("doctor", "/doctor"):
         return show_doctor(repo_dir)
+
+    if (
+        chosen_task.startswith("show-proof")
+        or chosen_task.startswith("/show-proof")
+        or chosen_task.startswith("show ")
+        or chosen_task.startswith("/show ")
+        or chosen_task.startswith("proof ")
+        or chosen_task.startswith("/proof ")
+        or chosen_task in ("show-proof", "/show-proof")
+    ):
+        parts = chosen_task.split(maxsplit=1)
+        if len(parts) > 1 and parts[1].strip():
+            raw_target = parts[1].strip()
+            check_ws = args.check_workspace
+            if "--check-workspace" in raw_target.split():
+                check_ws = True
+                raw_target = " ".join([tok for tok in raw_target.split() if tok != "--check-workspace"]).strip()
+            if raw_target:
+                return show_proof_cli(repo_dir, raw_target, check_workspace=check_ws)
+            else:
+                print_banner_box("Usage: brainfrog show-proof <task_id or path/to/proof.json> [--check-workspace]", level="error", title="Missing Target")
+                return 2
+        else:
+            print_banner_box("Usage: brainfrog show-proof <task_id or path/to/proof.json> [--check-workspace]", level="error", title="Missing Target")
+            return 2
 
     if (
         chosen_task.startswith("verify-proof")
