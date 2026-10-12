@@ -26,6 +26,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import cli
 from cli import main as cli_main, show_proof_cli
 from core.runtime.proof import (
     ChangeRecord,
@@ -45,6 +46,7 @@ from core.runtime.proof_inspection import (
     ProofInspectionState,
     format_proof_inspection_text,
     inspect_proof,
+    print_proof_inspection,
 )
 
 
@@ -76,6 +78,7 @@ class TestProofInspectionUX(unittest.TestCase):
         stdout: str = "1 passed",
         stderr: str = "",
         gate_passed: bool = True,
+        description: str = "Test task description",
     ) -> ProofArtifact:
         proof_store = FileProofStore(self.workspace)
         if files is None:
@@ -98,7 +101,7 @@ class TestProofInspectionUX(unittest.TestCase):
             task=TaskEvidence(
                 task_id=task_id,
                 session_id="sess_001",
-                description="Test task description",
+                description=description,
                 created_at="2026-10-12T00:00:00Z",
                 completed_at="2026-10-12T00:00:01Z",
                 duration_ms=1000,
@@ -261,24 +264,53 @@ class TestProofInspectionUX(unittest.TestCase):
         self.assertEqual(res_tampered.exit_code, 1)
 
     def test_07_secret_redaction_in_inspection(self) -> None:
-        """Scenario 7: Credentials and secret patterns in stdout/stderr/reason are scrubbed."""
+        """Scenario 7: Credentials and secret patterns in descriptions, stdout/stderr, and reasons are scrubbed."""
         task_id = "task_07_secrets"
-        secret_stdout = "Token: ghp_1234567890abcdef1234567890 and sk-ant-api03-abcdef1234567890"
+        secret_token = "ghp_1234567890abcdef1234567890"
+        secret_stdout = f"Token: {secret_token} and sk-ant-api03-abcdef1234567890"
         secret_stderr = "password: SuperSecretPassword123"
+        task_desc = f"Configure deploy pipeline using {secret_token} for production release"
         self._create_and_save_proof(
             task_id,
+            description=task_desc,
             stdout=secret_stdout,
             stderr=secret_stderr,
         )
 
         result = inspect_proof(self.workspace, task_id)
+        # Verify inspection semantics and exit codes are preserved
+        self.assertEqual(result.state, ProofInspectionState.VERIFIED)
+        self.assertEqual(result.exit_code, 0)
+
+        # 1. Plain-text rendering path
         text_output = format_proof_inspection_text(result)
 
         # Secrets must NOT appear in output
-        self.assertNotIn("ghp_1234567890abcdef1234567890", text_output)
+        self.assertNotIn(secret_token, text_output)
         self.assertNotIn("sk-ant-api03-abcdef1234567890", text_output)
         self.assertNotIn("SuperSecretPassword123", text_output)
         self.assertIn("[REDACTED_SECRET]", text_output)
+        # Surrounding non-sensitive description remains readable
+        self.assertIn("Configure deploy pipeline using", text_output)
+        self.assertIn("for production release", text_output)
+
+        # 2. Rich terminal rendering path
+        import io
+        from rich.console import Console
+
+        buf = io.StringIO()
+        rich_console = Console(file=buf, force_terminal=False, color_system=None, width=120)
+        print_proof_inspection(result, console=rich_console)
+        rich_output = buf.getvalue()
+
+        # Secrets must NOT appear in Rich output
+        self.assertNotIn(secret_token, rich_output)
+        self.assertNotIn("sk-ant-api03-abcdef1234567890", rich_output)
+        self.assertNotIn("SuperSecretPassword123", rich_output)
+        self.assertIn("[REDACTED_SECRET]", rich_output)
+        # Surrounding non-sensitive description remains readable
+        self.assertIn("Configure deploy pipeline using", rich_output)
+        self.assertIn("for production release", rich_output)
 
     def test_08_sensitive_file_protection(self) -> None:
         """Scenario 8: Sensitive files (.env, keys) are marked protected and never dumped."""
@@ -329,6 +361,49 @@ class TestProofInspectionUX(unittest.TestCase):
             exit_code = cli_main()
             self.assertEqual(exit_code, 2)
 
+        # 5. Slash aliases: /show-proof <task_id> and bare /show-proof
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "/show-proof", task_id]):
+            exit_code = cli_main()
+            self.assertEqual(exit_code, 0)
+
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "/show-proof"]):
+            exit_code = cli_main()
+            self.assertEqual(exit_code, 2)
+
+        # 6. /proof and proof aliases: /proof <task_id> and bare /proof
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "proof", task_id]):
+            exit_code = cli_main()
+            self.assertEqual(exit_code, 0)
+
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "proof"]):
+            exit_code = cli_main()
+            self.assertEqual(exit_code, 2)
+
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "/proof", task_id]):
+            exit_code = cli_main()
+            self.assertEqual(exit_code, 0)
+
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "/proof"]):
+            exit_code = cli_main()
+            self.assertEqual(exit_code, 2)
+
+        # 7. Unrelated commands must not be captured by show-proof / proof prefix matching
+        with patch("cli.execute_task") as mock_exec:
+            mock_exec.return_value = 0
+            with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "proofreading"]):
+                exit_code = cli_main()
+                self.assertEqual(exit_code, 0)
+                mock_exec.assert_called_once()
+                self.assertIn("proofreading", mock_exec.call_args[1]["task"])
+
+        with patch("cli.execute_task") as mock_exec:
+            mock_exec.return_value = 0
+            with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "show-proof-extra"]):
+                exit_code = cli_main()
+                self.assertEqual(exit_code, 0)
+                mock_exec.assert_called_once()
+                self.assertIn("show-proof-extra", mock_exec.call_args[1]["task"])
+
     def test_10_cross_platform_path_safety_and_null_bytes(self) -> None:
         """Scenario 10: Null bytes and malformed paths are rejected with exit code 1."""
         result = inspect_proof(self.workspace, "malicious\x00task")
@@ -338,6 +413,62 @@ class TestProofInspectionUX(unittest.TestCase):
         result_empty = inspect_proof(self.workspace, "")
         self.assertEqual(result_empty.state, ProofInspectionState.MISSING)
         self.assertEqual(result_empty.exit_code, 2)
+
+    def test_11_repl_proof_aliases(self) -> None:
+        """Scenario 11: REPL handles /proof and /show-proof aliases without submitting them as tasks."""
+        task_id = "task_11_repl"
+        self._create_and_save_proof(task_id, verdict_status="VERIFIED", tx_status="COMMITTED", exit_code=0)
+
+        # A. Bare /proof displays usage error (Missing Target), not submitted to execute_task
+        with patch("prompt_toolkit.shortcuts.PromptSession", side_effect=Exception("Disabled for test")), \
+             patch.object(cli.console, "input", side_effect=["/proof", "/exit"]), \
+             patch("cli.print_banner_box") as mock_banner, \
+             patch("cli.execute_task") as mock_exec, \
+             patch("cli.ensure_git_remote"):
+            cli.run_interactive(initial_repo=self.workspace)
+            mock_exec.assert_not_called()
+            self.assertTrue(any(c[1].get("title") == "Missing Target" for c in mock_banner.call_args_list))
+
+        # B. Bare /show-proof displays usage error (Missing Target), not submitted to execute_task
+        with patch("prompt_toolkit.shortcuts.PromptSession", side_effect=Exception("Disabled for test")), \
+             patch.object(cli.console, "input", side_effect=["/show-proof", "/exit"]), \
+             patch("cli.print_banner_box") as mock_banner, \
+             patch("cli.execute_task") as mock_exec, \
+             patch("cli.ensure_git_remote"):
+            cli.run_interactive(initial_repo=self.workspace)
+            mock_exec.assert_not_called()
+            self.assertTrue(any(c[1].get("title") == "Missing Target" for c in mock_banner.call_args_list))
+
+        # C. /proof <task_id> calls show_proof_cli
+        with patch("prompt_toolkit.shortcuts.PromptSession", side_effect=Exception("Disabled for test")), \
+             patch.object(cli.console, "input", side_effect=[f"/proof {task_id}", "/exit"]), \
+             patch("cli.show_proof_cli") as mock_show, \
+             patch("cli.execute_task") as mock_exec, \
+             patch("cli.ensure_git_remote"):
+            cli.run_interactive(initial_repo=self.workspace)
+            mock_exec.assert_not_called()
+            mock_show.assert_called_once_with(self.workspace, task_id, check_workspace=False)
+
+        # D. /show-proof <task_id> calls show_proof_cli
+        with patch("prompt_toolkit.shortcuts.PromptSession", side_effect=Exception("Disabled for test")), \
+             patch.object(cli.console, "input", side_effect=[f"/show-proof {task_id}", "/exit"]), \
+             patch("cli.show_proof_cli") as mock_show, \
+             patch("cli.execute_task") as mock_exec, \
+             patch("cli.ensure_git_remote"):
+            cli.run_interactive(initial_repo=self.workspace)
+            mock_exec.assert_not_called()
+            mock_show.assert_called_once_with(self.workspace, task_id, check_workspace=False)
+
+        # E. Unrelated commands like /proofreading or /show-proof-extra must NOT trigger show_proof_cli or Missing Target
+        with patch("prompt_toolkit.shortcuts.PromptSession", side_effect=Exception("Disabled for test")), \
+             patch.object(cli.console, "input", side_effect=["/proofreading", "/exit"]), \
+             patch("cli.show_proof_cli") as mock_show, \
+             patch("cli.print_banner_box") as mock_banner, \
+             patch("cli.execute_task") as mock_exec, \
+             patch("cli.ensure_git_remote"):
+            cli.run_interactive(initial_repo=self.workspace)
+            mock_show.assert_not_called()
+            self.assertFalse(any(c[1].get("title") == "Missing Target" for c in mock_banner.call_args_list))
 
 
 if __name__ == "__main__":

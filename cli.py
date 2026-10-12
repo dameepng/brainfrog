@@ -2353,7 +2353,10 @@ def run_interactive(
             )
             print_banner_box(status_text, level="info", title="System Status")
             continue
-        elif lower.startswith(("/show-proof", "/show-proof ", "/show ", "/proof ")):
+        elif (
+            lower in ("/show-proof", "/proof")
+            or lower.startswith(("/show-proof ", "/proof ", "/show "))
+        ):
             parts = prompt.split(maxsplit=1)
             if len(parts) > 1 and parts[1].strip():
                 raw_target = parts[1].strip()
@@ -3187,13 +3190,8 @@ def main() -> int:
         return show_doctor(repo_dir)
 
     if (
-        chosen_task.startswith("show-proof")
-        or chosen_task.startswith("/show-proof")
-        or chosen_task.startswith("show ")
-        or chosen_task.startswith("/show ")
-        or chosen_task.startswith("proof ")
-        or chosen_task.startswith("/proof ")
-        or chosen_task in ("show-proof", "/show-proof")
+        chosen_task in ("show-proof", "/show-proof", "proof", "/proof")
+        or chosen_task.startswith(("show-proof ", "/show-proof ", "proof ", "/proof ", "show ", "/show "))
     ):
         parts = chosen_task.split(maxsplit=1)
         if len(parts) > 1 and parts[1].strip():

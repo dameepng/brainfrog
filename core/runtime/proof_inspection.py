@@ -288,7 +288,7 @@ def print_proof_inspection(
 
     if result.proof:
         header_text.append("Description: ", style=f"bold {COLOR_MUTED}")
-        header_text.append(f"{result.proof.task.description}\n", style=f"italic {COLOR_FG}")
+        header_text.append(f"{redact_secrets(result.proof.task.description)}\n", style=f"italic {COLOR_FG}")
         header_text.append("Task ID: ", style=f"bold {COLOR_MUTED}")
         header_text.append(f"{result.proof.task.task_id}  ·  ", style=COLOR_ACCENT)
         header_text.append("Session: ", style=f"bold {COLOR_MUTED}")
@@ -579,7 +579,7 @@ def format_proof_inspection_text(result: ProofInspectionResult) -> str:
         lines.append("")
         lines.append("[Stored Proof Artifact Data]")
         lines.append(f"Task ID: {p.task.task_id}")
-        lines.append(f"Description: {p.task.description}")
+        lines.append(f"Description: {redact_secrets(p.task.description)}")
         lines.append(f"Stored Verdict: {p.verdict.status}")
         lines.append(f"Authoritative Reason: {redact_secrets(p.verdict.reason)}")
         lines.append(f"Transaction ID: {p.changes.transaction_id or 'none'}")
