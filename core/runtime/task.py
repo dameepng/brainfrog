@@ -787,3 +787,54 @@ class Task:
         except json.JSONDecodeError as exc:
             raise TaskValidationError(f"Malformed JSON payload: {exc}") from exc
         return cls.from_dict(parsed)
+
+
+# =============================================================================
+# Post-Task File Mutation Evidence Models (Sprint 1.5B)
+# =============================================================================
+
+class FileMutationStatus(str, Enum):
+    """Authoritative outcome of an individual filesystem mutation."""
+
+    COMMITTED = "COMMITTED"
+    ROLLED_BACK = "ROLLED_BACK"
+    ROLLBACK_FAILED = "ROLLBACK_FAILED"
+    UNCHANGED = "UNCHANGED"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class FileChangeSummary:
+    """Immutable, evidence-backed summary of a discrete file mutation.
+
+    Preserves pre-mutation baseline hash, intended staged mutation hash,
+    and independently verified final disk hash across committed, rolled-back,
+    and rollback-failed lifecycles.
+    """
+
+    path: str
+    operation: str  # "CREATE", "MODIFY", "DELETE", "RENAME"
+    status: FileMutationStatus
+    before_sha256: Optional[str] = None
+    staged_sha256: Optional[str] = None
+    final_sha256: Optional[str] = None
+    byte_count_delta: int = 0
+    error: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.path or not isinstance(self.path, str):
+            raise ValueError("FileChangeSummary path must be a non-empty string.")
+        clean_p = self.path.replace("\\", "/").strip().lstrip("/")
+        if ":" in clean_p or clean_p.startswith("/") or clean_p.startswith("../") or "/../" in clean_p:
+            raise ValueError(
+                f"FileChangeSummary path '{self.path}' must be a workspace-relative path without traversal components."
+            )
+        object.__setattr__(self, "path", clean_p)
+        if isinstance(self.status, str):
+            try:
+                object.__setattr__(self, "status", FileMutationStatus(self.status))
+            except ValueError:
+                object.__setattr__(self, "status", FileMutationStatus.UNKNOWN)
+        if self.error:
+            from core.runtime.session import scrub_secrets
+            object.__setattr__(self, "error", scrub_secrets(self.error))

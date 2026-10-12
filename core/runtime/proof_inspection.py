@@ -262,6 +262,7 @@ def print_proof_inspection(
     from rich.panel import Panel
     from rich.table import Table
     from rich.text import Text
+    from rich.markup import escape
 
     # Theme colors
     COLOR_SUCCESS = "#10b981"
@@ -376,8 +377,22 @@ def print_proof_inspection(
 
     # Changed Files Table
     console.print()
+    raw_changes_stat = getattr(proof.changes, "status", None) if getattr(proof, "changes", None) else None
+    if raw_changes_stat:
+        c_stat_str = str(raw_changes_stat).upper()
+        if c_stat_str == "COMMITTED":
+            status_badge = f"[{COLOR_SUCCESS} bold][COMMITTED][/{COLOR_SUCCESS} bold]"
+        elif c_stat_str == "ROLLED_BACK":
+            status_badge = f"[{COLOR_WARNING} bold][ROLLED_BACK][/{COLOR_WARNING} bold]"
+        else:
+            status_badge = f"[dim][{escape(c_stat_str)}][/dim]"
+    else:
+        status_badge = ""
+
+    table_title = f"[bold]File Modifications Recorded in Transaction Journal[/bold] {status_badge}".strip()
+
     files_table = Table(
-        title="[bold]File Modifications Recorded in Transaction Journal[/bold]",
+        title=table_title,
         box=box.ROUNDED,
         border_style=COLOR_MUTED,
         header_style=f"bold {COLOR_ACCENT}",
@@ -390,17 +405,22 @@ def print_proof_inspection(
     files_table.add_column("After SHA-256", justify="center", width=16)
     files_table.add_column("Byte Delta", justify="right", width=14)
 
-    if proof.changes.files:
+    if proof.changes and proof.changes.files:
         for f in proof.changes.files:
             b_hash = f.before_sha256[:12] if f.before_sha256 else "(none)"
             a_hash = f.after_sha256[:12] if f.after_sha256 else "(none)"
             d_str = f"+{f.byte_count_delta}" if f.byte_count_delta > 0 else str(f.byte_count_delta)
-            path_display = f.path
+            path_display = escape(redact_secrets(f.path))
             if is_sensitive_path(f.path):
                 path_display += " [italic yellow](protected)[/italic yellow]"
-            files_table.add_row(path_display, f.operation, b_hash, a_hash, f"{d_str} B")
+            files_table.add_row(path_display, escape(f.operation), b_hash, a_hash, f"{d_str} B")
     else:
-        files_table.add_row("(No file modifications committed)", "—", "—", "—", "0 B")
+        if raw_changes_stat and str(raw_changes_stat).upper() == "ROLLED_BACK":
+            files_table.add_row("(File modifications rolled back)", "—", "—", "—", "0 B")
+        elif raw_changes_stat and str(raw_changes_stat).upper() == "COMMITTED":
+            files_table.add_row("(No file modifications committed)", "—", "—", "—", "0 B")
+        else:
+            files_table.add_row("(No file modifications recorded)", "—", "—", "—", "0 B")
 
     console.print(files_table)
 
