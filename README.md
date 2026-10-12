@@ -153,10 +153,10 @@ This exercises the canonical `BrainFrogRuntime` pipeline through three real Pyth
 1. **Scenario 1 — Verified Change (`VERIFIED`, Exit Code 0)**:
    - Stages `multiply()` in `math_utils.py` and runs `python -m unittest tests/test_math_utils.py`.
    - Test exits 0 -> transaction commits (`COMMITTED`) -> proof artifact saved -> live re-verification succeeds.
-2. **Scenario 2 — Failing Test Suite with Truthful Rollback (`FAILED`, Exit Code 3 / 1)**:
-   - Stages faulty `divide()` returning `0` -> test fails with `AssertionError: 0 != 5` (exit 1).
+2. **Scenario 2 — Failing Test Suite with Truthful Rollback (`FAILED`, Proof Exit Code 3)**:
+   - Stages faulty `divide()` returning `0` -> test runner fails with `AssertionError: 0 != 5` (test process exit code 1).
    - `TransactionCoordinator` cleanly rolls back mutations -> pre-task disk content is restored byte-for-byte.
-   - Saves a durable proof artifact truthfully recording the failure facts and `ROLLED_BACK` transaction status.
+   - Saves a durable proof artifact truthfully recording the failure facts and `ROLLED_BACK` transaction status (proof inspection / verification returns `FAILED`, exit code 3).
 3. **Scenario 3 — Post-Proof Workspace Tampering Detected (`INVALID`, Exit Code 1)**:
    - An external modification alters `math_utils.py` after task 1 proof was finalized.
    - `verify-proof` with `--check-workspace` recomputes current disk hashes -> flags SHA-256 mismatch -> rejects modified state as `INVALID`.
@@ -193,12 +193,12 @@ Both `brainfrog verify-proof` and `brainfrog show-proof` adhere to a canonical e
 | :---: | :--- | :--- |
 | **0** | **VERIFIED** | Proof artifact is structurally valid, test command exited 0, transaction committed cleanly, and workspace disk matches post-proof hashes (when `--check-workspace` is specified). |
 | **1** | **INVALID** | Proof JSON is malformed, contradictory, or disk files have mutated since proof generation (`--check-workspace` detected hash mismatch). |
-| **2** | **MISSING** | Proof artifact does not exist in `.brainfrog/proofs/`, or target argument was omitted. |
+| **2** | **MISSING** | Proof artifact does not exist in `.brainfrog/proofs/`, or required proof evidence is incomplete. |
 | **3** | **FAILED** | Proof artifact is structurally valid and truthfully records that the task failed its test suite, timed out, or rolled back mutations. |
 
 #### Critical Evidential Distinctions
 - **`FAILED` is NOT `INVALID`**:
-  A `FAILED` task proof is a **valid, truthful historical record** confirming that a task did not pass verification criteria and that changes were rolled back. The proof artifact itself is intact and structurally sound. Both `show-proof` and `verify-proof` report `FAILED` (exit code `3` or non-zero gate exit), clearly explaining that the failure record is valid.
+  A `FAILED` task proof is a **valid, truthful historical record** confirming that a task did not pass verification criteria and that changes were rolled back. The proof artifact itself is intact and structurally sound. Both `show-proof` and `verify-proof` report `FAILED` (exit code `3`), clearly explaining that the failure record is valid.
 - **Role of `--check-workspace`**:
   Without `--check-workspace`, `verify-proof` verifies internal structural consistency and recorded historical evidence. With `--check-workspace`, it actively compares current disk contents against the proof's recorded `after_sha256` hashes, correctly returning `INVALID` (`✗ MISMATCH`, exit code `1`) if files have mutated since the proof was finalized.
 
