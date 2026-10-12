@@ -80,9 +80,140 @@ Incoming Channel (CLI / Telegram / WhatsApp)
 
 ---
 
-## Installation & Getting Started
+## Quickstart: Verify Agent Work in 60 Seconds (Public Beta)
 
-### 1. Prerequisites
+> **"Don't just trust the agent. Verify it."**
+
+When an AI agent modifies code in your repository, natural-language promises and synthetic self-reports are not proof. BrainFrog establishes an evidence-backed trust boundary: every code change produces an authoritative, durable proof artifact (`.brainfrog/proofs/<task_id>.json`) recording exact test commands, process exit codes, captured stdout/stderr (with secrets automatically redacted), git commit SHAs, and before/after file SHA-256 hashes with byte deltas.
+
+### 1. What BrainFrog Verifies (and What It Does Not Guarantee)
+
+- **What BrainFrog Verifies**:
+  - **Deterministic Test Execution**: Asserts that the configured test suite ran and exited with code `0`.
+  - **Atomic Transaction Outcome**: Verifies that filesystem mutations were committed (`COMMITTED`) or rolled back byte-for-byte upon failure (`ROLLED_BACK`).
+  - **Live Disk Integrity (`--check-workspace`)**: Compares current workspace file hashes on disk against the proof's recorded `after_sha256` hashes to detect post-verification drift or tampering.
+  - **Cross-Field Consistency**: Confirms that recorded verdicts, transaction states, timestamps, and commit existence in the git object database align without contradiction.
+- **What Proof Artifacts Do Not Guarantee**:
+  - **Not Cryptographic Attestation**: Proof artifacts are unauthenticated JSON records evaluated via deterministic structural and hash consistency. They do not provide cryptographic hardware signing or non-repudiation.
+  - **Dependent on Test Suite Quality**: If a caller runs a trivial or shallow test command (e.g. `python -c pass`), BrainFrog confirms that the command exited 0; it cannot evaluate whether the test suite provides comprehensive semantic coverage.
+  - **Workflow Proof, Not Generalized Autonomy**: The offline demo proves that the verification, transaction rollback, and integrity detection pipeline works deterministically; it does not claim the LLM can autonomously solve arbitrary coding tasks without oversight.
+
+---
+
+### 2. Prerequisites & Quickstart Installation
+
+Running the **offline verification demo** and inspecting/verifying proofs requires **Python 3.10+ only — no API keys, accounts, or external services are needed**.
+
+#### Clone the Repository
+```bash
+git clone https://github.com/dameepng/brainfrog.git
+cd brainfrog
+```
+
+#### Create and Activate Virtual Environment
+- **Windows (PowerShell)**:
+  ```powershell
+  python -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  ```
+- **Windows (Command Prompt / cmd.exe)**:
+  ```cmd
+  python -m venv .venv
+  .\.venv\Scripts\activate.bat
+  ```
+- **POSIX Shells (Linux / macOS — bash / zsh)**:
+  ```bash
+  python -m venv .venv
+  source .venv/bin/activate
+  ```
+
+#### Install Dependencies & CLI Entrypoint
+```bash
+pip install -r requirements.txt
+pip install -e .
+```
+
+Verify the installation:
+```bash
+brainfrog --help
+```
+
+---
+
+### 3. Run the Reproducible 3-Scenario Offline Demo
+
+Run the self-contained verification walkthrough (requires zero network calls or credentials):
+
+```bash
+python demo/reproducible_proof_demo.py
+```
+
+This exercises the canonical `BrainFrogRuntime` pipeline through three real Python unit test scenarios:
+
+1. **Scenario 1 — Verified Change (`VERIFIED`, Exit Code 0)**:
+   - Stages `multiply()` in `math_utils.py` and runs `python -m unittest tests/test_math_utils.py`.
+   - Test exits 0 -> transaction commits (`COMMITTED`) -> proof artifact saved -> live re-verification succeeds.
+2. **Scenario 2 — Failing Test Suite with Truthful Rollback (`FAILED`, Exit Code 3 / 1)**:
+   - Stages faulty `divide()` returning `0` -> test fails with `AssertionError: 0 != 5` (exit 1).
+   - `TransactionCoordinator` cleanly rolls back mutations -> pre-task disk content is restored byte-for-byte.
+   - Saves a durable proof artifact truthfully recording the failure facts and `ROLLED_BACK` transaction status.
+3. **Scenario 3 — Post-Proof Workspace Tampering Detected (`INVALID`, Exit Code 1)**:
+   - An external modification alters `math_utils.py` after task 1 proof was finalized.
+   - `verify-proof` with `--check-workspace` recomputes current disk hashes -> flags SHA-256 mismatch -> rejects modified state as `INVALID`.
+
+---
+
+### 4. Inspecting & Verifying Proof Artifacts via CLI
+
+BrainFrog provides dedicated CLI commands for evidence discovery, visual inspection, and automated CI gating:
+
+```bash
+# Discovery: list all proof artifacts recorded in the repository
+brainfrog proofs
+# (or: brainfrog list-proofs)
+
+# Detailed inspection: examine historical execution data & live state
+brainfrog show-proof latest
+brainfrog show-proof <task_id>
+brainfrog show-proof latest --check-workspace
+
+# Fast deterministic verification gate (ideal for CI/CD pipelines)
+brainfrog verify-proof latest
+brainfrog verify-proof <task_id>
+brainfrog verify-proof latest --check-workspace
+```
+
+---
+
+### 5. Exit Code Contract & Proof Semantics
+
+Both `brainfrog verify-proof` and `brainfrog show-proof` adhere to a canonical exit-code contract:
+
+| Exit Code | State | Semantic Meaning |
+| :---: | :--- | :--- |
+| **0** | **VERIFIED** | Proof artifact is structurally valid, test command exited 0, transaction committed cleanly, and workspace disk matches post-proof hashes (when `--check-workspace` is specified). |
+| **1** | **INVALID** | Proof JSON is malformed, contradictory, or disk files have mutated since proof generation (`--check-workspace` detected hash mismatch). |
+| **2** | **MISSING** | Proof artifact does not exist in `.brainfrog/proofs/`, or target argument was omitted. |
+| **3** | **FAILED** | Proof artifact is structurally valid and truthfully records that the task failed its test suite, timed out, or rolled back mutations. |
+
+#### Critical Evidential Distinctions
+- **`FAILED` is NOT `INVALID`**:
+  A `FAILED` task proof is a **valid, truthful historical record** confirming that a task did not pass verification criteria and that changes were rolled back. The proof artifact itself is intact and structurally sound. Both `show-proof` and `verify-proof` report `FAILED` (exit code `3` or non-zero gate exit), clearly explaining that the failure record is valid.
+- **Role of `--check-workspace`**:
+  Without `--check-workspace`, `verify-proof` verifies internal structural consistency and recorded historical evidence. With `--check-workspace`, it actively compares current disk contents against the proof's recorded `after_sha256` hashes, correctly returning `INVALID` (`✗ MISMATCH`, exit code `1`) if files have mutated since the proof was finalized.
+
+---
+
+### 6. Known Limitations
+
+1. **Unsigned JSON Proofs**: Proof files are stored in `.brainfrog/proofs/` as standard JSON. BrainFrog asserts internal consistency and filesystem hash integrity, not hardware-backed cryptographic non-repudiation.
+2. **Caller Test-Suite Depth**: The verification gate enforces process exit code 0; it cannot determine whether the caller's test suite provides adequate coverage or meaningful assertions.
+
+---
+
+## Full Installation & Multi-Channel Setup
+
+### 1. Prerequisites (For Live Agent & Multi-Channel Deployment)
 
 - **Python 3.10+** (Python 3.11 or newer recommended)
 - **Node.js 18+** (required when utilizing the MCP browser verification server)
@@ -92,26 +223,11 @@ Incoming Channel (CLI / Telegram / WhatsApp)
   - **Anthropic API Key** (`ANTHROPIC_API_KEY`)
 - **TypeSafe / Jev API Key** (`TYPESAFE_API_KEY`) for System 1
 
-### 2. Setup
+### 2. Environment Configuration (`.env`)
 
-```bash
-# Clone the repository
-git clone https://github.com/dameepng/brainfrog.git
-cd brainfrog
-
-# Create a virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-pip install -e .
-
-# Prepare environment configuration
-cp .env.example .env
-```
-
-### 3. Environment Configuration (`.env`)
+Prepare environment configuration:
+- On POSIX / PowerShell: `cp .env.example .env`
+- On Windows cmd.exe: `copy .env.example .env`
 
 Configure the variables inside `.env`:
 
