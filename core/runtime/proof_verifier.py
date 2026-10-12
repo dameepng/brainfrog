@@ -148,10 +148,53 @@ class ProofVerificationReport:
     def is_incomplete(self) -> bool:
         return self.overall_status == ProofVerificationStatus.INCOMPLETE
 
+    @property
+    def exit_code(self) -> int:
+        """Deterministic process exit code adhering to canonical proof verification contract.
+
+        Returns:
+            0: VERIFIED (proof artifact valid and recorded task verdict is VERIFIED)
+            1: INVALID (corrupted, contradictory, tampered, disk integrity failure, or unknown verdict)
+            2: INCOMPLETE / MISSING (proof file missing or required evidence incomplete)
+            3: FAILED (proof artifact validly records a failed, cancelled, or rolled-back task)
+        """
+        if self.overall_status == ProofVerificationStatus.INVALID:
+            return 1
+        if self.overall_status == ProofVerificationStatus.INCOMPLETE:
+            return 2
+        if self.overall_status == ProofVerificationStatus.VALID:
+            if self.verdict_status == "VERIFIED":
+                return 0
+            if self.verdict_status in ("FAILED", "CANCELLED", "RECOVERY_REQUIRED"):
+                return 3
+            # Unknown, missing, or unrecognized verdict -> fail closed!
+            return 1
+        return 1
+
+    @property
+    def verification_outcome(self) -> str:
+        """Canonical outcome string combining artifact consistency and recorded task verdict.
+
+        Possible values: 'VERIFIED', 'FAILED', 'INVALID', 'INCOMPLETE'.
+        """
+        if self.overall_status == ProofVerificationStatus.INVALID:
+            return "INVALID"
+        if self.overall_status == ProofVerificationStatus.INCOMPLETE:
+            return "INCOMPLETE"
+        if self.overall_status == ProofVerificationStatus.VALID:
+            if self.verdict_status == "VERIFIED":
+                return "VERIFIED"
+            if self.verdict_status in ("FAILED", "CANCELLED", "RECOVERY_REQUIRED"):
+                return "FAILED"
+            return "INVALID"
+        return "INVALID"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "target": self.target,
             "overall_status": self.overall_status.value,
+            "verification_outcome": self.verification_outcome,
+            "exit_code": self.exit_code,
             "task_id": self.task_id,
             "verdict_status": self.verdict_status,
             "transaction_status": self.transaction_status,

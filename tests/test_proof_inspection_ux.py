@@ -27,7 +27,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import cli
-from cli import main as cli_main, show_proof_cli
+from cli import main as cli_main, show_proof_cli, verify_proof_cli
 from core.runtime.proof import (
     ChangeRecord,
     ChangesEvidence,
@@ -469,6 +469,115 @@ class TestProofInspectionUX(unittest.TestCase):
             cli.run_interactive(initial_repo=self.workspace)
             mock_show.assert_not_called()
             self.assertFalse(any(c[1].get("title") == "Missing Target" for c in mock_banner.call_args_list))
+
+class TestVerifyProofCLISemantics(TestProofInspectionUX):
+    """Regression tests for Sprint 1.4B: verify-proof verdict semantics."""
+
+    def test_verify_proof_cli_verified_success(self) -> None:
+        """1. Verified successful proof -> exit 0."""
+        task_id = "task_verify_01_success"
+        self._create_and_save_proof(
+            task_id,
+            verdict_status="VERIFIED",
+            tx_status="COMMITTED",
+            exit_code=0,
+            gate_passed=True,
+        )
+        code = verify_proof_cli(self.workspace, task_id)
+        self.assertEqual(code, 0)
+
+        # Also via cli_main positional and flag
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "verify-proof", task_id]):
+            self.assertEqual(cli_main(), 0)
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "--verify-proof", task_id]):
+            self.assertEqual(cli_main(), 0)
+
+    def test_verify_proof_cli_structurally_valid_failed_proof(self) -> None:
+        """2. Structurally valid FAILED proof -> nonzero exit (3, matching show-proof FAILED)."""
+        task_id = "task_verify_02_failed"
+        self._create_and_save_proof(
+            task_id,
+            verdict_status="FAILED",
+            tx_status="ROLLED_BACK",
+            exit_code=1,
+            gate_passed=False,
+            stdout="0 passed, 1 failed",
+        )
+        code = verify_proof_cli(self.workspace, task_id)
+        self.assertEqual(code, 3)
+
+        # Also via cli_main
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "verify-proof", task_id]):
+            self.assertEqual(cli_main(), 3)
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "--verify-proof", task_id]):
+            self.assertEqual(cli_main(), 3)
+
+    def test_verify_proof_cli_tampered_workspace_disk(self) -> None:
+        """3. Tampered workspace disk -> exit 1 (INVALID)."""
+        task_id = "task_verify_03_tampered"
+        self._create_and_save_proof(
+            task_id,
+            verdict_status="VERIFIED",
+            tx_status="COMMITTED",
+            exit_code=0,
+        )
+        # Mutate file on disk
+        (self.workspace / "src.py").write_text("tampered content\n", encoding="utf-8")
+        code = verify_proof_cli(self.workspace, task_id, check_workspace=True)
+        self.assertEqual(code, 1)
+
+    def test_verify_proof_cli_incomplete_missing_proof(self) -> None:
+        """4. Incomplete / missing proof -> exit 2 (INCOMPLETE / MISSING)."""
+        code = verify_proof_cli(self.workspace, "nonexistent_task_id")
+        self.assertEqual(code, 2)
+
+    def test_verify_proof_cli_malformed_json(self) -> None:
+        """5. Malformed JSON proof -> exit 1 (INVALID)."""
+        proofs_dir = self.workspace / ".brainfrog" / "proofs"
+        proofs_dir.mkdir(parents=True, exist_ok=True)
+        (proofs_dir / "bad_syntax.json").write_text("{malformed: json", encoding="utf-8")
+
+        code = verify_proof_cli(self.workspace, "bad_syntax")
+        self.assertEqual(code, 1)
+
+    def test_verify_proof_cli_unknown_verdict_fails_closed(self) -> None:
+        """6. Unknown recorded task verdict -> fail closed with exit 1 (INVALID)."""
+        task_id = "task_verify_06_unknown"
+        self._create_and_save_proof(
+            task_id,
+            verdict_status="VERIFIED",
+            tx_status="COMMITTED",
+            exit_code=0,
+        )
+        proof_file = self.workspace / ".brainfrog" / "proofs" / f"{task_id}.json"
+        data = json.loads(proof_file.read_text(encoding="utf-8"))
+        data["verdict"]["status"] = "SURPRISE_SUCCESS"
+        proof_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        code = verify_proof_cli(self.workspace, task_id)
+        self.assertEqual(code, 1)
+
+    def test_verify_proof_cli_missing_verdict_fails_closed(self) -> None:
+        """7. Missing recorded task verdict -> fail closed with exit 1 (INVALID)."""
+        task_id = "task_verify_07_empty_verdict"
+        self._create_and_save_proof(
+            task_id,
+            verdict_status="VERIFIED",
+            tx_status="COMMITTED",
+            exit_code=0,
+        )
+        proof_file = self.workspace / ".brainfrog" / "proofs" / f"{task_id}.json"
+        data = json.loads(proof_file.read_text(encoding="utf-8"))
+        data["verdict"]["status"] = ""
+        proof_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        code = verify_proof_cli(self.workspace, task_id)
+        self.assertEqual(code, 1)
+
+    def test_verify_proof_cli_missing_target_usage(self) -> None:
+        """8. Missing target argument -> usage message and exit 1."""
+        with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "verify-proof"]):
+            self.assertEqual(cli_main(), 1)
 
 
 if __name__ == "__main__":
