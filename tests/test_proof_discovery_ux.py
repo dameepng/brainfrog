@@ -348,6 +348,7 @@ class TestProofDiscoveryUX(unittest.TestCase):
         self.assertEqual(inspect_res.exit_code, 2)
         self.assertEqual(inspect_res.state, ProofInspectionState.MISSING)
         self.assertTrue("no proof artifacts found" in (inspect_res.error_message or "").lower())
+        self.assertEqual((inspect_res.error_message or "").lower().count("no proof artifacts found"), 1)
 
     # -------------------------------------------------------------------------
     # 9. Explicit task ID and JSON path still work unchanged
@@ -394,18 +395,36 @@ class TestProofDiscoveryUX(unittest.TestCase):
         self.assertEqual(report_null.exit_code, 1)
 
     # -------------------------------------------------------------------------
-    # 12. Secret redaction in list-proofs
+    # 12. Secret redaction in list-proofs (task_id, verdict.status, changes.status)
     # -------------------------------------------------------------------------
     def test_secret_redaction_in_list_proofs(self) -> None:
+        # A. Secret in task_id
         secret_task_id = "task_ghp_secretTokenValue1234567890"
         self._create_and_save_proof(secret_task_id)
+
+        # B. Secret in non-standard verdict.status and changes.status
+        store = FileProofStore(self.workspace)
+        proof_with_secrets = {
+            "version": "1.0.0",
+            "task": {"task_id": "task_secret_status", "completed_at": "2026-10-12T10:00:00Z"},
+            "verdict": {"status": "ghp_secretVerdictToken1234567890"},
+            "verification": {"test_command": "true", "exit_code": 0},
+            "changes": {"status": "ghp_secretChangesToken1234567890"},
+        }
+        (store.proofs_dir / "task_secret_status.json").write_text(json.dumps(proof_with_secrets), encoding="utf-8")
 
         with cli.console.capture() as capture:
             code = list_proofs_cli(self.workspace)
 
         self.assertEqual(code, 0)
         captured = capture.get()
+
+        # Raw secrets must never appear
         self.assertNotIn("ghp_secretTokenValue1234567890", captured)
+        self.assertNotIn("ghp_secretVerdictToken1234567890", captured)
+        self.assertNotIn("ghp_secretChangesToken1234567890", captured)
+
+        # Expected redaction markers must be present
         self.assertIn("[REDACTED_SECRET]", captured)
 
     # -------------------------------------------------------------------------
@@ -476,6 +495,56 @@ class TestProofDiscoveryUX(unittest.TestCase):
                 code = cli_main()
                 self.assertEqual(code, 0)
                 mock_show.assert_called_with(self.workspace, "latest", check_workspace=False)
+
+    # -------------------------------------------------------------------------
+    # 14. Rich markup injection and bracket handling
+    # -------------------------------------------------------------------------
+    def test_list_proofs_rich_markup_injection_protection(self) -> None:
+        store = FileProofStore(self.workspace)
+        store.proofs_dir.mkdir(parents=True, exist_ok=True)
+
+        proof_markup = {
+            "version": "1.0.0",
+            "task": {
+                "task_id": "task_[test]",
+                "completed_at": "2026-10-12T[unclosed_ts",
+            },
+            "verdict": {"status": "[bold]bad[/test]"},
+            "verification": {"test_command": "true", "exit_code": 0},
+            "changes": {"status": "[unmatched_tx"},
+        }
+        (store.proofs_dir / "task_[test].json").write_text(json.dumps(proof_markup), encoding="utf-8")
+
+        with cli.console.capture() as capture:
+            code = list_proofs_cli(self.workspace)
+
+        self.assertEqual(code, 0)
+        captured = capture.get()
+
+        # Values must be displayed literally without raising MarkupError or being swallowed
+        self.assertIn("task_[test]", captured)
+        self.assertIn("[bold]bad[/test]", captured)
+        self.assertIn("[unmatched_tx", captured)
+
+    # -------------------------------------------------------------------------
+    # 15. REPL slash commands routing
+    # -------------------------------------------------------------------------
+    def test_repl_slash_commands_proof_discovery(self) -> None:
+        from cli import run_interactive
+        from unittest.mock import MagicMock
+        mock_session = MagicMock()
+        mock_session.prompt.side_effect = ["/list-proofs", "/proofs", "/exit"]
+
+        with patch("cli.list_proofs_cli", return_value=0) as mock_list, \
+             patch("prompt_toolkit.shortcuts.PromptSession", return_value=mock_session), \
+             patch.object(cli.console, "input", side_effect=["/list-proofs", "/proofs", "/exit"]), \
+             patch("cli.ensure_git_remote"):
+            try:
+                run_interactive(self.workspace)
+            except Exception:
+                pass
+            self.assertEqual(mock_list.call_count, 2)
+            mock_list.assert_called_with(self.workspace)
 
 
 if __name__ == "__main__":

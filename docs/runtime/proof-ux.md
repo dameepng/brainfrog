@@ -65,6 +65,18 @@ Inside the interactive REPL:
 /verify-proof <task_id | latest> [--check-workspace]
 ```
 
+### Latest Target Selection Semantics
+When `latest` is supplied as the target to `show-proof` or `verify-proof`, BrainFrog deterministically resolves the newest eligible local JSON proof artifact in `.brainfrog/proofs/`:
+
+1. **Candidate Scope**: All non-hidden regular `.json` files directly inside `.brainfrog/proofs/`.
+2. **Sort Hierarchy (`_candidate_sort_key`)**:
+   - **Primary (Effective Timestamp)**: Evaluates recorded task completion time (`task.completed_at`), falling back to creation time (`task.created_at`). For unparseable or malformed JSON files, falls back to filesystem modification time (`st_mtime`). This ensures copied older proofs never displace genuinely newer runs, while newly written malformed proofs rank by write time so they fail closed.
+   - **Secondary (Filesystem Nanoseconds)**: Uses filesystem nanosecond modification time (`st_mtime_ns`) to break ties between artifacts with identical recorded ISO timestamps.
+   - **Tertiary (Deterministic Stem Tiebreaker)**: Lexicographically compares filename stems (task IDs) to guarantee a completely stable choice if timestamps and modification times are identical.
+3. **Fail-Closed Guarantees**:
+   - If the newest proof artifact is corrupt or malformed, it is selected and fails closed as `INVALID` (exit code `1`), never silently falling back to an older valid artifact.
+   - If the proof storage directory is empty or contains no eligible `.json` files, `latest` fails closed with exit code `2` (`INCOMPLETE / MISSING`).
+
 ---
 
 ## 2. Process Exit Codes

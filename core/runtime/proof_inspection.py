@@ -153,7 +153,9 @@ def inspect_proof(
         else:
             msg = f"Proof artifact not found for '{target_clean}' at '{resolved_path}'."
         if report.reasons:
-            msg = f"{msg} ({'; '.join(report.reasons)})"
+            distinct_reasons = [r for r in report.reasons if r.strip() != msg.strip()]
+            if distinct_reasons:
+                msg = f"{msg} ({'; '.join(distinct_reasons)})"
         return ProofInspectionResult(
             target=target_clean,
             state=ProofInspectionState.MISSING,

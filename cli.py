@@ -42,6 +42,7 @@ from rich import box
 from rich.align import Align
 from rich.console import Console, Group
 from rich.markdown import Markdown
+from rich.markup import escape
 
 from rich.rule import Rule
 from rich.syntax import Syntax
@@ -757,33 +758,40 @@ def list_proofs_cli(repo_dir: Path) -> int:
     table.add_column("Proof Artifact (Path)", style=f"bold {COLOR_ACCENT}")
 
     for s in summaries:
-        tid = redact_secrets(sanitize_surrogates(s["task_id"]))
-        ts = redact_secrets(sanitize_surrogates(s["timestamp"]))
-        v_status = s["verdict_status"]
-        if v_status == "VERIFIED":
+        tid = escape(redact_secrets(sanitize_surrogates(s["task_id"])))
+        ts = escape(redact_secrets(sanitize_surrogates(s["timestamp"])))
+
+        v_raw = s["verdict_status"]
+        v_clean = redact_secrets(sanitize_surrogates(str(v_raw)))
+        v_escaped = escape(v_clean)
+
+        if v_raw == "VERIFIED":
             v_badge = f"[bold {COLOR_SUCCESS}]{SYM_SUCCESS} VERIFIED[/bold {COLOR_SUCCESS}]"
-        elif v_status == "FAILED":
+        elif v_raw == "FAILED":
             v_badge = f"[bold {COLOR_ERROR}]{SYM_ERROR} FAILED[/bold {COLOR_ERROR}]"
-        elif v_status in ("CANCELLED", "RECOVERY_REQUIRED"):
-            v_badge = f"[bold {COLOR_WARNING}]{SYM_WARNING} {v_status}[/bold {COLOR_WARNING}]"
-        elif s["is_corrupt"] or v_status == "INVALID":
+        elif v_raw in ("CANCELLED", "RECOVERY_REQUIRED"):
+            v_badge = f"[bold {COLOR_WARNING}]{SYM_WARNING} {v_escaped}[/bold {COLOR_WARNING}]"
+        elif s["is_corrupt"] or v_raw == "INVALID":
             v_badge = f"[bold {COLOR_ERROR}]{SYM_ERROR} INVALID[/bold {COLOR_ERROR}]"
         else:
-            v_badge = f"[{COLOR_FG_MUTED}]{v_status}[/{COLOR_FG_MUTED}]"
+            v_badge = f"[{COLOR_FG_MUTED}]{v_escaped}[/{COLOR_FG_MUTED}]"
 
-        tx_status = s["transaction_status"]
-        if tx_status == "COMMITTED":
+        tx_raw = s["transaction_status"]
+        tx_clean = redact_secrets(sanitize_surrogates(str(tx_raw)))
+        tx_escaped = escape(tx_clean)
+
+        if tx_raw == "COMMITTED":
             tx_badge = f"[bold {COLOR_SUCCESS}]COMMITTED[/bold {COLOR_SUCCESS}]"
-        elif tx_status in ("ROLLED_BACK", "CANCELLED"):
-            tx_badge = f"[bold {COLOR_WARNING}]{tx_status}[/bold {COLOR_WARNING}]"
+        elif tx_raw in ("ROLLED_BACK", "CANCELLED"):
+            tx_badge = f"[bold {COLOR_WARNING}]{tx_escaped}[/bold {COLOR_WARNING}]"
         else:
-            tx_badge = f"[{COLOR_FG_MUTED}]{tx_status}[/{COLOR_FG_MUTED}]"
+            tx_badge = f"[{COLOR_FG_MUTED}]{tx_escaped}[/{COLOR_FG_MUTED}]"
 
         try:
             rel_path = str(s["path"].relative_to(repo_dir.resolve()))
         except Exception:
             rel_path = str(s["path"])
-        rel_path = redact_secrets(sanitize_surrogates(rel_path))
+        rel_path = escape(redact_secrets(sanitize_surrogates(rel_path)))
 
         table.add_row(tid, ts, v_badge, tx_badge, rel_path)
 
