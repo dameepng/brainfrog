@@ -713,6 +713,151 @@ class FileProofStore:
         """List and load all ProofArtifact instances in storage."""
         return [self.load(tid) for tid in self.list()]
 
+    def _candidate_sort_key(self, p: Path) -> Tuple[float, int, str]:
+        """Compute deterministic sort key for proof candidate paths.
+
+        Sort hierarchy:
+        1. Effective timestamp:
+           - ISO completed_at or created_at if valid JSON
+           - Filesystem mtime if unparseable / malformed JSON
+        2. Filesystem nanosecond modification time (tiebreaker)
+        3. Filename stem lexicographically (final deterministic tiebreaker)
+
+        Trust Invariant: Newer malformed proofs evaluate with their filesystem mtime
+        so they are ranked ahead of older proofs and never silently skipped.
+        """
+        stat = p.stat()
+        mtime_s = stat.st_mtime
+        mtime_ns = stat.st_mtime_ns
+        t_logical = mtime_s
+
+        try:
+            raw = p.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                task_data = data.get("task", {})
+                if isinstance(task_data, dict):
+                    iso_ts = task_data.get("completed_at") or task_data.get("created_at")
+                    if iso_ts and isinstance(iso_ts, str):
+                        try:
+                            # Normalize UTC / offset ISO timestamps
+                            dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+                            t_logical = dt.timestamp()
+                        except Exception:
+                            pass
+        except Exception:
+            # Malformed JSON: t_logical remains mtime_s, ensuring the corrupt
+            # candidate reflects when it was placed on disk and is surfaced honestly.
+            pass
+
+        return (t_logical, mtime_ns, p.stem)
+
+    def get_latest_proof_path(self) -> Optional[Path]:
+        """Find the path to the newest eligible local JSON proof artifact in storage.
+
+        Deterministically resolves the latest proof using effective timestamps,
+        mtime_ns tiebreaking, and filename stems. If the newest file is malformed,
+        it is still returned so downstream verification can fail closed.
+
+        Confined strictly to self.proofs_dir without path traversal.
+        Returns None if no eligible JSON proofs exist.
+        """
+        if not self.proofs_dir.exists():
+            return None
+
+        candidates = [
+            p for p in self.proofs_dir.glob("*.json")
+            if not p.name.startswith(".") and p.is_file()
+        ]
+        if not candidates:
+            return None
+
+        return max(candidates, key=self._candidate_sort_key)
+
+    def get_latest_task_id(self) -> Optional[str]:
+        """Return the task_id of the newest eligible proof artifact, or None if empty."""
+        latest_path = self.get_latest_proof_path()
+        return latest_path.stem if latest_path is not None else None
+
+    def list_summaries(self) -> List[Dict[str, Any]]:
+        """List summary metadata for all local proof artifacts sorted newest first.
+
+        Safely extracts status and timing without crashing on malformed files.
+        """
+        if not self.proofs_dir.exists():
+            return []
+
+        candidates = [
+            p for p in self.proofs_dir.glob("*.json")
+            if not p.name.startswith(".") and p.is_file()
+        ]
+        if not candidates:
+            return []
+
+        sorted_candidates = sorted(candidates, key=self._candidate_sort_key, reverse=True)
+        summaries: List[Dict[str, Any]] = []
+
+        for p in sorted_candidates:
+            stat = p.stat()
+            mtime_display = datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            try:
+                raw = p.read_text(encoding="utf-8")
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    summaries.append({
+                        "task_id": p.stem,
+                        "path": p,
+                        "timestamp": mtime_display,
+                        "verdict_status": "INVALID",
+                        "transaction_status": "—",
+                        "test_command": "—",
+                        "exit_code": None,
+                        "is_corrupt": True,
+                        "error": "Root JSON element is not an object",
+                    })
+                    continue
+
+                task_data = data.get("task", {}) if isinstance(data.get("task"), dict) else {}
+                verdict_data = data.get("verdict", {}) if isinstance(data.get("verdict"), dict) else {}
+                changes_data = data.get("changes", {}) if isinstance(data.get("changes"), dict) else {}
+                v_data = data.get("verification", {}) if isinstance(data.get("verification"), dict) else {}
+
+                task_id = str(task_data.get("task_id") or p.stem)
+                completed_at = task_data.get("completed_at")
+                created_at = task_data.get("created_at")
+                ts_display = completed_at or created_at or mtime_display
+
+                verdict_status = str(verdict_data.get("status") or "UNKNOWN")
+                tx_status = str(changes_data.get("status") or "—")
+                test_cmd = str(v_data.get("test_command") or "—")
+                exit_code = v_data.get("exit_code")
+
+                summaries.append({
+                    "task_id": task_id,
+                    "path": p,
+                    "timestamp": ts_display,
+                    "verdict_status": verdict_status,
+                    "transaction_status": tx_status,
+                    "test_command": test_cmd,
+                    "exit_code": exit_code,
+                    "is_corrupt": False,
+                    "error": None,
+                })
+            except Exception as exc:
+                summaries.append({
+                    "task_id": p.stem,
+                    "path": p,
+                    "timestamp": mtime_display,
+                    "verdict_status": "INVALID",
+                    "transaction_status": "—",
+                    "test_command": "—",
+                    "exit_code": None,
+                    "is_corrupt": True,
+                    "error": f"Malformed JSON: {exc}",
+                })
+
+        return summaries
+
     def save(
         self,
         proof: ProofArtifact,

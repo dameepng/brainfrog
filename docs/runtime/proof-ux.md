@@ -17,32 +17,52 @@ When an autonomous agent makes changes to code, developers must not rely on conv
 
 ## 1. CLI Commands
 
+### Proof Discovery (`list-proofs`)
+List all local verification proof artifacts in `.brainfrog/proofs/`:
+```bash
+brainfrog list-proofs
+# Or using the alias:
+brainfrog proofs
+# Or flag syntax:
+brainfrog --list-proofs
+brainfrog --proofs
+```
+
 ### Detailed Proof Inspection (`show-proof`)
 Full two-section inspection report displaying historical evidence and live state re-verification:
 ```bash
 brainfrog show-proof <task_id>
+# Or inspect the newest local proof:
+brainfrog show-proof latest
 # Or passing path to proof JSON:
 brainfrog show-proof .brainfrog/proofs/<task_id>.json
 # With workspace disk integrity check:
 brainfrog show-proof <task_id> --check-workspace
+brainfrog show-proof latest --check-workspace
 ```
 
 ### Deterministic Proof Verification Gate (`verify-proof`)
 Fast deterministic verification evaluating structural integrity, gate invariants, and recorded task outcome:
 ```bash
 brainfrog verify-proof <task_id>
+# Or verify the newest local proof:
+brainfrog verify-proof latest
 # Or with workspace disk integrity check:
 brainfrog verify-proof <task_id> --check-workspace
+brainfrog verify-proof latest --check-workspace
 # Alternative flag syntax:
 brainfrog --verify-proof <task_id> [--check-workspace]
+brainfrog --verify-proof latest [--check-workspace]
 ```
 
 ### REPL Slash Commands
 Inside the interactive REPL:
 ```text
-/show-proof <task_id> [--check-workspace]
-/proof <task_id>
-/verify-proof <task_id> [--check-workspace]
+/list-proofs
+/proofs
+/show-proof <task_id | latest> [--check-workspace]
+/proof <task_id | latest>
+/verify-proof <task_id | latest> [--check-workspace]
 ```
 
 ---
