@@ -17,44 +17,48 @@ When an autonomous agent makes changes to code, developers must not rely on conv
 
 ## 1. CLI Commands
 
-### Basic Inspection
+### Detailed Proof Inspection (`show-proof`)
+Full two-section inspection report displaying historical evidence and live state re-verification:
 ```bash
 brainfrog show-proof <task_id>
 # Or passing path to proof JSON:
 brainfrog show-proof .brainfrog/proofs/<task_id>.json
-```
-
-### With Workspace Disk Integrity Verification
-Validates that the current workspace files still match the SHA-256 hashes recorded at task commit time:
-```bash
+# With workspace disk integrity check:
 brainfrog show-proof <task_id> --check-workspace
 ```
 
-### Alternative Flag Syntax
+### Deterministic Proof Verification Gate (`verify-proof`)
+Fast deterministic verification evaluating structural integrity, gate invariants, and recorded task outcome:
 ```bash
-brainfrog --show-proof <task_id> [-r /path/to/repo] [--check-workspace]
+brainfrog verify-proof <task_id>
+# Or with workspace disk integrity check:
+brainfrog verify-proof <task_id> --check-workspace
+# Alternative flag syntax:
+brainfrog --verify-proof <task_id> [--check-workspace]
 ```
 
 ### REPL Slash Commands
 Inside the interactive REPL:
 ```text
-/show-proof <task_id>
-/show-proof <task_id> --check-workspace
+/show-proof <task_id> [--check-workspace]
 /proof <task_id>
+/verify-proof <task_id> [--check-workspace]
 ```
 
 ---
 
 ## 2. Process Exit Codes
 
-`brainfrog show-proof` returns meaningful process exit codes to allow scripting and automated CI gating:
+`brainfrog show-proof` and `brainfrog verify-proof` share the **identical canonical exit code contract** to enable reliable scripting and automated CI gating:
 
 | Exit Code | State | Description |
 |---|---|---|
-| **0** | **VERIFIED** | Proof artifact is valid, all verification gate invariants passed, process exited 0, transaction committed cleanly, and workspace disk matches post-proof hashes (when `--check-workspace` is specified). |
-| **1** | **INVALID** | Proof JSON is malformed, contradictory (e.g. claimed VERIFIED with exit code 1), tampered, or workspace disk integrity verification failed (`--check-workspace` detected modified/deleted files). |
+| **0** | **VERIFIED** | Proof artifact is structurally valid, all verification gate invariants passed, process exited 0, transaction committed cleanly, and workspace disk matches post-proof hashes (when `--check-workspace` is specified). |
+| **1** | **INVALID** | Proof JSON is malformed, contradictory (e.g. claimed VERIFIED with exit code 1), tampered, unknown/missing task verdict, or workspace disk integrity verification failed (`--check-workspace` detected modified/deleted files). |
 | **2** | **INCOMPLETE / MISSING** | The requested proof artifact does not exist on disk, or required verification evidence was not captured. |
 | **3** | **FAILED** | Proof artifact is valid and truthfully records that the task failed its test suite, timed out, was cancelled, or rolled back mutations. |
+
+> **Trust Invariant (Sprint 1.4B)**: Structural validity of a proof artifact is never presented as successful task verification. When a task failed verification criteria, its proof artifact is a structurally valid historical record of that failure. Both `show-proof` and `verify-proof` return exit code **3** (`FAILED`) and clearly label the outcome as `FAILED`, explaining that the historical failure record itself is valid.
 
 ---
 

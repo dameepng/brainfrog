@@ -515,18 +515,40 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
     """Authoritative CLI display of Deterministic Proof Verification Report."""
     cols, rows, box_w, margin, pad = get_layout_dims()
 
+    # Determine canonical outcome styling and labeling
+    outcome = getattr(report, "verification_outcome", "INVALID")
+    if outcome == "VERIFIED":
+        outcome_color = COLOR_SUCCESS
+        outcome_sym = SYM_SUCCESS
+        outcome_label = "VERIFIED"
+        border_color = COLOR_SUCCESS
+    elif outcome == "FAILED":
+        outcome_color = COLOR_ERROR
+        outcome_sym = SYM_ERROR
+        outcome_label = "FAILED (Recorded Task Failure)"
+        border_color = COLOR_ERROR
+    elif outcome == "INCOMPLETE":
+        outcome_color = COLOR_WARNING
+        outcome_sym = SYM_WARNING
+        outcome_label = "INCOMPLETE"
+        border_color = COLOR_WARNING
+    else:
+        outcome_color = COLOR_ERROR
+        outcome_sym = SYM_ERROR
+        outcome_label = "INVALID"
+        border_color = COLOR_ERROR
+
     status_cfg = {
         "VALID": {"color": COLOR_SUCCESS, "sym": SYM_SUCCESS, "label": "VALID"},
         "INVALID": {"color": COLOR_ERROR, "sym": SYM_ERROR, "label": "INVALID"},
         "INCOMPLETE": {"color": COLOR_WARNING, "sym": SYM_WARNING, "label": "INCOMPLETE"},
     }
-    cfg = status_cfg.get(report.overall_status.value, status_cfg["INVALID"])
 
     console.print()
     summary_table = Table(
-        title=f" Deterministic Proof Verification: [{cfg['color']} bold]{cfg['sym']} {cfg['label']}[/{cfg['color']} bold] ",
+        title=f" Deterministic Proof Verification: [{outcome_color} bold]{outcome_sym} {outcome_label}[/{outcome_color} bold] ",
         box=box.ROUNDED,
-        border_style=cfg["color"] if report.overall_status.value == "VALID" else (COLOR_ERROR if report.overall_status.value == "INVALID" else COLOR_WARNING),
+        border_style=border_color,
         header_style=f"bold {COLOR_ACCENT}",
         show_header=False,
         padding=(0, 1),
@@ -535,7 +557,25 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
     summary_table.add_column("Property", style=f"bold {COLOR_FG_PRIMARY}", width=26)
     summary_table.add_column("Value", style=COLOR_FG_SECONDARY)
 
-    summary_table.add_row("Verification Status", f"[{cfg['color']} bold]{cfg['sym']} {cfg['label']}[/{cfg['color']} bold]")
+    summary_table.add_row(
+        "Verification Outcome",
+        f"[{outcome_color} bold]{outcome_sym} {outcome_label}[/{outcome_color} bold]",
+    )
+
+    # Artifact consistency vs task outcome distinction
+    raw_status = getattr(report.overall_status, "value", str(report.overall_status))
+    if raw_status == "VALID":
+        if outcome == "VERIFIED":
+            art_label = "VALID (Invariants & Gate Checks)"
+        else:
+            art_label = "VALID (Historical failure record is intact & consistent)"
+        art_badge = f"[{COLOR_SUCCESS} bold]{SYM_SUCCESS} {art_label}[/{COLOR_SUCCESS} bold]"
+    elif raw_status == "INCOMPLETE":
+        art_badge = f"[{COLOR_WARNING} bold]{SYM_WARNING} INCOMPLETE[/{COLOR_WARNING} bold]"
+    else:
+        art_badge = f"[{COLOR_ERROR} bold]{SYM_ERROR} INVALID[/{COLOR_ERROR} bold]"
+    summary_table.add_row("Artifact Consistency", art_badge)
+
     summary_table.add_row("Target", report.target)
     summary_table.add_row("Task ID", report.task_id or "—")
 
@@ -550,6 +590,19 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
         else (COLOR_WARNING if tx_status in ("ROLLED_BACK", "CANCELLED") else COLOR_ERROR)
     )
     summary_table.add_row("Transaction Outcome", f"[{tx_style} bold]{tx_status}[/{tx_style} bold]")
+
+    # Workspace disk integrity check result if evaluated
+    disk_checks = [
+        c for c in report.checks
+        if c.check_name in ("current_workspace_disk_integrity", "disk_integrity")
+    ]
+    if disk_checks:
+        disk_c = disk_checks[0]
+        disk_valid = getattr(disk_c.status, "value", str(disk_c.status)) == "VALID"
+        d_style = COLOR_SUCCESS if disk_valid else COLOR_ERROR
+        d_sym = SYM_SUCCESS if disk_valid else SYM_ERROR
+        d_label = "MATCH (Disk matches post-proof state)" if disk_valid else "MISMATCH (Mutated after proof generation)"
+        summary_table.add_row("Workspace Disk Integrity", f"[{d_style} bold]{d_sym} {d_label}[/{d_style} bold]")
 
     # Proof artifact path
     if report.proof_path:
@@ -573,6 +626,15 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
 
     console.print(Align.center(summary_table) if cols > 100 else summary_table)
 
+    # Explanation callout for structurally valid failed task
+    if outcome == "FAILED":
+        console.print()
+        fail_note = (
+            "The proof artifact is a structurally valid historical record confirming that the task "
+            "failed verification criteria and changes were rolled back."
+        )
+        print_banner_box(fail_note, level="warning", title="Recorded Verification Failure")
+
     # Breakdown of individual checks
     checks_table = Table(
         title=" Evidential & Consistency Check Breakdown ",
@@ -588,7 +650,8 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
     checks_table.add_column("Diagnostics / Message", style=COLOR_FG_SECONDARY)
 
     for c in report.checks:
-        c_cfg = status_cfg.get(c.status.value, status_cfg["INVALID"])
+        c_status = getattr(c.status, "value", str(c.status))
+        c_cfg = status_cfg.get(c_status, status_cfg["INVALID"])
         badge = f"[{c_cfg['color']} bold]{c_cfg['sym']} {c_cfg['label']}[/{c_cfg['color']} bold]"
         checks_table.add_row(c.check_name, badge, c.message)
 
@@ -617,22 +680,21 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
 
 
 def verify_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = False) -> int:
-    """CLI handler for deterministic proof verification. Returns exit code 0 (VALID), 1 (INVALID), 2 (INCOMPLETE)."""
+    """CLI handler for deterministic proof verification.
+
+    Returns:
+      0: VERIFIED (proof valid and recorded verdict VERIFIED)
+      1: INVALID (corrupted, contradictory, tampered, disk integrity failure, or unknown verdict)
+      2: INCOMPLETE / MISSING (proof file missing or required evidence incomplete)
+      3: FAILED (proof artifact validly records a failed, cancelled, or rolled-back task)
+    """
     from core.runtime.proof_verifier import (
         DeterministicProofVerifier,
-        ProofVerificationStatus,
     )
     verifier = DeterministicProofVerifier(repo_dir, verify_disk_integrity=check_workspace)
     report = verifier.verify(target)
     print_proof_verification_report(report, repo_dir)
-
-    if report.overall_status == ProofVerificationStatus.VALID:
-        return 0
-    elif report.overall_status == ProofVerificationStatus.INVALID:
-        return 1
-    elif report.overall_status == ProofVerificationStatus.INCOMPLETE:
-        return 2
-    return 1
+    return report.exit_code
 
 
 def show_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = False) -> int:

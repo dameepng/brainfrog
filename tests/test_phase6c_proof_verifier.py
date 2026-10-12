@@ -254,7 +254,7 @@ def test_case_2_valid_failed_rolled_back_proof(tmp_path: Path) -> None:
     assert report.transaction_status == "ROLLED_BACK"
 
     exit_code = verify_proof_cli(tmp_path, task_id)
-    assert exit_code == 0
+    assert exit_code == 3  # Updated Sprint 1.4B: structurally valid FAILED proof exits with code 3 (FAILED)
 
     _assert_zero_workspace_mutations(tmp_path, before)
 
