@@ -276,7 +276,7 @@ WHATSAPP_ENABLED=false
 # BRAINFROG_DEV_URL=http://localhost:3000
 ```
 
-### 4. Running BrainFrog
+### 3. Running BrainFrog
 
 #### Interactive REPL Mode — Recommended
 ```bash
