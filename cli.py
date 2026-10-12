@@ -646,6 +646,8 @@ def print_task_verification_report(result: Any, repo_dir: Path) -> None:
 
 def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
     """Authoritative CLI display of Deterministic Proof Verification Report."""
+    from core.runtime.proof import redact_secrets
+
     cols, rows, box_w, margin, pad = get_layout_dims()
 
     # Determine canonical outcome styling and labeling
@@ -709,20 +711,28 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
         art_badge = f"[{COLOR_ERROR} bold]{SYM_ERROR} INVALID[/{COLOR_ERROR} bold]"
     summary_table.add_row("Artifact Consistency", art_badge)
 
-    summary_table.add_row("Target", report.target)
-    summary_table.add_row("Task ID", report.task_id or "—")
+    target_display = escape(redact_secrets(sanitize_surrogates(str(report.target))))
+    summary_table.add_row("Target", target_display)
+
+    task_id_raw = report.task_id or "—"
+    task_id_display = escape(redact_secrets(sanitize_surrogates(str(task_id_raw))))
+    summary_table.add_row("Task ID", task_id_display)
 
     # Distinct Verdict vs Transaction Outcome
-    v_val = report.verdict_status or "UNKNOWN"
-    v_style = COLOR_SUCCESS if v_val == "VERIFIED" else COLOR_ERROR
-    summary_table.add_row("Task Verdict", f"[{v_style} bold]{v_val}[/{v_style} bold]")
+    v_raw = report.verdict_status or "UNKNOWN"
+    v_clean = redact_secrets(sanitize_surrogates(str(v_raw)))
+    v_escaped = escape(v_clean)
+    v_style = COLOR_SUCCESS if v_clean == "VERIFIED" else COLOR_ERROR
+    summary_table.add_row("Task Verdict", f"[{v_style} bold]{v_escaped}[/{v_style} bold]")
 
-    tx_status = (report.transaction_status or "UNKNOWN").upper()
+    tx_raw = str(report.transaction_status or "UNKNOWN").upper()
+    tx_clean = redact_secrets(sanitize_surrogates(tx_raw))
+    tx_escaped = escape(tx_clean)
     tx_style = (
-        COLOR_SUCCESS if tx_status == "COMMITTED"
-        else (COLOR_WARNING if tx_status in ("ROLLED_BACK", "CANCELLED") else COLOR_ERROR)
+        COLOR_SUCCESS if tx_clean == "COMMITTED"
+        else (COLOR_WARNING if tx_clean in ("ROLLED_BACK", "CANCELLED") else COLOR_ERROR)
     )
-    summary_table.add_row("Transaction Outcome", f"[{tx_style} bold]{tx_status}[/{tx_style} bold]")
+    summary_table.add_row("Transaction Outcome", f"[{tx_style} bold]{tx_escaped}[/{tx_style} bold]")
 
     # Workspace disk integrity check result if evaluated
     disk_checks = [
@@ -743,17 +753,20 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
             rel_path = str(Path(report.proof_path).relative_to(repo_dir.resolve()))
         except Exception:
             rel_path = str(report.proof_path)
-        summary_table.add_row("Proof Artifact (JSON)", f"[bold {COLOR_ACCENT}]{rel_path}[/bold {COLOR_ACCENT}]")
+        rel_path_escaped = escape(redact_secrets(sanitize_surrogates(rel_path)))
+        summary_table.add_row("Proof Artifact (JSON)", f"[bold {COLOR_ACCENT}]{rel_path_escaped}[/bold {COLOR_ACCENT}]")
     else:
         summary_table.add_row("Proof Artifact (JSON)", f"[bold {COLOR_ERROR}]File not found[/bold {COLOR_ERROR}]")
 
     # Git Provenance
     if report.is_git:
         sha_display = report.commit_sha or "none"
-        summary_table.add_row("Git Commit SHA", f"[bold {COLOR_INFO}]{sha_display}[/bold {COLOR_INFO}]")
+        sha_escaped = escape(redact_secrets(sanitize_surrogates(sha_display)))
+        summary_table.add_row("Git Commit SHA", f"[bold {COLOR_INFO}]{sha_escaped}[/bold {COLOR_INFO}]")
         if report.provenance_summary:
             branch = report.provenance_summary.get("branch") or "detached"
-            summary_table.add_row("Git Branch", f"{branch}")
+            branch_escaped = escape(redact_secrets(sanitize_surrogates(str(branch))))
+            summary_table.add_row("Git Branch", branch_escaped)
     else:
         summary_table.add_row("Git Provenance", "Non-git workspace")
 
@@ -786,7 +799,8 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
         c_status = getattr(c.status, "value", str(c.status))
         c_cfg = status_cfg.get(c_status, status_cfg["INVALID"])
         badge = f"[{c_cfg['color']} bold]{c_cfg['sym']} {c_cfg['label']}[/{c_cfg['color']} bold]"
-        checks_table.add_row(c.check_name, badge, c.message)
+        msg_clean = escape(redact_secrets(sanitize_surrogates(c.message)))
+        checks_table.add_row(escape(sanitize_surrogates(c.check_name)), badge, msg_clean)
 
     console.print()
     console.print(Align.center(checks_table) if cols > 100 else checks_table)
@@ -796,7 +810,7 @@ def print_proof_verification_report(report: Any, repo_dir: Path) -> None:
         console.print()
         r_title = "Verification Failure Reasons" if report.is_invalid else "Verification Incompleteness Reasons"
         r_level = "error" if report.is_invalid else "warning"
-        reasons_text = "\n".join(f"• {r}" for r in report.reasons)
+        reasons_text = "\n".join(f"• {escape(redact_secrets(sanitize_surrogates(r)))}" for r in report.reasons)
         print_banner_box(reasons_text, level=r_level, title=r_title)
 
     # Execution authenticity boundary disclaimer

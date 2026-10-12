@@ -288,7 +288,7 @@ def print_proof_inspection(
     header_text.append(f"{cfg['sym']} Task Verdict: ", style=f"bold {cfg['color']}")
     header_text.append(f"{cfg['title']}\n", style=f"bold {cfg['color']}")
     header_text.append("Target: ", style=f"bold {COLOR_MUTED}")
-    header_text.append(f"{result.target}  ·  ", style=COLOR_FG)
+    header_text.append(f"{redact_secrets(result.target)}  ·  ", style=COLOR_FG)
     header_text.append("Workspace: ", style=f"bold {COLOR_MUTED}")
     header_text.append(f"{result.workspace}\n", style=COLOR_FG)
 
@@ -296,9 +296,9 @@ def print_proof_inspection(
         header_text.append("Description: ", style=f"bold {COLOR_MUTED}")
         header_text.append(f"{redact_secrets(result.proof.task.description)}\n", style=f"italic {COLOR_FG}")
         header_text.append("Task ID: ", style=f"bold {COLOR_MUTED}")
-        header_text.append(f"{result.proof.task.task_id}  ·  ", style=COLOR_ACCENT)
+        header_text.append(f"{redact_secrets(result.proof.task.task_id)}  ·  ", style=COLOR_ACCENT)
         header_text.append("Session: ", style=f"bold {COLOR_MUTED}")
-        header_text.append(f"{result.proof.task.session_id or 'none'}  ·  ", style=COLOR_FG)
+        header_text.append(f"{redact_secrets(result.proof.task.session_id or 'none')}  ·  ", style=COLOR_FG)
         header_text.append("Duration: ", style=f"bold {COLOR_MUTED}")
         header_text.append(f"{result.proof.task.duration_ms} ms", style=COLOR_FG)
 
@@ -319,7 +319,7 @@ def print_proof_inspection(
         err_msg = result.error_message or "Proof artifact could not be loaded."
         console.print(
             Panel(
-                Text(f"• {err_msg}", style=COLOR_ERROR),
+                Text(f"• {redact_secrets(err_msg)}", style=COLOR_ERROR),
                 title="[bold red]Proof Inspection Failure[/bold red]",
                 border_style=COLOR_ERROR,
                 box=box.ROUNDED,
@@ -342,15 +342,19 @@ def print_proof_inspection(
     overview_table.add_column("Value")
 
     # Stored Verdict & Reason
-    v_color = COLOR_SUCCESS if proof.verdict.status == "VERIFIED" else COLOR_ERROR
-    overview_table.add_row("Stored Verdict", f"[{v_color} bold]{proof.verdict.status}[/{v_color} bold]")
-    overview_table.add_row("Authoritative Reason", redact_secrets(proof.verdict.reason))
+    v_clean = redact_secrets(proof.verdict.status or "UNKNOWN")
+    v_escaped = escape(v_clean)
+    v_color = COLOR_SUCCESS if v_clean == "VERIFIED" else COLOR_ERROR
+    overview_table.add_row("Stored Verdict", f"[{v_color} bold]{v_escaped}[/{v_color} bold]")
+    overview_table.add_row("Authoritative Reason", escape(redact_secrets(proof.verdict.reason or "")))
 
     # Transaction Outcome
-    tx_status = (proof.changes.status or "UNKNOWN").upper()
-    tx_color = COLOR_SUCCESS if tx_status == "COMMITTED" else (COLOR_WARNING if tx_status in ("ROLLED_BACK", "CANCELLED") else COLOR_ERROR)
-    overview_table.add_row("Transaction ID", proof.changes.transaction_id or "(none)")
-    overview_table.add_row("Transaction Status", f"[{tx_color} bold]{tx_status}[/{tx_color} bold]")
+    tx_raw = str(proof.changes.status or "UNKNOWN").upper()
+    tx_clean = redact_secrets(tx_raw)
+    tx_escaped = escape(tx_clean)
+    tx_color = COLOR_SUCCESS if tx_clean == "COMMITTED" else (COLOR_WARNING if tx_clean in ("ROLLED_BACK", "CANCELLED") else COLOR_ERROR)
+    overview_table.add_row("Transaction ID", escape(redact_secrets(proof.changes.transaction_id or "(none)")))
+    overview_table.add_row("Transaction Status", f"[{tx_color} bold]{tx_escaped}[/{tx_color} bold]")
 
     # Proof artifact on disk
     if result.proof_path:
@@ -359,16 +363,17 @@ def print_proof_inspection(
             p_display = str(rel_p)
         except Exception:
             p_display = str(result.proof_path)
-        overview_table.add_row("Proof File (JSON)", f"[bold {COLOR_ACCENT}]{p_display}[/bold {COLOR_ACCENT}]")
+        p_escaped = escape(redact_secrets(p_display))
+        overview_table.add_row("Proof File (JSON)", f"[bold {COLOR_ACCENT}]{p_escaped}[/bold {COLOR_ACCENT}]")
 
     # Git Provenance
     if proof.provenance and proof.provenance.is_git:
         prov = proof.provenance
-        overview_table.add_row("Git Branch", prov.branch or "detached")
-        overview_table.add_row("Initial HEAD SHA", prov.initial_head_sha or "unknown")
-        overview_table.add_row("Final HEAD SHA", prov.final_head_sha or "unknown")
+        overview_table.add_row("Git Branch", escape(redact_secrets(prov.branch or "detached")))
+        overview_table.add_row("Initial HEAD SHA", escape(redact_secrets(prov.initial_head_sha or "unknown")))
+        overview_table.add_row("Final HEAD SHA", escape(redact_secrets(prov.final_head_sha or "unknown")))
         if prov.commit_sha:
-            overview_table.add_row("Task Commit SHA", f"[bold {COLOR_INFO}]{prov.commit_sha}[/bold {COLOR_INFO}]")
+            overview_table.add_row("Task Commit SHA", f"[bold {COLOR_INFO}]{escape(redact_secrets(prov.commit_sha))}[/bold {COLOR_INFO}]")
         overview_table.add_row("Dirty Before Task", str(prov.was_dirty_before))
     else:
         overview_table.add_row("Git Provenance", "Non-Git Workspace or Metadata Unavailable")
@@ -379,7 +384,7 @@ def print_proof_inspection(
     console.print()
     raw_changes_stat = getattr(proof.changes, "status", None) if getattr(proof, "changes", None) else None
     if raw_changes_stat:
-        c_stat_str = str(raw_changes_stat).upper()
+        c_stat_str = redact_secrets(str(raw_changes_stat)).upper()
         if c_stat_str == "COMMITTED":
             status_badge = f"[{COLOR_SUCCESS} bold][COMMITTED][/{COLOR_SUCCESS} bold]"
         elif c_stat_str == "ROLLED_BACK":
@@ -413,7 +418,7 @@ def print_proof_inspection(
             path_display = escape(redact_secrets(f.path))
             if is_sensitive_path(f.path):
                 path_display += " [italic yellow](protected)[/italic yellow]"
-            files_table.add_row(path_display, escape(f.operation), b_hash, a_hash, f"{d_str} B")
+            files_table.add_row(path_display, escape(redact_secrets(f.operation)), b_hash, a_hash, f"{d_str} B")
     else:
         if raw_changes_stat and str(raw_changes_stat).upper() == "ROLLED_BACK":
             files_table.add_row("(File modifications rolled back)", "—", "—", "—", "0 B")
@@ -438,7 +443,8 @@ def print_proof_inspection(
 
     v_ev = proof.verification
     cmd_str = v_ev.test_command or "(no test command configured)"
-    exec_table.add_row("Verification Command", f"[bold {COLOR_FG}]{cmd_str}[/bold {COLOR_FG}]")
+    cmd_clean = escape(redact_secrets(cmd_str))
+    exec_table.add_row("Verification Command", f"[bold {COLOR_FG}]{cmd_clean}[/bold {COLOR_FG}]")
 
     exit_str = str(v_ev.exit_code) if v_ev.exit_code is not None else "(not run)"
     exit_color = COLOR_SUCCESS if v_ev.exit_code == 0 else COLOR_ERROR
@@ -552,13 +558,13 @@ def print_proof_inspection(
             for c in rep.checks:
                 c_col = COLOR_SUCCESS if c.status == ProofVerificationStatus.VALID else COLOR_ERROR
                 c_lbl = "VALID" if c.status == ProofVerificationStatus.VALID else c.status.value
-                check_table.add_row(c.check_name, f"[{c_col} bold]{c_lbl}[/{c_col} bold]", c.message)
+                check_table.add_row(escape(c.check_name), f"[{c_col} bold]{c_lbl}[/{c_col} bold]", escape(redact_secrets(c.message)))
             console.print(check_table)
 
         # Diagnostic reasons if invalid or incomplete
         if rep.reasons:
             console.print()
-            r_reasons = "\n".join(f"• {r}" for r in rep.reasons)
+            r_reasons = "\n".join(f"• {redact_secrets(r)}" for r in rep.reasons)
             console.print(
                 Panel(
                     Text(r_reasons, style=COLOR_ERROR if rep.is_invalid else COLOR_WARNING),
@@ -591,25 +597,25 @@ def format_proof_inspection_text(result: ProofInspectionResult) -> str:
     lines.append("=================================================================")
     lines.append(f"BrainFrog Proof Inspection: {result.state.value}")
     lines.append("=================================================================")
-    lines.append(f"Target: {result.target}")
+    lines.append(f"Target: {redact_secrets(result.target)}")
     lines.append(f"Workspace: {result.workspace}")
     lines.append(f"State: {result.state.value}")
     lines.append(f"Process Exit Code: {result.exit_code}")
 
     if result.error_message:
-        lines.append(f"Error: {result.error_message}")
+        lines.append(f"Error: {redact_secrets(result.error_message)}")
 
     if result.proof:
         p = result.proof
         lines.append("")
         lines.append("[Stored Proof Artifact Data]")
-        lines.append(f"Task ID: {p.task.task_id}")
+        lines.append(f"Task ID: {redact_secrets(p.task.task_id)}")
         lines.append(f"Description: {redact_secrets(p.task.description)}")
-        lines.append(f"Stored Verdict: {p.verdict.status}")
+        lines.append(f"Stored Verdict: {redact_secrets(p.verdict.status)}")
         lines.append(f"Authoritative Reason: {redact_secrets(p.verdict.reason)}")
-        lines.append(f"Transaction ID: {p.changes.transaction_id or 'none'}")
+        lines.append(f"Transaction ID: {redact_secrets(p.changes.transaction_id or 'none')}")
         lines.append(f"Transaction Status: {p.changes.status}")
-        lines.append(f"Verification Command: {p.verification.test_command or 'none'}")
+        lines.append(f"Verification Command: {redact_secrets(p.verification.test_command or 'none')}")
         lines.append(f"Exit Code: {p.verification.exit_code}")
         if p.verification.stdout_summary:
             lines.append(f"Stdout: {redact_secrets(p.verification.stdout_summary)}")
@@ -621,7 +627,7 @@ def format_proof_inspection_text(result: ProofInspectionResult) -> str:
             for f in p.changes.files:
                 b = f.before_sha256[:12] if f.before_sha256 else "none"
                 a = f.after_sha256[:12] if f.after_sha256 else "none"
-                lines.append(f"  - {f.path} [{f.operation}] (before: {b}, after: {a}, delta: {f.byte_count_delta}B)")
+                lines.append(f"  - {redact_secrets(f.path)} [{f.operation}] (before: {b}, after: {a}, delta: {f.byte_count_delta}B)")
         else:
             lines.append("Changed Files: (none)")
 
@@ -634,7 +640,7 @@ def format_proof_inspection_text(result: ProofInspectionResult) -> str:
         if result.report.reasons:
             lines.append("Reasons:")
             for r in result.report.reasons:
-                lines.append(f"  - {r}")
+                lines.append(f"  - {redact_secrets(r)}")
 
     lines.append("")
     lines.append("Notice: Proof artifacts are unauthenticated JSON records evaluated via deterministic consistency.")
