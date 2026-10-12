@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import io
 import os
 import shutil
 import subprocess
@@ -25,6 +26,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from rich.console import Console
 
 import cli
 from cli import main as cli_main, show_proof_cli, verify_proof_cli
@@ -578,6 +581,80 @@ class TestVerifyProofCLISemantics(TestProofInspectionUX):
         """8. Missing target argument -> usage message and exit 1."""
         with patch("sys.argv", ["brainfrog", "-r", str(self.workspace), "verify-proof"]):
             self.assertEqual(cli_main(), 1)
+
+    def test_verify_proof_cli_markup_injection_and_secret_redaction(self) -> None:
+        """9. verify-proof output must not crash on adversarial markup and must redact secrets."""
+        s_key = "sk-ant-api03-abcdef12345678901234567890"
+        s_pat = "ghp_abcdef123456789012345678901234"
+        s_pwd = "my_secret_password_123"
+        task_id = f"task_{s_key}"
+
+        self._create_and_save_proof(
+            task_id,
+            verdict_status="VERIFIED",
+            tx_status="COMMITTED",
+            exit_code=0,
+            description=f"Task with password={s_pwd} and token={s_pat}",
+        )
+
+        # Inject adversarial Rich markup tags into transaction status and verification command
+        proof_file = self.workspace / ".brainfrog" / "proofs" / f"{task_id}.json"
+        data = json.loads(proof_file.read_text(encoding="utf-8"))
+        data["changes"]["status"] = "[italic]COMMITTED[/italic]"
+        data["verification"]["test_command"] = "pytest -k '[secret_token_bracket_filter]'"
+        proof_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        buf = io.StringIO()
+        with patch.object(cli, "console", Console(file=buf, force_terminal=True)):
+            code = verify_proof_cli(self.workspace, task_id)
+
+        rendered = buf.getvalue()
+        # Must not crash with unhandled MarkupError
+        self.assertIn(code, (0, 1))
+        # Raw secret tokens must never appear in terminal output
+        self.assertNotIn(s_key, rendered)
+        self.assertNotIn(s_pat, rendered)
+        self.assertNotIn(s_pwd, rendered)
+        # Secret redaction placeholder must be present
+        self.assertIn("[REDACTED_SECRET]", rendered)
+
+    def test_show_proof_cli_markup_injection_and_secret_redaction(self) -> None:
+        """10. show-proof output must not crash on adversarial markup and must redact secrets."""
+        s_key = "sk-ant-api03-abcdef12345678901234567890"
+        s_pat = "ghp_abcdef123456789012345678901234"
+        s_pwd = "my_secret_password_123"
+        task_id = f"task_{s_key}"
+
+        self._create_and_save_proof(
+            task_id,
+            verdict_status="VERIFIED",
+            tx_status="COMMITTED",
+            exit_code=0,
+            description=f"Task with password={s_pwd} and token={s_pat}",
+        )
+
+        proof_file = self.workspace / ".brainfrog" / "proofs" / f"{task_id}.json"
+        data = json.loads(proof_file.read_text(encoding="utf-8"))
+        data["changes"]["transaction_id"] = f"tx_[bold]{s_pat}[/bold]"
+        data["changes"]["status"] = "[italic]COMMITTED[/italic]"
+        data["verification"]["test_command"] = "pytest -k '[secret_token_bracket_filter]'"
+        proof_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        buf = io.StringIO()
+        with patch.object(cli, "console", Console(file=buf, force_terminal=True)):
+            code = show_proof_cli(self.workspace, task_id)
+
+        rendered = buf.getvalue()
+        # Must not crash with unhandled MarkupError
+        self.assertIn(code, (0, 1))
+        # Raw secret tokens must never appear in terminal output
+        self.assertNotIn(s_key, rendered)
+        self.assertNotIn(s_pat, rendered)
+        self.assertNotIn(s_pwd, rendered)
+        # Secret redaction placeholder must be present
+        self.assertIn("[REDACTED_SECRET]", rendered)
+        # Legitimate header/section text remains readable
+        self.assertIn("Task Verdict", rendered)
 
 
 if __name__ == "__main__":
