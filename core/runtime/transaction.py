@@ -1766,6 +1766,25 @@ class TransactionRecoveryManager:
 
         initial_status = tx.status
 
+        # Validate recorded workspace against recovery manager workspace
+        if tx.workspace and str(tx.workspace).strip():
+            recorded_ws = Path(tx.workspace).resolve()
+            if self.workspace.resolve() != recorded_ws:
+                err = (
+                    f"Transaction '{tx.id}' workspace mismatch: recorded workspace is '{recorded_ws}', "
+                    f"but recovery manager workspace is '{self.workspace.resolve()}'."
+                )
+                logger.error(err)
+                return RecoveryResult(
+                    transaction_id=tx.id,
+                    previous_status=initial_status,
+                    final_status=TransactionStatus.FAILED,
+                    recovered=False,
+                    rolled_back=False,
+                    ambiguous=True,
+                    error=err,
+                )
+
         # 1. Idempotency check: Already terminal
         if tx.is_terminal:
             return RecoveryResult(

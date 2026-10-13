@@ -18,6 +18,7 @@ from core.channels.whatsapp import MockWhatsAppTransport, WhatsAppChannel, Whats
 
 from .runtime import BrainFrogRuntime
 from .session import session_manager
+from .workspace_registry import WorkspaceRegistry
 
 
 class BrainFrogGateway:
@@ -30,9 +31,13 @@ class BrainFrogGateway:
         repo_dir: Optional[Path] = None,
         auto_configure_channels: bool = True,
         whatsapp_transport: Optional[WhatsAppTransport] = None,
+        workspace_registry: Optional[WorkspaceRegistry] = None,
     ) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
-        self.runtime = runtime or BrainFrogRuntime(repo_dir=self.repo_dir)
+        self.runtime = runtime or BrainFrogRuntime(
+            repo_dir=self.repo_dir,
+            workspace_registry=workspace_registry,
+        )
         self.channels: List[BaseChannel] = list(channels or [])
 
         if auto_configure_channels and not self.channels:
@@ -97,6 +102,7 @@ class BrainFrogGateway:
             "channels_count": len(self.channels),
             "channels": channels_info,
             "active_sessions_count": session_manager.count(),
+            "registered_workspaces_count": len(getattr(self.runtime, "workspace_registry", None).list_workspaces()) if getattr(self.runtime, "workspace_registry", None) else 1,
             "default_backend": getattr(self.runtime, "default_backend", "jev"),
             "default_provider": getattr(self.runtime, "default_provider", "auto"),
         }

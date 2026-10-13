@@ -329,10 +329,22 @@ def resume_work(
 
             ws_candidate = work_ws or rec_ws
             if not ws_candidate:
-                if hasattr(work_store, "repo_dir") and getattr(work_store, "repo_dir", None):
-                    ws_candidate = work_store.repo_dir
-                elif hasattr(work_store, "works_dir") and getattr(work_store, "works_dir", None):
-                    ws_candidate = Path(work_store.works_dir).parent.parent
+                fail_msg = "Recovery failed: work has no recorded workspace. Cannot establish canonical workspace for recovery."
+                try:
+                    work = work_store.save(work.transition(
+                        WorkStatus.FAILED,
+                        failure=WorkFailure(
+                            code="UNVERIFIED_RECOVERY",
+                            stage="verifying",
+                            summary=fail_msg,
+                            retryable=False,
+                        ),
+                        resume_metadata=d_meta,
+                    ))
+                except (InvalidWorkTransition, StaleWorkRevisionError):
+                    work = work_store.get(work_id) or work
+                _release_claim(work_store, work_id, claim_id)
+                return False, fail_msg, work
 
             ws_path = Path(ws_candidate).resolve() if ws_candidate else None
             if ws_path is None or not ws_path.exists():

@@ -270,6 +270,7 @@ class SessionState:
     active_skill: Optional[str] = None
     active_model: Optional[str] = None
     active_provider: Optional[str] = None
+    active_workspace: Optional[str] = None
     plan_context: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     history: List[Dict[str, Any]] = field(default_factory=list)
@@ -382,6 +383,7 @@ class SessionState:
             "active_skill": self.active_skill,
             "active_model": self.active_model,
             "active_provider": self.active_provider,
+            "active_workspace": self.active_workspace,
             "plan_context": self.plan_context,
             "metadata": dict(self.metadata),
             "history": list(self.history),
@@ -446,6 +448,7 @@ class SessionState:
             active_skill=data.get("active_skill"),
             active_model=data.get("active_model"),
             active_provider=data.get("active_provider"),
+            active_workspace=data.get("active_workspace"),
             plan_context=data.get("plan_context"),
             metadata=dict(data.get("metadata", {})),
             history=normalized_history,
