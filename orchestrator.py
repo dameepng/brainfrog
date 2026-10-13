@@ -36,9 +36,14 @@ from security.git_guard import (  # pyright: ignore[reportMissingImports]
 )
 from core.runtime.process import HardenedProcessResult, run_hardened_subprocess
 from core.runtime.transaction import (
+    OperationStatus,
     TransactionCoordinator,
     TransactionResult,
     TransactionStatus,
+)
+from core.runtime.git_staging import (
+    stage_authorized_targets,
+    unstage_target_paths,
 )
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -656,6 +661,19 @@ def _format_diff_breakdown(summary: CommitDiffSummary, max_files: int = 10) -> L
     return lines
 
 
+def _get_git_head_sha(repo_dir: Path | str) -> Optional[str]:
+    """Return HEAD commit SHA if it exists, or None for an unborn branch."""
+    proc = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=str(repo_dir),
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return proc.stdout.decode("utf-8", errors="replace").strip()
+    return None
+
+
 # ---------------------------------------------------------------------------
 # System 1 gate questions (TypeSafe best practices applied)
 #
@@ -835,6 +853,7 @@ class Orchestrator:
         self.cfg = config
         self.config = config
         self.log_fn = log_fn
+        self._in_production_step: bool = False
         if self.cfg.execution_contract is not None:
             from system2.antigravity_client import AntigravitySystem2Client
             if isinstance(self.s2, AntigravitySystem2Client):
@@ -1485,6 +1504,14 @@ class Orchestrator:
     def _run_step(self, step: PlanStep, sensitive: bool = False) -> StepResult:
         if self.cfg.mode == "plan":
             raise PermissionError("Eksekusi langkah modifikasi kode dilarang dalam mode Plan.")
+        self._in_production_step = True
+        self.cfg.last_transaction_result = None
+        try:
+            return self._execute_step(step, sensitive=sensitive)
+        finally:
+            self._in_production_step = False
+
+    def _execute_step(self, step: PlanStep, sensitive: bool = False) -> StepResult:
         self._log(f"=== Step {step.id}: {step.description} ===")
         if self.cfg.execution_contract is not None:
             self.cfg.execution_contract.capabilities.require("network.access")
@@ -1746,7 +1773,7 @@ class Orchestrator:
                         step=step,
                         diff_snippet=diff_snippet,
                     )
-                    return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion)
+                    return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion, tx_result=tx_res)
 
                 # Can retry if within retry budget and Jev has not flagged retries as futile
                 can_retry = not retry_exceeded and retries < self.cfg.max_retries
@@ -1853,7 +1880,7 @@ class Orchestrator:
                         step=step,
                         diff_snippet=diff_snippet,
                     )
-                    return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion)
+                    return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion, tx_result=tx_res)
 
                 # Final failure path: tests failed, retries exhausted -> ROLLBACK!
                 self._log(f"[orchestrator] ⚠️ Step '{step.description}' failed verification; rolling back all task mutations...")
@@ -2245,6 +2272,46 @@ class Orchestrator:
                 self._log(f"[memory] ⚠️ Auto-reflection failed ({e}), continuing without saving")
             return None
 
+    def _get_authorized_targets_for_step(
+        self,
+        step: Optional[PlanStep] = None,
+        tx_result: Optional[TransactionResult] = None,
+    ) -> List[Any]:
+        """Collect explicitly authorized targets for the current step."""
+        active_tx = tx_result if tx_result is not None else self.cfg.last_transaction_result
+
+        if active_tx is not None:
+            # Validate transaction provenance strictly using project enums and invariants
+            is_committed = getattr(active_tx, "committed", False) is True
+            status = getattr(active_tx, "status", None)
+            is_rolled_back = getattr(active_tx, "rolled_back", False) is True
+
+            if not is_committed or status != TransactionStatus.COMMITTED or is_rolled_back:
+                # Never treat a rolled-back, failed, unverified, or otherwise uncommitted transaction as authorization
+                return []
+
+            # Only return operations that were actually successfully executed
+            executed_ops = []
+            for op in (active_tx.operations or ()):
+                op_status = getattr(op, "status", None)
+                if hasattr(op_status, "value"):
+                    op_status = op_status.value
+                if op_status == OperationStatus.EXECUTED.value:
+                    executed_ops.append(op)
+            return executed_ops
+
+        # If there is no transaction result:
+        # In production staging, speculative step.files fallback is strictly prohibited!
+        if getattr(self, "_in_production_step", False):
+            return []
+
+        # For non-production contexts (direct unit test invocation of _finalize_pr without transactions),
+        # allow step.files fallback if explicit
+        if step and step.files:
+            return list(step.files)
+
+        return []
+
     def _finalize_pr(
         self,
         step: PlanStep,
@@ -2253,6 +2320,7 @@ class Orchestrator:
         sensitive: bool = False,
         gate_result: Optional[Any] = None,
         suggestion: Optional[str] = None,
+        tx_result: Optional[TransactionResult] = None,
     ) -> StepResult:
         if self.cfg.execution_contract is not None:
             self._log("Remote Git push skipped: contract does not authorize Git execution.")
@@ -2285,45 +2353,81 @@ class Orchestrator:
         commit_body = pr_copy.get("body", "").strip()
         commit_msg = f"{commit_title}\n\n{commit_body}" if commit_body else commit_title
 
-        # Protect .gitignore & purge tracked sensitive directories/caches
+        # Protect .gitignore (sensitive-file protection without index mutation)
         ensure_gitignore_security(self.cfg.repo_dir)
-        purge_tracked_sensitive_files(self.cfg.repo_dir)
+
+        # Stage only explicitly authorized targets
+        effective_tx = tx_result if tx_result is not None else self.cfg.last_transaction_result
+        targets = self._get_authorized_targets_for_step(step, tx_result=effective_tx)
+        if not targets:
+            self._log(f"[git/security] 🚨 [bold red]COMMIT & PUSH BLOCKED — NO AUTHORIZED TARGETS[/bold red]")
+            return StepResult(step, "rejected", retries, "Git Staging Security Violation: No authorized targets for step")
+
+        allow_identical = (effective_tx is None)
 
         try:
-            _run(["git", "add", "-A"], self.cfg.repo_dir)
+            stage_res = stage_authorized_targets(
+                self.cfg.repo_dir,
+                targets,
+                last_tx_result=effective_tx,
+                allow_pre_staged_identical=allow_identical,
+            )
+            if not stage_res.success:
+                self._log(f"[git/security] 🚨 [bold red]COMMIT & PUSH BLOCKED — STAGING VIOLATION[/bold red]")
+                self._log(f"[git/security]   • {stage_res.error}")
+                return StepResult(step, "rejected", retries, f"Git Staging Security Violation: {stage_res.error}")
 
-            # 🛡️ Git Secret Guard — Pre-commit scan
-            scan = scan_staged_changes(self.cfg.repo_dir)
-            if not scan.is_clean:
-                unstage_staged_changes(self.cfg.repo_dir)
-                self._log("[git/security] 🚨 [bold red]COMMIT & PUSH BLOCKED — SECRET LEAK DETECTED[/bold red]")
-                for finding in scan.findings:
-                    loc = f"{finding.file_path}:{finding.line_number}" if finding.line_number else finding.file_path
-                    self._log(f"[git/security]   • [{finding.severity}] {finding.rule} in [bold yellow]{loc}[/bold yellow]")
-                    self._log(f"[git/security]     Snippet: [dim]{finding.redacted_snippet}[/dim]")
-                self._log("[git/security] ❌ Aborted commit and push to prevent security incident.")
-                return StepResult(step, "escalated", retries, f"Security Violation: {scan.summary}")
+            # Exception-safe staging lifecycle
+            commit_confirmed = False
+            head_before = _get_git_head_sha(self.cfg.repo_dir)
 
-            # Capture staged diff summary before committing
-            diff_summary = _staged_diff_summary(self.cfg.repo_dir)
+            try:
+                # 🛡️ Git Secret Guard — Pre-commit scan
+                scan = scan_staged_changes(self.cfg.repo_dir)
+                if not scan.is_clean:
+                    unstage_target_paths(self.cfg.repo_dir, stage_res.staged_paths)
+                    self._log("[git/security] 🚨 [bold red]COMMIT & PUSH BLOCKED — SECRET LEAK DETECTED[/bold red]")
+                    for finding in scan.findings:
+                        loc = f"{finding.file_path}:{finding.line_number}" if finding.line_number else finding.file_path
+                        self._log(f"[git/security]   • [{finding.severity}] {finding.rule} in [bold yellow]{loc}[/bold yellow]")
+                        self._log(f"[git/security]     Snippet: [dim]{finding.redacted_snippet}[/dim]")
+                    self._log("[git/security] ❌ Aborted commit and push to prevent security incident.")
+                    return StepResult(step, "escalated", retries, f"Security Violation: {scan.summary}")
 
-            from core.runtime.task_finalization import TaskFinalizationCoordinator
-            from core.runtime.process import _CURRENT_TASK_ID
-            task_id_for_intent = _CURRENT_TASK_ID.get()
-            finalizer = TaskFinalizationCoordinator(self.cfg.repo_dir)
-            if task_id_for_intent:
-                finalizer.record_commit_intent(task_id_for_intent)
+                # Capture staged diff summary before committing
+                diff_summary = _staged_diff_summary(self.cfg.repo_dir)
 
-            commit_res = _run(["git", "commit", "-m", commit_msg], self.cfg.repo_dir)
-            if commit_res.returncode == 0:
-                self._log(f"[git] 📦 Committed: [bold #E8E8E8]{commit_title}[/bold #E8E8E8]")
+                from core.runtime.task_finalization import TaskFinalizationCoordinator
+                from core.runtime.process import _CURRENT_TASK_ID
+                task_id_for_intent = _CURRENT_TASK_ID.get()
+                finalizer = TaskFinalizationCoordinator(self.cfg.repo_dir)
                 if task_id_for_intent:
-                    c_sha = _run(["git", "rev-parse", "HEAD"], self.cfg.repo_dir).stdout.strip()
-                    finalizer.record_commit_success(task_id_for_intent, commit_sha=c_sha)
-                for breakdown_line in _format_diff_breakdown(diff_summary):
-                    self._log(breakdown_line)
+                    finalizer.record_commit_intent(task_id_for_intent)
+
+                commit_res = _run(["git", "commit", "-m", commit_msg], self.cfg.repo_dir)
+                head_after = _get_git_head_sha(self.cfg.repo_dir)
+                if commit_res.returncode == 0 and head_after != head_before and head_after is not None:
+                    commit_confirmed = True
+                    self._log(f"[git] 📦 Committed: [bold #E8E8E8]{commit_title}[/bold #E8E8E8]")
+                    if task_id_for_intent:
+                        finalizer.record_commit_success(task_id_for_intent, commit_sha=head_after)
+                    for breakdown_line in _format_diff_breakdown(diff_summary):
+                        self._log(breakdown_line)
+                else:
+                    self._log(f"[git] Commit failed with code {commit_res.returncode}: {commit_res.stderr}")
+                    unstage_target_paths(self.cfg.repo_dir, stage_res.staged_paths)
+                    return StepResult(step, "escalated", retries, f"Git commit failed: {commit_res.stderr.strip() or 'non-zero exit code'}")
+            except Exception as commit_exc:
+                head_current = _get_git_head_sha(self.cfg.repo_dir)
+                if head_current is not None and head_current != head_before:
+                    commit_confirmed = True
+                if not commit_confirmed:
+                    unstage_target_paths(self.cfg.repo_dir, stage_res.staged_paths)
+                self._log(f"[git] Commit error: {commit_exc}")
+                return StepResult(step, "escalated", retries, f"Commit error: {commit_exc}")
         except Exception as e:
-            self._log(f"[git] Commit error: {e}")
+            self._log(f"[git] Staging error: {e}")
+            return StepResult(step, "escalated", retries, f"Staging error: {e}")
 
         # Automatically push changes to remote origin if configured and permitted
         if not self._can_push_to_remote():
@@ -2365,7 +2469,7 @@ class Orchestrator:
         )
 
         if auto_ok:
-            self._open_pr(step, pr_copy, gate_result=gate_result)
+            self._open_pr(step, pr_copy, gate_result=gate_result, tx_result=effective_tx)
             detail = f"Auto-opened PR: {pr_copy['title']}"
         else:
             from core.pr_proof import attach_pr_proof_to_body
@@ -2395,6 +2499,7 @@ class Orchestrator:
         step: PlanStep,
         pr_copy: Dict[str, str],
         gate_result: Optional[Any] = None,
+        tx_result: Optional[TransactionResult] = None,
     ) -> None:
         if self.cfg.mode == "plan":
             raise PermissionError("Pembuatan pull request dilarang dalam mode Plan.")
@@ -2420,22 +2525,55 @@ class Orchestrator:
             self._log(f"[pr-proof] ℹ️ Skipping PR proof: no frontend changes detected in PR.")
 
         ensure_gitignore_security(self.cfg.repo_dir)
-        purge_tracked_sensitive_files(self.cfg.repo_dir)
-        _run(["git", "add", "-A"], self.cfg.repo_dir)
-
-        # 🛡️ Git Secret Guard
-        scan = scan_staged_changes(self.cfg.repo_dir)
-        if not scan.is_clean:
-            unstage_staged_changes(self.cfg.repo_dir)
-            self._log(f"[git/security] 🚨 PR Creation BLOCKED — secrets detected: {scan.summary}")
+        effective_tx = tx_result if tx_result is not None else self.cfg.last_transaction_result
+        targets = self._get_authorized_targets_for_step(step, tx_result=effective_tx)
+        if not targets:
+            self._log("[git/security] 🚨 PR Creation BLOCKED — no authorized targets")
             return
 
-        diff_summary = _staged_diff_summary(self.cfg.repo_dir)
-        commit_res = _run(["git", "commit", "-m", pr_copy["title"]], self.cfg.repo_dir)
-        if commit_res.returncode == 0:
-            self._log(f"[git] 📦 Branch committed: [bold #E8E8E8]{pr_copy['title']}[/bold #E8E8E8]")
-            for breakdown_line in _format_diff_breakdown(diff_summary):
-                self._log(breakdown_line)
+        allow_identical = (effective_tx is None)
+        stage_res = stage_authorized_targets(
+            self.cfg.repo_dir,
+            targets,
+            last_tx_result=effective_tx,
+            allow_pre_staged_identical=allow_identical,
+        )
+        if not stage_res.success:
+            self._log(f"[git/security] 🚨 PR Creation BLOCKED — staging violation: {stage_res.error}")
+            return
+
+        commit_confirmed = False
+        head_before = _get_git_head_sha(self.cfg.repo_dir)
+
+        try:
+            # 🛡️ Git Secret Guard
+            scan = scan_staged_changes(self.cfg.repo_dir)
+            if not scan.is_clean:
+                unstage_target_paths(self.cfg.repo_dir, stage_res.staged_paths)
+                self._log(f"[git/security] 🚨 PR Creation BLOCKED — secrets detected: {scan.summary}")
+                return
+
+            diff_summary = _staged_diff_summary(self.cfg.repo_dir)
+            if diff_summary.total_files > 0:
+                commit_res = _run(["git", "commit", "-m", pr_copy["title"]], self.cfg.repo_dir)
+                head_after = _get_git_head_sha(self.cfg.repo_dir)
+                if commit_res.returncode == 0 and head_after != head_before and head_after is not None:
+                    commit_confirmed = True
+                    self._log(f"[git] 📦 Branch committed: [bold #E8E8E8]{pr_copy['title']}[/bold #E8E8E8]")
+                    for breakdown_line in _format_diff_breakdown(diff_summary):
+                        self._log(breakdown_line)
+                else:
+                    self._log(f"[git] Commit failed in _open_pr: {commit_res.stderr}")
+                    unstage_target_paths(self.cfg.repo_dir, stage_res.staged_paths)
+                    return
+        except Exception as e:
+            head_current = _get_git_head_sha(self.cfg.repo_dir)
+            if head_current is not None and head_current != head_before:
+                commit_confirmed = True
+            if not commit_confirmed:
+                unstage_target_paths(self.cfg.repo_dir, stage_res.staged_paths)
+            self._log(f"[git] Commit error in _open_pr: {e}")
+            return
 
         # Sanitize and auto-repair corrupted remote URL in git config if needed
         cur_url = get_git_remote_url(self.cfg.repo_dir, "origin")
