@@ -416,7 +416,7 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
         self.assertNotIn(fake_secret, tr.test_output)
         self.assertNotIn("super_secret_db_pass_123", tr.test_output)
         self.assertNotIn(fake_secret, tr.summary)
-        self.assertNotIn(fake_secret, tr.failure_reason)
+        self.assertNotIn(fake_secret, tr.failure_reason or "")
         self.assertIn("[REDACTED", tr.test_output)
         self.assertIn("2 failed", tr.test_output)
 

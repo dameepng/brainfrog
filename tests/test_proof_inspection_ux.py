@@ -83,7 +83,7 @@ class TestProofInspectionUX(unittest.TestCase):
         verdict_status: str = "VERIFIED",
         tx_status: str = "COMMITTED",
         exit_code: int = 0,
-        files: list = None,
+        files: list | None = None,
         stdout: str = "1 passed",
         stderr: str = "",
         gate_passed: bool = True,

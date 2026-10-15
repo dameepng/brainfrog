@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 from core.mcp_client import McpClient, McpToolResult
@@ -547,6 +548,8 @@ class TestQualityGateSecurityAndPolicy(unittest.TestCase):
         for name, cmd in hostile_scripts:
             is_valid, reason = validate_frontend_script(name, cmd)
             self.assertFalse(is_valid, f"Expected hostile script '{cmd}' to be rejected")
+            self.assertIsNotNone(reason)
+            assert reason is not None
             self.assertTrue(
                 "substitution" in reason.lower() or "redirection" in reason.lower(),
                 f"Unexpected reason: {reason}",
@@ -1544,6 +1547,8 @@ class TestFrontendContainerLiveIntegration(unittest.TestCase):
             self.skipTest("Real Docker daemon not running on host (UNVERIFIED / SKIPPED)")
 
         docker_bin = shutil.which("docker")
+        self.assertIsNotNone(docker_bin)
+        assert docker_bin is not None
 
         # 1. Success case
         with tempfile.TemporaryDirectory() as tmp_dir:
