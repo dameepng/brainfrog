@@ -1342,13 +1342,20 @@ class TestFrontendContainerLiveIntegration(unittest.TestCase):
                 cls._docker_running = False
                 return False
             # Verify the runner environment can actually execute unprivileged containers
-            probe = subprocess.run(
-                [docker_bin, "run", "--rm", "node:20-alpine", "node", "-e", "process.exit(0)"],
-                capture_output=True,
-                timeout=5.0,
-            )
-            cls._docker_running = (probe.returncode == 0)
-            return cls._docker_running
+            # with the exact security policy applied by execute_container_build
+            with tempfile.TemporaryDirectory(prefix="bf-docker-probe-") as probe_dir:
+                p_path = Path(probe_dir)
+                (p_path / "package.json").write_text(
+                    json.dumps({"scripts": {"build": "node -e 'process.exit(0)'"}}),
+                    encoding="utf-8",
+                )
+                exit_code, _ = execute_container_build(
+                    project_cwd=p_path,
+                    policy=FrontendSandboxPolicy(require_sandbox=True),
+                    timeout_seconds=5.0,
+                )
+                cls._docker_running = (exit_code == 0)
+                return cls._docker_running
         except Exception:
             cls._docker_running = False
             return False
