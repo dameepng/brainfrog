@@ -1223,9 +1223,11 @@ def validate_protected_target(
     # 4. Relative component inspection (case-insensitive across all platforms)
     rel = target_path.relative_to(ws_resolved)
     rel_parts_lower = [p.lower() for p in rel.parts]
+    raw_parts_lower = [p.lower() for p in norm_clean.split("/") if p]
+    all_parts_lower = rel_parts_lower + raw_parts_lower
 
     # Rejection: internal .git directory or descendants
-    if ".git" in rel_parts_lower:
+    if ".git" in all_parts_lower:
         raise PermissionError(
             f"Protected path denied: target '{target}' points to internal .git repository metadata."
         )
@@ -1244,20 +1246,20 @@ def validate_protected_target(
             )
 
     # Rejection: internal .brainfrog control-plane state
-    if ".brainfrog" in rel_parts_lower:
+    if ".brainfrog" in all_parts_lower:
         raise PermissionError(
             f"Protected path denied: target '{target}' points to internal .brainfrog control-plane state."
         )
 
     # Rejection: sensitive credential and agent control directories (.aws, .ssh, .gnupg, .agents, .codex)
-    for p in rel_parts_lower:
+    for p in all_parts_lower:
         if p in (".aws", ".ssh", ".gnupg", ".agents", ".codex"):
             raise PermissionError(
                 f"Protected path denied: target '{target}' references sensitive or agent control directory '{p}'."
             )
 
     # Rejection: sensitive environment files (.env, .env.* except .env.example)
-    for p in rel_parts_lower:
+    for p in all_parts_lower:
         if p == ".env":
             raise PermissionError(
                 f"Protected path denied: target '{target}' references sensitive environment file."

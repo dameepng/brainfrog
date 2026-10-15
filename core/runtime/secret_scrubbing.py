@@ -203,6 +203,11 @@ def scrub_secrets(
                 parsed = json.loads(text)
                 if isinstance(parsed, (dict, list)):
                     redacted = _redact_json_structure(parsed, replacement)
+                    if redacted == parsed:
+                        text_scrubbed = scrub_text_patterns(text, replacement)
+                        if text_scrubbed == text:
+                            return text
+                        return text_scrubbed
                     if "\n" in text:
                         return json.dumps(redacted, indent=2)
                     return json.dumps(redacted)

@@ -264,7 +264,7 @@ class TestRealEndToEndRemoteApprovalContract(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: MockSystem1(),
             system2_factory=lambda **_: MockSystem2({"safe.txt": "# legitimate code"}),
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         # 1. Request
@@ -303,7 +303,7 @@ class TestRealEndToEndRemoteApprovalContract(unittest.TestCase):
                 "safe.txt": "# approved code",
                 "evil_backdoor.py": "# MALICIOUS BACKDOOR",
             }),
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         # 1. Request for safe.txt
@@ -344,7 +344,7 @@ class TestRealEndToEndRemoteApprovalContract(unittest.TestCase):
             system2_factory=lambda **_: MockSystem2({
                 "../escaped_secret.txt": "LEAKED_SECRET",
             }),
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         resp1 = runtime.handle_message(IncomingMessage(

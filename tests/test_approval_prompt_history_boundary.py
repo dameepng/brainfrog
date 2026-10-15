@@ -106,7 +106,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         # 1. User injects adversarial prompt into conversation history
@@ -166,7 +166,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2_adversarial,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
         r_req = runtime_adv.handle_message(IncomingMessage(
             id="m_adv", channel="telegram", user_id="alice", conversation_id="conv_adv",
@@ -198,7 +198,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         session = runtime.sessions.get_or_create("telegram", "alice", "conv_2")
@@ -246,7 +246,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         session = runtime.sessions.get_or_create("telegram", "alice", "conv_3")
@@ -290,7 +290,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         r1 = runtime.handle_message(IncomingMessage(
@@ -345,7 +345,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         session = runtime.sessions.get_or_create("telegram", "alice", "conv_5")
@@ -390,7 +390,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         session = runtime.sessions.get_or_create("telegram", "alice", "conv_6")
@@ -431,7 +431,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         session = runtime.sessions.get_or_create("telegram", "alice", "conv_7")
@@ -479,7 +479,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         # Session A: Attacker session with malicious prompt history
@@ -526,7 +526,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2_a,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         # Poison history in Runtime A
@@ -555,7 +555,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2_b,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         r3 = runtime_b.handle_message(IncomingMessage(
@@ -603,7 +603,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
                 require_approval=True,
                 system1_factory=lambda _: s1,
                 system2_factory=lambda **_: s2,
-                default_test_cmd='python -c "pass"',
+                default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
             )
 
             conv_id = f"prop_conv_{idx}"
@@ -659,7 +659,7 @@ class TestApprovalPromptHistoryBoundary(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: s1,
             system2_factory=lambda **_: s2,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         # 1. Ask a question

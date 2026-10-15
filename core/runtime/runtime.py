@@ -1189,18 +1189,25 @@ class BrainFrogRuntime:
                     if appr_obj and appr_obj.workspace_root:
                         recorded_ws_str = appr_obj.workspace_root
 
-                if not recorded_ws_str or not str(recorded_ws_str).strip():
-                    err_msg = f"Work '{target_work_id}' has no recorded workspace. Resume cannot establish canonical workspace."
-                    emit("agent.work.resume_failed", {"work_id": target_work_id, "reason": err_msg})
-                    return OutgoingMessage(text=f"❌ Resume failed: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
+                # For active executing/verifying states, fail closed if workspace is missing or invalid
+                recovery_mgr = None
+                if work.status not in (WorkStatus.DONE, WorkStatus.CANCELLED, WorkStatus.APPROVAL_REQUIRED):
+                    if not recorded_ws_str or not str(recorded_ws_str).strip():
+                        err_msg = f"Work '{target_work_id}' has no recorded workspace. Resume cannot establish canonical workspace."
+                        emit("agent.work.resume_failed", {"work_id": target_work_id, "reason": err_msg})
+                        return OutgoingMessage(text=f"❌ Resume failed: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
 
-                recorded_ws = Path(recorded_ws_str).resolve()
-                if not recorded_ws.exists() or not recorded_ws.is_dir():
-                    err_msg = f"Recorded workspace '{recorded_ws_str}' for work '{target_work_id}' does not exist on disk."
-                    emit("agent.work.resume_failed", {"work_id": target_work_id, "reason": err_msg})
-                    return OutgoingMessage(text=f"❌ Resume failed: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
+                    recorded_ws = Path(recorded_ws_str).resolve()
+                    if not recorded_ws.exists() or not recorded_ws.is_dir():
+                        err_msg = f"Recorded workspace '{recorded_ws_str}' for work '{target_work_id}' does not exist on disk."
+                        emit("agent.work.resume_failed", {"work_id": target_work_id, "reason": err_msg})
+                        return OutgoingMessage(text=f"❌ Resume failed: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
 
-                recovery_mgr = TransactionRecoveryManager(workspace=recorded_ws, store=self.transaction_store)
+                    recovery_mgr = TransactionRecoveryManager(workspace=recorded_ws, store=self.transaction_store)
+                elif recorded_ws_str and str(recorded_ws_str).strip():
+                    recorded_ws = Path(recorded_ws_str).resolve()
+                    if recorded_ws.exists() and recorded_ws.is_dir():
+                        recovery_mgr = TransactionRecoveryManager(workspace=recorded_ws, store=self.transaction_store)
                 ok, resp_msg, work_obj = resume_work(
                     work_id=target_work_id,
                     actor_id=message.user_id,

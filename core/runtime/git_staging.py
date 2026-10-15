@@ -11,7 +11,9 @@ Enforces Phase 2A Security Invariants:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Set, Tuple, Union
@@ -96,8 +98,14 @@ def resolve_canonical_repo_path(repo_dir: Path | str, target: str) -> str:
 
     repo_path = Path(repo_dir).resolve()
     target_path = Path(norm_target)
+    is_win_drive = bool(re.match(r"^[a-zA-Z]:", norm_target))
+    is_unc = norm_target.startswith("//")
 
-    if target_path.is_absolute():
+    if target_path.is_absolute() or is_win_drive or is_unc:
+        if is_win_drive and sys.platform != "win32":
+            raise PathTraversalSecurityError(
+                f"Path traversal detected: absolute drive path '{target}' escapes repository '{repo_path}'"
+            )
         resolved = target_path.resolve()
     else:
         resolved = (repo_path / target_path).resolve()

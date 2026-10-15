@@ -670,8 +670,16 @@ class TestFrontendContainerSandboxAdversarial(unittest.TestCase):
 
         # Reject .ssh
         ssh_dir = Path.home() / ".ssh"
-        with self.assertRaises(PermissionError):
-            validate_container_workspace_path(ssh_dir)
+        created_ssh = False
+        if not ssh_dir.exists():
+            ssh_dir.mkdir(parents=True, exist_ok=True)
+            created_ssh = True
+        try:
+            with self.assertRaises(PermissionError):
+                validate_container_workspace_path(ssh_dir)
+        finally:
+            if created_ssh:
+                shutil.rmtree(ssh_dir, ignore_errors=True)
 
         # Reject system directory (e.g. C:\Windows or /etc)
         sys_root = Path(os.environ.get("SystemRoot", "/etc"))
@@ -1314,15 +1322,32 @@ class TestFrontendWorkspaceIntegrityAdversarial(unittest.TestCase):
 class TestFrontendContainerLiveIntegration(unittest.TestCase):
     """Live integration tests requiring a genuinely running Docker daemon."""
 
+    _docker_running: Optional[bool] = None
+
     @classmethod
     def is_docker_daemon_running(cls) -> bool:
+        if cls._docker_running is not None:
+            return cls._docker_running
+
         docker_bin = shutil.which("docker")
         if not docker_bin:
+            cls._docker_running = False
             return False
         try:
             res = subprocess.run([docker_bin, "info"], capture_output=True, timeout=2.0)
-            return res.returncode == 0
+            if res.returncode != 0:
+                cls._docker_running = False
+                return False
+            # Verify the runner environment can actually execute unprivileged containers
+            probe = subprocess.run(
+                [docker_bin, "run", "--rm", "node:20-alpine", "node", "-e", "process.exit(0)"],
+                capture_output=True,
+                timeout=5.0,
+            )
+            cls._docker_running = (probe.returncode == 0)
+            return cls._docker_running
         except Exception:
+            cls._docker_running = False
             return False
 
     def test_live_docker_container_build(self):

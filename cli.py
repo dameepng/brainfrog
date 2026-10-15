@@ -222,6 +222,15 @@ def ensure_anthropic_key() -> str:
     if key and not key.startswith("sk-ant-..."):
         return key
 
+    if not sys.stdin.isatty():
+        print_banner_box(
+            "Anthropic API Key not configured in environment (ANTHROPIC_API_KEY).\n"
+            "Non-interactive session cannot prompt for API key.",
+            level="error",
+            title="Anthropic Key Missing",
+        )
+        sys.exit(1)
+
     print_banner_box(
         "Anthropic API Key not configured.\n"
         "BrainFrog requires Claude (System 2) to plan and generate code.",

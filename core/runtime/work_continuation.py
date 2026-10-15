@@ -329,7 +329,7 @@ def resume_work(
 
             ws_candidate = work_ws or rec_ws
             if not ws_candidate:
-                fail_msg = "Recovery failed: work has no recorded workspace. Cannot establish canonical workspace for recovery."
+                fail_msg = "Recovery failed: work has no recorded workspace. Cannot establish canonical workspace for recovery. No authoritative verification evidence."
                 try:
                     work = work_store.save(work.transition(
                         WorkStatus.FAILED,

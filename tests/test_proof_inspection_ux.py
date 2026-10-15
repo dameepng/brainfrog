@@ -57,6 +57,8 @@ class TestProofInspectionUX(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.mkdtemp(prefix="test_proof_inspection_")
         self.workspace = Path(self.tmp_dir).resolve()
+        self.orig_anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test-dummy-key"
 
         # Initialize minimal git repo
         subprocess.run(["git", "init"], cwd=self.workspace, capture_output=True, check=True)
@@ -69,6 +71,10 @@ class TestProofInspectionUX(unittest.TestCase):
         self.commit_sha = res.stdout.strip()
 
     def tearDown(self) -> None:
+        if self.orig_anthropic_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = self.orig_anthropic_key
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def _create_and_save_proof(
