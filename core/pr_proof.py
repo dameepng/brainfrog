@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.frontend_quality_gate import QualityGateResult, is_frontend_change
+from core.runtime.command_policy import CommandPolicy
+from core.runtime.process import run_hardened_subprocess
 
 
 def get_pr_changed_files(repo_dir: Path | str, base: str = "origin/main") -> List[str]:
@@ -30,12 +32,10 @@ def get_pr_changed_files(repo_dir: Path | str, base: str = "origin/main") -> Lis
     # 1. Committed diff against base branch (origin/main...HEAD, main...HEAD, or HEAD~1)
     for target in [base, "main", "HEAD~1"]:
         try:
-            res = subprocess.run(
+            res = run_hardened_subprocess(
                 ["git", "diff", "--name-only", f"{target}...HEAD"],
-                cwd=str(repo),
-                capture_output=True,
-                text=True,
-                check=False,
+                cwd=repo,
+                timeout=10.0,
             )
             if res.returncode == 0 and res.stdout.strip():
                 for f in res.stdout.split():
@@ -46,12 +46,10 @@ def get_pr_changed_files(repo_dir: Path | str, base: str = "origin/main") -> Lis
 
     # 2. Status porcelain for staged, modified, and newly added/untracked files (-uall expands untracked folders)
     try:
-        res = subprocess.run(
+        res = run_hardened_subprocess(
             ["git", "status", "--porcelain", "-uall"],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            check=False,
+            cwd=repo,
+            timeout=10.0,
         )
         if res.returncode == 0:
             for line in res.stdout.splitlines():
@@ -72,12 +70,10 @@ def get_pr_changed_files(repo_dir: Path | str, base: str = "origin/main") -> Lis
     # 3. Fallback: simple diff against HEAD
     if not files:
         try:
-            res = subprocess.run(
+            res = run_hardened_subprocess(
                 ["git", "diff", "--name-only", "HEAD"],
-                cwd=str(repo),
-                capture_output=True,
-                text=True,
-                check=False,
+                cwd=repo,
+                timeout=10.0,
             )
             if res.returncode == 0:
                 for f in res.stdout.split():
@@ -95,12 +91,10 @@ def get_github_repo_info(repo_dir: Path | str) -> Tuple[str, str]:
     """
     repo = Path(repo_dir).resolve()
     try:
-        res = subprocess.run(
+        res = run_hardened_subprocess(
             ["git", "config", "--get", "remote.origin.url"],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            check=False,
+            cwd=repo,
+            timeout=5.0,
         )
         url = res.stdout.strip()
         if url:
@@ -157,89 +151,118 @@ def publish_proof_to_assets_branch(
 
     repo = Path(repo_dir).resolve()
     timestamp = int(time.time())
-    safe_target = re.sub(r"[^a-zA-Z0-9_.-]", "-", str(target_identifier)).strip("-")
-    sub_folder = f"{safe_target}/{timestamp}"
 
+    # Validate target_identifier and assets_branch syntax
+    safe_target = re.sub(r"[^a-zA-Z0-9_.-]", "-", str(target_identifier)).strip("-")
+    if not safe_target:
+        return None
+    if not re.match(r"^[a-zA-Z0-9_.-]+$", str(assets_branch)):
+        return None
+
+    sub_folder = f"{safe_target}/{timestamp}"
     desktop_rel = f"{sub_folder}/desktop.png"
     mobile_rel = f"{sub_folder}/mobile.png"
 
-    wt_dir = Path(tempfile.gettempdir()) / f"bf-wt-{os.getpid()}-{timestamp}"
+    wt_dir = Path(tempfile.gettempdir()).resolve() / f"bf-wt-{os.getpid()}-{timestamp}"
     if wt_dir.exists():
         shutil.rmtree(wt_dir, ignore_errors=True)
 
+    # Scoped command policy authorizing worktree and fetch/pull for visual asset publishing
+    proof_policy = CommandPolicy(allow_git_worktree=True, allow_git_fetch_pull=True)
+
     try:
         # 1. Fetch remote assets_branch
-        subprocess.run(
+        run_hardened_subprocess(
             ["git", "fetch", "origin", f"{assets_branch}:{assets_branch}"],
-            cwd=str(repo),
-            capture_output=True,
-            check=False,
+            cwd=repo,
+            timeout=30.0,
+            command_policy=proof_policy,
         )
 
         # 2. Add temporary worktree checked out to assets_branch
-        add_res = subprocess.run(
+        add_res = run_hardened_subprocess(
             ["git", "worktree", "add", str(wt_dir), assets_branch],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            check=False,
+            cwd=repo,
+            timeout=30.0,
+            command_policy=proof_policy,
         )
         if add_res.returncode != 0:
             return None
 
         # 3. Pull latest changes inside worktree
-        subprocess.run(
+        run_hardened_subprocess(
             ["git", "pull", "origin", assets_branch],
-            cwd=str(wt_dir),
-            capture_output=True,
-            check=False,
+            cwd=wt_dir,
+            timeout=30.0,
+            command_policy=proof_policy,
         )
 
-        # 4. Save screenshots under <pr_or_branch>/<timestamp>/
+        # 4. Save screenshots under <safe_target>/<timestamp>/
         dest_dir = wt_dir / safe_target / str(timestamp)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        (dest_dir / "desktop.png").write_bytes(desktop_bytes)
-        (dest_dir / "mobile.png").write_bytes(mobile_bytes)
+        desktop_file = dest_dir / "desktop.png"
+        mobile_file = dest_dir / "mobile.png"
+        desktop_file.write_bytes(desktop_bytes)
+        mobile_file.write_bytes(mobile_bytes)
 
-        # 5. Commit append-only
-        subprocess.run(["git", "add", "."], cwd=str(wt_dir), check=True)
-        subprocess.run(
-            ["git", "commit", "-m", f"proof: add screenshots for {target_identifier} ({timestamp})"],
-            cwd=str(wt_dir),
-            capture_output=True,
-            check=True,
+        # 5. Commit append-only (stage only explicit asset paths, never git add .)
+        desktop_rel_wt = f"{safe_target}/{timestamp}/desktop.png"
+        mobile_rel_wt = f"{safe_target}/{timestamp}/mobile.png"
+        add_stage_res = run_hardened_subprocess(
+            ["git", "add", "--", desktop_rel_wt, mobile_rel_wt],
+            cwd=wt_dir,
+            timeout=15.0,
+            command_policy=proof_policy,
         )
+        if add_stage_res.returncode != 0:
+            return None
+
+        commit_res = run_hardened_subprocess(
+            ["git", "commit", "--no-verify", "-m", f"proof: add screenshots for {safe_target} ({timestamp})"],
+            cwd=wt_dir,
+            timeout=20.0,
+            command_policy=proof_policy,
+        )
+        if commit_res.returncode != 0:
+            return None
 
         # 6. Retrieve the EXACT commit SHA
-        sha_res = subprocess.run(
+        sha_res = run_hardened_subprocess(
             ["git", "rev-parse", "HEAD"],
-            cwd=str(wt_dir),
-            capture_output=True,
-            text=True,
-            check=True,
+            cwd=wt_dir,
+            timeout=10.0,
+            command_policy=proof_policy,
         )
+        if sha_res.returncode != 0:
+            return None
         commit_sha = sha_res.stdout.strip()
 
-        # 7. Push to origin pr-proof-assets
-        subprocess.run(
+        # 7. Push to origin assets_branch
+        push_res = run_hardened_subprocess(
             ["git", "push", "origin", assets_branch],
-            cwd=str(wt_dir),
-            capture_output=True,
-            check=False,
+            cwd=wt_dir,
+            timeout=30.0,
+            command_policy=proof_policy,
         )
+        if push_res.returncode != 0:
+            return None
 
         return commit_sha, desktop_rel, mobile_rel
 
     except Exception:
         return None
     finally:
-        # Guarantee worktree removal
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(wt_dir)],
-            cwd=str(repo),
-            capture_output=True,
-            check=False,
-        )
+        # Guarantee worktree removal without hiding the original failure
+        try:
+            if wt_dir.exists():
+                run_hardened_subprocess(
+                    ["git", "worktree", "remove", "--force", str(wt_dir)],
+                    cwd=repo,
+                    timeout=15.0,
+                    command_policy=proof_policy,
+                )
+        except Exception:
+            pass
         if wt_dir.exists():
             shutil.rmtree(wt_dir, ignore_errors=True)
 
@@ -357,13 +380,14 @@ def update_github_pr_body(
 ) -> bool:
     """Update GitHub PR body using `gh pr edit`."""
     repo = Path(repo_dir).resolve()
+    target_str = str(branch_or_pr).strip()
+    if not target_str or target_str.startswith("-") or not re.match(r"^[a-zA-Z0-9_.-]+$", target_str):
+        return False
     try:
-        res = subprocess.run(
-            ["gh", "pr", "edit", str(branch_or_pr), "--body", body],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            check=False,
+        res = run_hardened_subprocess(
+            ["gh", "pr", "edit", target_str, "--body", str(body or "")],
+            cwd=repo,
+            timeout=30.0,
         )
         return res.returncode == 0
     except Exception:

@@ -20,6 +20,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from typing import Any, Dict, List
+
+from orchestrator import PlanStep
 
 from core.channels.telegram import TelegramChannel
 from core.runtime.approval import (
@@ -47,7 +50,8 @@ from core.runtime.workspace_registry import (
     WorkspaceValidationError,
     validate_workspace_alias,
 )
-from core.runtime.capabilities import Capabilities, FilesystemPolicy
+from core.runtime.capabilities import Capabilities, FilesystemPolicy, NetworkPolicy
+from tests.test_approval_execution_contract import MockSystem1, MockSystem2
 from core.runtime.transaction import (
     OperationStatus,
     OperationType,
@@ -527,6 +531,33 @@ class TestGatewayWorkspaceIntegration(unittest.TestCase):
         self.assertEqual(status["registered_workspaces_count"], 2)
 
 
+class SafeExecutionSystem2(MockSystem2):
+    """Deterministic System2 test double implementing scoped plan and execution for safe tests."""
+
+    def _get_target_files(self, task: str) -> List[str]:
+        matching = [f for f in self.output_files if f in task]
+        return matching if matching else list(self.output_files.keys())[:1]
+
+    def plan_and_prd(self, task: str, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        targets = self._get_target_files(task)
+        return {
+            "title": "Architecture Plan",
+            "markdown_doc": f"# Plan for {task}",
+            "problem": task,
+            "goals": [task],
+            "steps": [{"id": "1", "description": "Execute approved step", "files": targets}],
+            "relevant_files": targets,
+        }
+
+    def plan_task(self, task: str, *args: Any, **kwargs: Any) -> List[PlanStep]:
+        targets = self._get_target_files(task)
+        return [PlanStep(id="1", description="Execute approved step", files=targets)]
+
+    def write_code(self, step: Any, task: str, *args: Any, **kwargs: Any) -> Dict[str, str]:
+        targets = step.files if hasattr(step, "files") and step.files else self._get_target_files(task)
+        return {f: self.output_files.get(f, "# written\n") for f in targets}
+
+
 class TestFinding1ApprovalContractWorkspaceBinding(unittest.TestCase):
     """Finding 1: Approval request creation, contract minting, and execution contract binding."""
 
@@ -542,11 +573,23 @@ class TestFinding1ApprovalContractWorkspaceBinding(unittest.TestCase):
         self.registry.register("clinic", self.clinic_dir)
         self.registry.register("other", self.other_dir)
 
+        (self.clinic_dir / "test_noop.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n",
+            encoding="utf-8",
+        )
         self.runtime = BrainFrogRuntime(
             repo_dir=self.tmp_dir,
             workspace_registry=self.registry,
             persist_sessions=True,
             require_approval=True,
+            default_test_cmd="python -m unittest test_noop.py",
+            system1_factory=lambda _: MockSystem1(),
+            system2_factory=lambda **_: SafeExecutionSystem2({
+                "app.py": "# modified in clinic\n",
+                "lib.py": "# modified lib in clinic\n",
+                "common.py": "# modified common in clinic\n",
+                "appr.py": "# approved content\n",
+            }),
         )
 
     def tearDown(self) -> None:
@@ -556,7 +599,10 @@ class TestFinding1ApprovalContractWorkspaceBinding(unittest.TestCase):
         session = self.runtime.sessions.get_or_create(
             channel="telegram", user_id="user_a", conversation_id="chat_a"
         )
-        capabilities = Capabilities(filesystem=FilesystemPolicy(write=[filename]))
+        capabilities = Capabilities(
+            filesystem=FilesystemPolicy(read=[filename], write=[filename]),
+            network=NetworkPolicy(access=True),
+        )
         req = self.runtime.approval_service.create_request(
             session_id=session.session_id,
             channel="telegram",
@@ -573,7 +619,8 @@ class TestFinding1ApprovalContractWorkspaceBinding(unittest.TestCase):
         return req
 
     def test_approval_created_in_ws_a_cannot_execute_in_ws_b_after_session_switch(self) -> None:
-        """When session switches workspace after approval, /exec explicitly rejects mismatch."""
+        """When session switches workspace after approval, /exec explicitly rejects mismatch,
+        remains unconsumed, and successfully executes upon returning to original workspace A."""
         session = self.runtime.sessions.get_or_create(
             channel="telegram", user_id="user_a", conversation_id="chat_a"
         )
@@ -614,6 +661,185 @@ class TestFinding1ApprovalContractWorkspaceBinding(unittest.TestCase):
         reloaded_req = self.runtime.approval_service.store.get(req.request_id)
         self.assertIsNotNone(reloaded_req)
         self.assertEqual(reloaded_req.status, ApprovalStatus.APPROVED)
+        self.assertIsNone(reloaded_req.consumed_at)
+
+        # Switch back to workspace A ('clinic')
+        switch_back_msg = IncomingMessage(
+            id="sw-back",
+            channel="telegram",
+            user_id="user_a",
+            conversation_id="chat_a",
+            text="/workspace clinic",
+        )
+        resp_switch_back = self.runtime.handle_message(switch_back_msg)
+        self.assertTrue(resp_switch_back.success)
+        self.assertEqual(session.active_workspace, "clinic")
+
+        # Executes the same request successfully using safe temporary fixtures
+        exec_back_msg = IncomingMessage(
+            id="ex-back",
+            channel="telegram",
+            user_id="user_a",
+            conversation_id="chat_a",
+            text=f"/exec {req.request_id}",
+        )
+        resp_exec_back = self.runtime.handle_message(exec_back_msg)
+        self.assertTrue(resp_exec_back.success)
+
+        # Verifies the request becomes CONSUMED exactly once
+        consumed_req = self.runtime.approval_service.store.get(req.request_id)
+        self.assertIsNotNone(consumed_req)
+        self.assertEqual(consumed_req.status, ApprovalStatus.CONSUMED)
+        self.assertIsNotNone(consumed_req.consumed_at)
+
+        # Re-execution attempt fails closed because already consumed
+        replay_msg = IncomingMessage(
+            id="ex-replay",
+            channel="telegram",
+            user_id="user_a",
+            conversation_id="chat_a",
+            text=f"/exec {req.request_id}",
+        )
+        resp_replay = self.runtime.handle_message(replay_msg)
+        self.assertFalse(resp_replay.success)
+        self.assertIn("already been consumed", resp_replay.text)
+
+        # Verifies filesystem effects occur only inside A (clinic), never B (other)
+        clinic_target = self.clinic_dir / "app.py"
+        other_target = self.other_dir / "app.py"
+        self.assertTrue(clinic_target.exists())
+        self.assertEqual(clinic_target.read_text(encoding="utf-8"), "# modified in clinic\n")
+        self.assertFalse(other_target.exists())
+
+    def test_pending_and_approved_requests_coexist_during_workspace_switch(self) -> None:
+        """PENDING and APPROVED requests coexist during workspace switch:
+        - PENDING request is cancelled and persisted as CANCELLED on disk.
+        - APPROVED request remains APPROVED and persisted unconsumed.
+        - Switching back to original workspace allows APPROVED request to execute.
+        - Cancelled request cannot be approved or executed."""
+        session = self.runtime.sessions.get_or_create(
+            channel="telegram", user_id="user_a", conversation_id="chat_a"
+        )
+        session.active_workspace = "clinic"
+        self.runtime.sessions.save(session)
+
+        # 1. Create one PENDING request in workspace A
+        capabilities_pending = Capabilities(
+            filesystem=FilesystemPolicy(read=["pend.py"], write=["pend.py"]),
+            network=NetworkPolicy(access=True),
+        )
+        req_pending = self.runtime.approval_service.create_request(
+            session_id=session.session_id,
+            channel="telegram",
+            user_id="user_a",
+            conversation_id="chat_a",
+            operation_type="write_file",
+            canonical_operation=CanonicalOperation("write_file", "pend.py", {"targets": ["pend.py"]}),
+            session_incarnation_id=session.session_incarnation_id,
+            capabilities=capabilities_pending,
+            workspace_root=str(self.clinic_dir.resolve()),
+        )
+        self.assertEqual(req_pending.status, ApprovalStatus.PENDING)
+
+        # 2. Create one APPROVED request in workspace A
+        capabilities_approved = Capabilities(
+            filesystem=FilesystemPolicy(read=["appr.py"], write=["appr.py"]),
+            network=NetworkPolicy(access=True),
+        )
+        req_approved = self.runtime.approval_service.create_request(
+            session_id=session.session_id,
+            channel="telegram",
+            user_id="user_a",
+            conversation_id="chat_a",
+            operation_type="write_file",
+            canonical_operation=CanonicalOperation("write_file", "appr.py", {"targets": ["appr.py"]}),
+            session_incarnation_id=session.session_incarnation_id,
+            capabilities=capabilities_approved,
+            workspace_root=str(self.clinic_dir.resolve()),
+        )
+        ok_app, _, _ = self.runtime.approval_service.approve(
+            req_approved.request_id, approver_id="approver_1", channel="telegram"
+        )
+        self.assertTrue(ok_app)
+
+        # 3. Switch active workspace to B ('other')
+        switch_b_msg = IncomingMessage(
+            id="sw-b",
+            channel="telegram",
+            user_id="user_a",
+            conversation_id="chat_a",
+            text="/workspace other",
+        )
+        resp_switch_b = self.runtime.handle_message(switch_b_msg)
+        self.assertTrue(resp_switch_b.success)
+        self.assertEqual(session.active_workspace, "other")
+
+        # 4. Verify PENDING request becomes CANCELLED and remains cancelled on disk
+        stored_pending = self.runtime.approval_service.store.get(req_pending.request_id)
+        self.assertIsNotNone(stored_pending)
+        self.assertEqual(stored_pending.status, ApprovalStatus.CANCELLED)
+        self.assertIn("workspace switch", stored_pending.rejection_reason)
+
+        # 5. Verify APPROVED request remains APPROVED, unconsumed, and persisted
+        stored_approved = self.runtime.approval_service.store.get(req_approved.request_id)
+        self.assertIsNotNone(stored_approved)
+        self.assertEqual(stored_approved.status, ApprovalStatus.APPROVED)
+        self.assertIsNone(stored_approved.consumed_at)
+
+        # 6. Switch back to workspace A ('clinic')
+        switch_a_msg = IncomingMessage(
+            id="sw-a",
+            channel="telegram",
+            user_id="user_a",
+            conversation_id="chat_a",
+            text="/workspace clinic",
+        )
+        resp_switch_a = self.runtime.handle_message(switch_a_msg)
+        self.assertTrue(resp_switch_a.success)
+        self.assertEqual(session.active_workspace, "clinic")
+
+        # 7. Confirm cancelled request cannot be approved
+        ok_late, msg_late, _ = self.runtime.approval_service.approve(
+            req_pending.request_id, approver_id="approver_1", channel="telegram"
+        )
+        self.assertFalse(ok_late)
+        self.assertTrue("not in PENDING state" in msg_late or "CANCELLED" in msg_late)
+
+        # 8. Confirm cancelled request cannot be executed
+        exec_canc_msg = IncomingMessage(
+            id="ex-canc",
+            channel="telegram",
+            user_id="user_a",
+            conversation_id="chat_a",
+            text=f"/exec {req_pending.request_id}",
+        )
+        resp_canc = self.runtime.handle_message(exec_canc_msg)
+        self.assertFalse(resp_canc.success)
+        self.assertIn("was cancelled", resp_canc.text)
+
+        # 9. Confirm APPROVED request can execute when back in workspace A
+        exec_appr_msg = IncomingMessage(
+            id="ex-appr",
+            channel="telegram",
+            user_id="user_a",
+            conversation_id="chat_a",
+            text=f"/exec {req_approved.request_id}",
+        )
+        resp_appr = self.runtime.handle_message(exec_appr_msg)
+        self.assertTrue(resp_appr.success)
+
+        # 10. Verify APPROVED request becomes CONSUMED on disk
+        stored_appr_final = self.runtime.approval_service.store.get(req_approved.request_id)
+        self.assertIsNotNone(stored_appr_final)
+        self.assertEqual(stored_appr_final.status, ApprovalStatus.CONSUMED)
+        self.assertIsNotNone(stored_appr_final.consumed_at)
+
+        # 11. Filesystem assertions: appr.py written to clinic, never to other, pend.py never written
+        self.assertTrue((self.clinic_dir / "appr.py").exists())
+        self.assertEqual((self.clinic_dir / "appr.py").read_text(encoding="utf-8"), "# approved content\n")
+        self.assertFalse((self.other_dir / "appr.py").exists())
+        self.assertFalse((self.clinic_dir / "pend.py").exists())
+        self.assertFalse((self.other_dir / "pend.py").exists())
 
     def test_direct_metadata_approval_id_rejects_session_workspace_mismatch(self) -> None:
         """Direct message supplying approval_id metadata fails closed on workspace mismatch."""

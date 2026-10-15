@@ -47,6 +47,7 @@ from core.runtime.transaction import (
     TransactionStatus,
     recover_incomplete_transaction,
 )
+from core.runtime.workspace_lock import WorkspaceLock
 from core.runtime.runtime import BrainFrogRuntime
 from core.runtime.messages import IncomingMessage
 from core.runtime.session import InMemorySessionStore
@@ -59,9 +60,13 @@ class TestTransactionJournalDurability(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.mkdtemp()
         self.workspace = Path(self.tmp_dir)
+        self.lock = WorkspaceLock(self.workspace)
+        self.lock.acquire()
         self.store = FileTransactionStore(self.workspace)
 
     def tearDown(self) -> None:
+        if hasattr(self, "lock"):
+            self.lock.release()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_journal_persisted_survives_store_reload(self) -> None:
@@ -622,9 +627,13 @@ class TestResourceBounds(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.mkdtemp()
         self.workspace = Path(self.tmp_dir)
+        self.lock = WorkspaceLock(self.workspace)
+        self.lock.acquire()
         self.store = InMemoryTransactionStore()
 
     def tearDown(self) -> None:
+        if hasattr(self, "lock"):
+            self.lock.release()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_max_operations_limit_enforced(self) -> None:

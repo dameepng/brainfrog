@@ -233,7 +233,7 @@ Configure the variables inside `.env`:
 
 ```ini
 # --- System 2 Provider ---
-# Options: antigravity (Google Auth), claude, openai, openrouter, or custom
+# Options: antigravity (Google Auth), claude, openai, openrouter, sumopod, or custom
 SYSTEM2_PROVIDER=antigravity
 ANTIGRAVITY_MODEL=gemini-3.8-flash-high
 
@@ -248,6 +248,12 @@ ANTIGRAVITY_MODEL=gemini-3.8-flash-high
 # If using OpenRouter:
 # OPENROUTER_API_KEY=sk-or-...
 # OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
+
+# If using Sumopod AI (OpenAI-compatible):
+# SUMOPOD_API_KEY=your_sumopod_api_key_here
+# Models: deepseek-chat, deepseek-reasoner, kimi-latest, moonshot-v1-32k, glm-4, glm-4-flash, glm-4-plus
+# SUMOPOD_MODEL=deepseek-chat
+# SUMOPOD_BASE_URL=https://ai.sumopod.com/v1
 
 # If using Generic / Custom OpenAI-compatible endpoint:
 # BRAINFROG_MODEL_PROVIDER=custom

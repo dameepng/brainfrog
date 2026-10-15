@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -151,10 +152,12 @@ class WorkspaceRegistry:
         default_alias: str = "default",
         control_plane_dir: Optional[Path] = None,
         base_dir: Optional[Path] = None,
+        config_path: Optional[Union[str, Path]] = None,
     ) -> None:
         self._entries: Dict[str, WorkspaceEntry] = {}
         self._default_alias = default_alias.strip().lower()
         self._base_dir = base_dir.resolve() if base_dir else None
+        self._config_path = Path(config_path).resolve() if config_path else None
         if control_plane_dir:
             self._control_plane_dir = control_plane_dir.resolve()
         elif self._base_dir:
@@ -170,6 +173,10 @@ class WorkspaceRegistry:
     @property
     def default_alias(self) -> str:
         return self._default_alias
+
+    @property
+    def config_path(self) -> Optional[Path]:
+        return self._config_path
 
     @property
     def control_plane_dir(self) -> Optional[Path]:
@@ -214,6 +221,7 @@ class WorkspaceRegistry:
         metadata: Optional[Dict[str, Any]] = None,
         check_exists: bool = True,
         allow_overwrite: bool = False,
+        persist: bool = False,
     ) -> WorkspaceEntry:
         """Register a project workspace under a validated alias.
 
@@ -261,7 +269,30 @@ class WorkspaceRegistry:
             metadata=dict(metadata or {}),
         )
         self._entries[norm_alias] = entry
+        if persist and self._config_path:
+            self.save()
         return entry
+
+    def unregister(self, alias: str, persist: bool = False) -> bool:
+        """Remove a workspace registration by alias.
+
+        Does NOT delete the project directory on disk.
+
+        Raises:
+            WorkspaceValidationError: If attempting to remove the default alias.
+            WorkspaceNotFoundError: If the alias is not registered.
+        """
+        norm_alias = validate_workspace_alias(alias)
+        if norm_alias == self._default_alias:
+            raise WorkspaceValidationError("Cannot unregister the default installation workspace.")
+
+        if norm_alias not in self._entries:
+            raise WorkspaceNotFoundError(f"Workspace alias '{alias}' is not registered.")
+
+        del self._entries[norm_alias]
+        if persist and self._config_path:
+            self.save()
+        return True
 
     def get(self, alias: str) -> Optional[WorkspaceEntry]:
         """Look up a registered workspace entry by alias."""
@@ -295,12 +326,52 @@ class WorkspaceRegistry:
         entries.sort(key=lambda e: (0 if e.alias == self._default_alias else 1, e.alias))
         return entries
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, include_default: bool = True) -> Dict[str, Any]:
         """Serialize registered workspaces to dictionary."""
+        all_entries = self.list_workspaces()
+        if not include_default:
+            all_entries = [e for e in all_entries if e.alias != self._default_alias]
         return {
             "default_alias": self._default_alias,
-            "workspaces": [e.to_dict() for e in self.list_workspaces()],
+            "workspaces": [e.to_dict() for e in all_entries],
         }
+
+    def save_to_file(self, target_path: Optional[Union[str, Path]] = None) -> Path:
+        """Persist registered workspaces to a JSON file atomically."""
+        dest = Path(target_path or self._config_path).resolve() if (target_path or self._config_path) else None
+        if not dest:
+            raise WorkspaceRegistryError("Cannot save workspace configuration: no target_path or config_path specified.")
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Omit default workspace from persisted JSON to keep repo_dir portable
+        data = self.to_dict(include_default=False)
+        json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+
+        temp_file = dest.parent / f".tmp_{dest.stem}_{uuid.uuid4().hex[:8]}.json"
+        try:
+            with open(temp_file, "wb") as f:
+                f.write(json_bytes)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(temp_file, dest)
+            self._config_path = dest
+            return dest
+        except Exception:
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except OSError:
+                    pass
+            raise
+
+    def save(self) -> Optional[Path]:
+        """Persist to configured config_path if present."""
+        if self._config_path:
+            return self.save_to_file(self._config_path)
+        return None
 
     def load_from_dict(
         self,
@@ -419,14 +490,16 @@ class WorkspaceRegistry:
 
         # 2. Explicit config file
         if config_path:
-            if not config_path.exists():
-                raise WorkspaceNotFoundError(f"Configured workspace file '{config_path}' does not exist.")
-            registry.load_from_file(config_path, check_exists=check_exists, base_dir=resolved_repo)
-
-        # 3. .brainfrog/workspaces.json in repo_dir
-        local_cfg = resolved_repo / ".brainfrog" / "workspaces.json"
-        if local_cfg.exists():
-            registry.load_from_file(local_cfg, check_exists=check_exists, base_dir=resolved_repo)
+            resolved_cfg = Path(config_path).resolve()
+            registry._config_path = resolved_cfg
+            if not resolved_cfg.exists():
+                raise WorkspaceNotFoundError(f"Configured workspace file '{resolved_cfg}' does not exist.")
+            registry.load_from_file(resolved_cfg, check_exists=check_exists, base_dir=resolved_repo)
+        else:
+            local_cfg = (resolved_repo / ".brainfrog" / "workspaces.json").resolve()
+            registry._config_path = local_cfg
+            if local_cfg.exists():
+                registry.load_from_file(local_cfg, check_exists=check_exists, base_dir=resolved_repo)
 
         # 4. Environment variable BRAINFROG_WORKSPACES_FILE
         env_file = os.environ.get("BRAINFROG_WORKSPACES_FILE", "").strip()
@@ -434,6 +507,7 @@ class WorkspaceRegistry:
             env_file_path = Path(env_file).resolve()
             if not env_file_path.exists():
                 raise WorkspaceNotFoundError(f"BRAINFROG_WORKSPACES_FILE '{env_file}' does not exist.")
+            registry._config_path = env_file_path
             registry.load_from_file(env_file_path, check_exists=check_exists, base_dir=resolved_repo)
 
         # 5. Environment variable BRAINFROG_WORKSPACES

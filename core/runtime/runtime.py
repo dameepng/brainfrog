@@ -7,6 +7,7 @@ from enum import Enum
 import hashlib
 import os
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union, TYPE_CHECKING
@@ -613,7 +614,11 @@ class BrainFrogRuntime:
 
         default_entry = self.workspace_registry.get(self.workspace_registry.default_alias)
         if default_entry:
+            if not default_entry.path.exists() or not default_entry.path.is_dir():
+                raise WorkspaceNotFoundError(f"Default workspace path does not exist on disk: {default_entry.path}")
             return default_entry.path
+        if not self.repo_dir.exists() or not self.repo_dir.is_dir():
+            raise WorkspaceNotFoundError(f"Installation repository directory does not exist on disk: {self.repo_dir}")
         return self.repo_dir
 
     def handle_message(
@@ -834,18 +839,131 @@ class BrainFrogRuntime:
                 return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
 
             if cmd == "/workspace":
-                if len(parts) < 2 or not parts[1].strip():
+                sub_parts = parts[1].split() if len(parts) > 1 else []
+                subcmd = sub_parts[0].lower() if sub_parts else ""
+
+                if not subcmd or subcmd == "current":
                     current_alias = session.active_workspace or self.workspace_registry.default_alias
                     entry = self.workspace_registry.get(current_alias)
                     path_str = str(entry.path) if entry else str(self.repo_dir)
                     status_text = (
                         f"📂 **Active Workspace:** `{current_alias}`\n"
                         f"• Path: `{path_str}`\n\n"
-                        "Use `/workspace <alias>` to switch workspace, or `/workspaces` to list available."
+                        "Use `/workspace <alias>` to switch workspace, `/workspaces` to list available,\n"
+                        "or `/workspace add <alias> <path>` to register a new workspace (CLI only)."
                     )
                     return OutgoingMessage(text=status_text, events=events, success=True, status="completed")
 
-                raw_alias = parts[1].strip()
+                if subcmd == "add":
+                    # Gate registration to local CLI administrators
+                    if effective_channel not in ("cli", "local", "terminal"):
+                        err_msg = "Workspace registration is restricted to local CLI administrators."
+                        return OutgoingMessage(
+                            text=f"❌ {err_msg}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=err_msg,
+                        )
+                    raw_args = parts[1].split(maxsplit=2)
+                    if len(raw_args) < 3 or not raw_args[1].strip() or not raw_args[2].strip():
+                        return OutgoingMessage(
+                            text="⚠️ Usage: `/workspace add <alias> <absolute-path>`",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="Invalid usage",
+                        )
+                    raw_alias = raw_args[1].strip()
+                    raw_path = raw_args[2].strip()
+                    try:
+                        target_alias = validate_workspace_alias(raw_alias)
+                        p_val = Path(raw_path)
+                        if not p_val.is_absolute():
+                            return OutgoingMessage(
+                                text="❌ Workspace path must be an absolute path.",
+                                events=events,
+                                success=False,
+                                status="rejected",
+                                error="Path not absolute",
+                            )
+                        res_p = p_val.resolve()
+                        if not res_p.exists() or not res_p.is_dir():
+                            return OutgoingMessage(
+                                text=f"❌ Workspace target directory does not exist: {res_p}",
+                                events=events,
+                                success=False,
+                                status="rejected",
+                                error="Directory does not exist",
+                            )
+                        self.workspace_registry._validate_not_control_plane(res_p)
+                        self.workspace_registry.register(target_alias, res_p, persist=True)
+                    except (WorkspaceValidationError, WorkspaceNotFoundError) as ws_err:
+                        return OutgoingMessage(
+                            text=f"❌ Registration failed: {ws_err}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=str(ws_err),
+                        )
+                    emit("agent.workspace.registered", {
+                        "alias": target_alias,
+                        "path": str(res_p),
+                        "actor": message.user_id,
+                    })
+                    return OutgoingMessage(
+                        text=f"✅ Workspace `{target_alias}` registered at `{res_p}`.",
+                        events=events,
+                        success=True,
+                        status="completed",
+                    )
+
+                if subcmd == "remove":
+                    # Gate removal to local CLI administrators
+                    if effective_channel not in ("cli", "local", "terminal"):
+                        err_msg = "Workspace removal is restricted to local CLI administrators."
+                        return OutgoingMessage(
+                            text=f"❌ {err_msg}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=err_msg,
+                        )
+                    if len(sub_parts) < 2 or not sub_parts[1].strip():
+                        return OutgoingMessage(
+                            text="⚠️ Usage: `/workspace remove <alias>`",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="Invalid usage",
+                        )
+                    raw_alias = sub_parts[1].strip()
+                    try:
+                        target_alias = validate_workspace_alias(raw_alias)
+                        self.workspace_registry.unregister(target_alias, persist=True)
+                    except (WorkspaceValidationError, WorkspaceNotFoundError) as ws_err:
+                        return OutgoingMessage(
+                            text=f"❌ Removal failed: {ws_err}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=str(ws_err),
+                        )
+                    if session.active_workspace == target_alias:
+                        session.active_workspace = None
+                        self.sessions.save(session)
+                    emit("agent.workspace.removed", {
+                        "alias": target_alias,
+                        "actor": message.user_id,
+                    })
+                    return OutgoingMessage(
+                        text=f"✅ Workspace registration `{target_alias}` removed. Project files on disk were not deleted.",
+                        events=events,
+                        success=True,
+                        status="completed",
+                    )
+
+                raw_alias = subcmd
                 try:
                     target_alias = validate_workspace_alias(raw_alias)
                 except WorkspaceValidationError as val_err:
@@ -892,6 +1010,25 @@ class BrainFrogRuntime:
                         status="rejected",
                         error=err_msg,
                     )
+
+                # Invalidate incompatible pending approvals for this session if switching to a different canonical path
+                old_alias = session.active_workspace or self.workspace_registry.default_alias
+                old_entry = self.workspace_registry.get(old_alias)
+                if old_entry and old_entry.path.resolve() != entry.path.resolve():
+                    for req in self.approval_service.store.list_requests(session_id=session.session_id, active_only=True):
+                        if req.status == ApprovalStatus.PENDING and req.workspace_root:
+                            if Path(req.workspace_root).resolve() != entry.path.resolve():
+                                lock_ctx = (
+                                    self.approval_service.store._get_request_lock(req.request_id)
+                                    if hasattr(self.approval_service.store, "_get_request_lock")
+                                    else nullcontext()
+                                )
+                                with lock_ctx:
+                                    cur = self.approval_service.store.get(req.request_id)
+                                    if cur and cur.status == ApprovalStatus.PENDING:
+                                        cur.status = ApprovalStatus.CANCELLED
+                                        cur.rejection_reason = f"Cancelled due to workspace switch to '{entry.alias}'"
+                                        self.approval_service.store.save(cur)
 
                 session.active_workspace = entry.alias
                 self.sessions.save(session)
@@ -1613,6 +1750,8 @@ class BrainFrogRuntime:
             return OutgoingMessage(text=f"❌ {err_msg}", events=events, success=False, error=err_msg)
 
         try:
+            from system2 import validate_system2_provider_preflight
+            validate_system2_provider_preflight(provider)
             s2 = self.system2_factory(model=model, provider=provider)
         except Exception as e:
             err_msg = f"System 2 Initialization Error: {e}"
@@ -1705,12 +1844,13 @@ class BrainFrogRuntime:
                 except Exception:
                     pass
 
-        # 6. Execute via existing Orchestrator under WorkspaceLock
+        task_id_for_lock = remote_context.work_id if remote_context else (message.metadata.get("task_id") if message.metadata else None)
         ws_lock = WorkspaceLock(
             workspace=workspace_dir,
             session_id=session.session_id,
             actor=message.user_id,
-            timeout=float(message.metadata.get("lock_timeout", 10.0)),
+            task_id=task_id_for_lock,
+            timeout=float(message.metadata.get("lock_timeout", 10.0)) if message.metadata else 10.0,
         )
         try:
             ws_lock.acquire()
@@ -1847,263 +1987,194 @@ class BrainFrogRuntime:
                         **({"remote_work": remote_result.to_dict()} if remote_result else {}),
                     },
                 )
-        finally:
-            ws_lock.release()
 
-        emit("agent.completed", {"steps_count": len(results)})
+            emit("agent.completed", {"steps_count": len(results)})
 
-        remote_result = None
-        if remote_context is not None:
-            tx_res = cfg.last_transaction_result
-            test_proc = getattr(cfg, "last_test_result", None)
-            work_id = remote_context.work_id
+            remote_result = None
+            if remote_context is not None:
+                tx_res = cfg.last_transaction_result
+                test_proc = getattr(cfg, "last_test_result", None)
+                work_id = remote_context.work_id
 
-            if tx_res is None or not tx_res.success:
-                fail_summary = f"Work {work_id} failed and was rolled back."
-                if tx_res and getattr(tx_res, "error", None):
-                    fail_summary += f" {tx_res.error}"
-                self.remote_work.transition_for_approval(
-                    str(approval_id),
-                    WorkStatus.FAILED,
-                    failure=WorkFailure(
-                        code="VERIFICATION_FAILED" if (tx_res and tx_res.rolled_back) else "EXECUTION_FAILED",
-                        stage="execution",
-                        summary=fail_summary,
-                        retryable=False,
-                    ),
-                )
-                remote_result = self.remote_work.result(
-                    str(approval_id),
-                    "failed",
-                    fail_summary,
-                    error_code="verification_failed",
-                    verification_passed=False,
-                )
-            else:
-                self.remote_work.bind_transaction(str(approval_id), tx_res.transaction_id)
-                resume_meta = {
-                    "workspace": str(workspace_dir),
-                    "task_id": work_id,
-                    "transaction_id": tx_res.transaction_id,
-                }
-                self.remote_work.transition_for_approval(
-                    str(approval_id),
-                    WorkStatus.VERIFYING,
-                    resume_metadata=resume_meta,
-                )
-
-                tx_ops = getattr(tx_res, "operations", []) or []
-                changed_files = [op.target for op in tx_ops]
-                expected_files = list(execution_contract.approved_targets) if execution_contract else changed_files
-
-                gate_passed, v_details, gate_errors = VerificationGate.verify(
-                    workspace=workspace_dir,
-                    expected_files=expected_files,
-                    actual_files=changed_files,
-                    test_proc=test_proc,
-                    tx_res=tx_res,
-                    tracked_pids=None,
-                    channel=effective_channel,
-                    contract=execution_contract,
-                )
-
-                tests_passed = bool(test_proc and test_proc.returncode == 0 and not getattr(test_proc, "is_timeout", False))
-                proc_stat = getattr(test_proc, "status", "success") if test_proc else "failed"
-                proof_verdict = compute_proof_verdict(
-                    tx_status="committed",
-                    tests_passed=tests_passed,
-                    gate_passed=gate_passed,
-                    process_status=proc_stat,
-                    rollback_error=None,
-                    is_recovery_required=False,
-                    gate_details=v_details,
-                )
-
-                change_records = build_change_records(tx_ops, workspace_dir)
-                if not change_records and changed_files:
-                    for cf in changed_files:
-                        try:
-                            cf_rel = normalize_workspace_relative_path(cf, workspace_dir)
-                            cf_disk = workspace_dir / cf_rel
-                            cf_hash = hashlib.sha256(cf_disk.read_bytes()).hexdigest() if cf_disk.exists() else None
-                            change_records.append(
-                                ChangeRecord(
-                                    path=cf_rel,
-                                    operation="MODIFY",
-                                    before_sha256=None,
-                                    after_sha256=cf_hash,
-                                    byte_count_delta=0,
-                                )
-                            )
-                        except Exception:
-                            pass
-
-                now_iso = datetime.now(timezone.utc).isoformat()
-                task_evidence = TaskEvidence(
-                    task_id=work_id,
-                    session_id=session.session_id,
-                    description=redact_secrets(remote_context.request.intent),
-                    created_at=now_iso,
-                    completed_at=now_iso,
-                    duration_ms=0,
-                )
-
-                raw_stdout = getattr(test_proc, "stdout", "") or ""
-                raw_stderr = getattr(test_proc, "stderr", "") or ""
-                stdout_bounded, stdout_trunc = capture_bounded_output(raw_stdout)
-                stderr_bounded, stderr_trunc = capture_bounded_output(raw_stderr)
-                test_cmd_str = " ".join(cfg.test_command) if isinstance(cfg.test_command, (list, tuple)) else str(cfg.test_command or "")
-
-                proc_evidence = None
-                if test_proc is not None:
-                    p_start_raw = getattr(test_proc, "started_at", None)
-                    p_comp_raw = getattr(test_proc, "completed_at", None)
-                    p_start_iso = datetime.fromtimestamp(p_start_raw, tz=timezone.utc).isoformat() if isinstance(p_start_raw, (int, float)) else ""
-                    p_comp_iso = datetime.fromtimestamp(p_comp_raw, tz=timezone.utc).isoformat() if isinstance(p_comp_raw, (int, float)) else ""
-                    p_stat_val = getattr(test_proc.status, "value", str(test_proc.status))
-                    proc_evidence = ProcessEvidence(
-                        task_id=work_id,
-                        transaction_id=tx_res.transaction_id,
-                        command=test_cmd_str,
-                        started_at=p_start_iso,
-                        completed_at=p_comp_iso,
-                        duration_ms=getattr(test_proc, "duration_ms", 0) or 0,
-                        returncode=test_proc.returncode,
-                        status=str(p_stat_val),
-                        timed_out=getattr(test_proc, "is_timeout", False),
-                        cancelled=getattr(test_proc, "is_cancelled", False),
-                        truncated=getattr(test_proc, "is_truncated", False) or stdout_trunc or stderr_trunc,
-                    )
-
-                v_evidence = VerificationEvidence(
-                    test_command=test_cmd_str,
-                    exit_code=test_proc.returncode if test_proc else None,
-                    stdout_summary=stdout_bounded,
-                    stderr_summary=stderr_bounded,
-                    stdout_truncated=stdout_trunc,
-                    stderr_truncated=stderr_trunc,
-                    gate_checks=v_details,
-                    process_evidence=proc_evidence,
-                )
-
-                changes_evidence = ChangesEvidence(
-                    transaction_id=tx_res.transaction_id,
-                    status="COMMITTED",
-                    files=change_records,
-                )
-
-                reproducibility = ReproducibilityEvidence(
-                    command=test_cmd_str,
-                    expected_exit_code=0,
-                    expected_file_hashes={r.path: r.after_sha256 for r in change_records if r.after_sha256},
-                )
-
-                from core.runtime.task_finalization import TaskFinalizationCoordinator
-                intent_record = TaskFinalizationCoordinator(workspace_dir).get_intent(work_id)
-                commit_sha = intent_record.commit_sha if intent_record else None
-
-                proof_artifact = ProofArtifact(
-                    version="1.0.0",
-                    task=task_evidence,
-                    verdict=proof_verdict,
-                    provenance=capture_git_provenance(
-                        workspace_dir,
-                        commit_sha=commit_sha,
-                    ),
-                    verification=v_evidence,
-                    changes=changes_evidence,
-                    reproducibility=reproducibility,
-                )
-
-                proof_store = FileProofStore(workspace_dir)
-                proof_path_str: Optional[str] = None
-                store_failed = False
-                store_err_msg = ""
-                try:
-                    md_text = render_proof_markdown(proof_artifact)
-                    pj, pm = proof_store.save(proof_artifact, md_text)
-                    proof_path_str = str(pj)
-                    TaskFinalizationCoordinator(workspace_dir).finalize_proof(work_id)
-                except Exception as store_exc:
-                    store_failed = True
-                    store_err_msg = str(store_exc)
-
-                if store_failed or proof_path_str is None:
-                    fail_summary = f"Task execution succeeded and committed, but proof persistence failed: {store_err_msg}. Recovery required."
+                if tx_res is None or not tx_res.success:
+                    fail_summary = f"Work {work_id} failed and was rolled back."
+                    if tx_res and getattr(tx_res, "error", None):
+                        fail_summary += f" {tx_res.error}"
                     self.remote_work.transition_for_approval(
                         str(approval_id),
                         WorkStatus.FAILED,
                         failure=WorkFailure(
-                            code="PROOF_PERSISTENCE_FAILED",
-                            stage="proof",
+                            code="VERIFICATION_FAILED" if (tx_res and tx_res.rolled_back) else "EXECUTION_FAILED",
+                            stage="execution",
                             summary=fail_summary,
                             retryable=False,
                         ),
-                        resume_metadata=resume_meta,
                     )
                     remote_result = self.remote_work.result(
                         str(approval_id),
                         "failed",
                         fail_summary,
-                        error_code="proof_persistence_failed",
+                        error_code="verification_failed",
                         verification_passed=False,
                     )
                 else:
-                    verifier = DeterministicProofVerifier(workspace_dir, verify_disk_integrity=True)
-                    rep = verifier.verify(work_id)
-                    proof_obj = None
-                    try:
-                        proof_obj = proof_store.load(work_id)
-                    except Exception:
-                        pass
-
-                    is_proof_valid = (
-                        rep.overall_status == ProofVerificationStatus.VALID
-                        and rep.verdict_status == "VERIFIED"
-                        and proof_verdict.status == "VERIFIED"
-                        and proof_obj is not None
-                        and proof_obj.verdict.status == "VERIFIED"
-                        and proof_obj.changes.status == "COMMITTED"
-                        and proof_obj.task.task_id == work_id
-                        and proof_obj.changes.transaction_id == tx_res.transaction_id
+                    self.remote_work.bind_transaction(str(approval_id), tx_res.transaction_id)
+                    resume_meta = {
+                        "workspace": str(workspace_dir),
+                        "task_id": work_id,
+                        "transaction_id": tx_res.transaction_id,
+                    }
+                    self.remote_work.transition_for_approval(
+                        str(approval_id),
+                        WorkStatus.VERIFYING,
+                        resume_metadata=resume_meta,
                     )
 
-                    if is_proof_valid:
-                        passed_c = len([c for c in rep.checks if c.status == ProofVerificationStatus.VALID])
-                        v_res = VerificationResult(
-                            status=VerificationStatus.PASS,
-                            passed=passed_c,
-                            failed=0,
-                            summary=f"Authoritative proof verified ({work_id})",
+                    tx_ops = getattr(tx_res, "operations", []) or []
+                    changed_files = [op.target for op in tx_ops]
+                    expected_files = list(execution_contract.approved_targets) if execution_contract else changed_files
+
+                    gate_passed, v_details, gate_errors = VerificationGate.verify(
+                        workspace=workspace_dir,
+                        expected_files=expected_files,
+                        actual_files=changed_files,
+                        test_proc=test_proc,
+                        tx_res=tx_res,
+                        tracked_pids=None,
+                        channel=effective_channel,
+                        contract=execution_contract,
+                    )
+
+                    tests_passed = bool(test_proc and test_proc.returncode == 0 and not getattr(test_proc, "is_timeout", False))
+                    proc_stat = getattr(test_proc, "status", "success") if test_proc else "failed"
+                    proof_verdict = compute_proof_verdict(
+                        tx_status="committed",
+                        tests_passed=tests_passed,
+                        gate_passed=gate_passed,
+                        process_status=proc_stat,
+                        rollback_error=None,
+                        is_recovery_required=False,
+                        gate_details=v_details,
+                    )
+
+                    change_records = build_change_records(tx_ops, workspace_dir)
+                    if not change_records and changed_files:
+                        for cf in changed_files:
+                            try:
+                                cf_rel = normalize_workspace_relative_path(cf, workspace_dir)
+                                cf_disk = workspace_dir / cf_rel
+                                cf_hash = hashlib.sha256(cf_disk.read_bytes()).hexdigest() if cf_disk.exists() else None
+                                change_records.append(
+                                    ChangeRecord(
+                                        path=cf_rel,
+                                        operation="MODIFY",
+                                        before_sha256=None,
+                                        after_sha256=cf_hash,
+                                        byte_count_delta=0,
+                                    )
+                                )
+                            except Exception:
+                                pass
+
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    task_evidence = TaskEvidence(
+                        task_id=work_id,
+                        session_id=session.session_id,
+                        description=redact_secrets(remote_context.request.intent),
+                        created_at=now_iso,
+                        completed_at=now_iso,
+                        duration_ms=0,
+                    )
+
+                    raw_stdout = getattr(test_proc, "stdout", "") or ""
+                    raw_stderr = getattr(test_proc, "stderr", "") or ""
+                    stdout_bounded, stdout_trunc = capture_bounded_output(raw_stdout)
+                    stderr_bounded, stderr_trunc = capture_bounded_output(raw_stderr)
+                    test_cmd_str = " ".join(cfg.test_command) if isinstance(cfg.test_command, (list, tuple)) else str(cfg.test_command or "")
+
+                    proc_evidence = None
+                    if test_proc is not None:
+                        p_start_raw = getattr(test_proc, "started_at", None)
+                        p_comp_raw = getattr(test_proc, "completed_at", None)
+                        p_start_iso = datetime.fromtimestamp(p_start_raw, tz=timezone.utc).isoformat() if isinstance(p_start_raw, (int, float)) else ""
+                        p_comp_iso = datetime.fromtimestamp(p_comp_raw, tz=timezone.utc).isoformat() if isinstance(p_comp_raw, (int, float)) else ""
+                        p_stat_val = getattr(test_proc.status, "value", str(test_proc.status))
+                        proc_evidence = ProcessEvidence(
+                            task_id=work_id,
+                            transaction_id=tx_res.transaction_id,
+                            command=test_cmd_str,
+                            cwd=str(workspace_dir),
+                            started_at=p_start_iso,
+                            completed_at=p_comp_iso,
+                            duration_ms=getattr(test_proc, "duration_ms", 0) or 0,
+                            returncode=test_proc.returncode,
+                            status=str(p_stat_val),
+                            timed_out=getattr(test_proc, "is_timeout", False),
+                            cancelled=getattr(test_proc, "is_cancelled", False),
+                            truncated=getattr(test_proc, "is_truncated", False) or stdout_trunc or stderr_trunc,
                         )
-                        self.remote_work.transition_for_approval(
-                            str(approval_id),
-                            WorkStatus.DONE,
-                            verification_result=v_res,
-                            resume_metadata=resume_meta,
-                        )
-                        remote_result = self.remote_work.result(
-                            str(approval_id),
-                            "completed",
-                            f"Work {work_id} completed successfully.",
-                            proof_path=proof_path_str,
-                            verification_passed=True,
-                        )
-                    else:
-                        fail_reasons = []
-                        if rep.overall_status != ProofVerificationStatus.VALID:
-                            fail_reasons.append(f"verifier status: {rep.overall_status.value}")
-                        if proof_verdict.status != "VERIFIED":
-                            fail_reasons.append(f"verdict status: {proof_verdict.status}")
-                        if gate_errors:
-                            fail_reasons.extend(gate_errors)
-                        fail_summary = f"Verification failed for work {work_id}: {'; '.join(fail_reasons) or 'Evidence mismatch'}."
+
+                    v_evidence = VerificationEvidence(
+                        test_command=test_cmd_str,
+                        exit_code=test_proc.returncode if test_proc else None,
+                        stdout_summary=stdout_bounded,
+                        stderr_summary=stderr_bounded,
+                        stdout_truncated=stdout_trunc,
+                        stderr_truncated=stderr_trunc,
+                        gate_checks=v_details,
+                        process_evidence=proc_evidence,
+                    )
+
+                    changes_evidence = ChangesEvidence(
+                        transaction_id=tx_res.transaction_id,
+                        status="COMMITTED",
+                        files=change_records,
+                    )
+
+                    reproducibility = ReproducibilityEvidence(
+                        command=test_cmd_str,
+                        expected_exit_code=0,
+                        expected_file_hashes={r.path: r.after_sha256 for r in change_records if r.after_sha256},
+                    )
+
+                    from core.runtime.task_finalization import TaskFinalizationCoordinator
+                    intent_record = TaskFinalizationCoordinator(workspace_dir).get_intent(work_id)
+                    commit_sha = intent_record.commit_sha if intent_record else None
+
+                    proof_artifact = ProofArtifact(
+                        version="1.0.0",
+                        task=task_evidence,
+                        verdict=proof_verdict,
+                        provenance=capture_git_provenance(
+                            workspace_dir,
+                            commit_sha=commit_sha,
+                        ),
+                        verification=v_evidence,
+                        changes=changes_evidence,
+                        reproducibility=reproducibility,
+                    )
+
+                    proof_store = FileProofStore(workspace_dir)
+                    proof_path_str: Optional[str] = None
+                    store_failed = False
+                    store_err_msg = ""
+                    try:
+                        md_text = render_proof_markdown(proof_artifact)
+                        pj, pm = proof_store.save(proof_artifact, md_text)
+                        proof_path_str = str(pj)
+                        TaskFinalizationCoordinator(workspace_dir).finalize_proof(work_id)
+                    except Exception as store_exc:
+                        store_failed = True
+                        store_err_msg = str(store_exc)
+
+                    if store_failed or proof_path_str is None:
+                        fail_summary = f"Task execution succeeded and committed, but proof persistence failed: {store_err_msg}. Recovery required."
                         self.remote_work.transition_for_approval(
                             str(approval_id),
                             WorkStatus.FAILED,
                             failure=WorkFailure(
-                                code="VERIFICATION_FAILED",
-                                stage="verifying",
+                                code="PROOF_PERSISTENCE_FAILED",
+                                stage="proof",
                                 summary=fail_summary,
                                 retryable=False,
                             ),
@@ -2113,10 +2184,81 @@ class BrainFrogRuntime:
                             str(approval_id),
                             "failed",
                             fail_summary,
-                            error_code="verification_failed",
-                            proof_path=proof_path_str,
+                            error_code="proof_persistence_failed",
                             verification_passed=False,
                         )
+                    else:
+                        verifier = DeterministicProofVerifier(workspace_dir, verify_disk_integrity=True)
+                        rep = verifier.verify(work_id)
+                        proof_obj = None
+                        try:
+                            proof_obj = proof_store.load(work_id)
+                        except Exception:
+                            pass
+
+                        is_proof_valid = (
+                            rep.overall_status == ProofVerificationStatus.VALID
+                            and rep.verdict_status == "VERIFIED"
+                            and proof_verdict.status == "VERIFIED"
+                            and proof_obj is not None
+                            and proof_obj.verdict.status == "VERIFIED"
+                            and proof_obj.changes.status in ("COMMITTED", "VERIFIED")
+                            and proof_obj.task.task_id == work_id
+                            and proof_obj.changes.transaction_id == tx_res.transaction_id
+                        )
+
+                        if is_proof_valid:
+                            passed_c = len([c for c in rep.checks if c.status == ProofVerificationStatus.VALID])
+                            v_res = VerificationResult(
+                                status=VerificationStatus.PASS,
+                                passed=passed_c,
+                                failed=0,
+                                summary=f"Authoritative proof verified ({work_id})",
+                            )
+                            self.remote_work.transition_for_approval(
+                                str(approval_id),
+                                WorkStatus.DONE,
+                                verification_result=v_res,
+                                resume_metadata=resume_meta,
+                            )
+                            remote_result = self.remote_work.result(
+                                str(approval_id),
+                                "completed",
+                                f"Work {work_id} completed successfully.",
+                                proof_path=proof_path_str,
+                                verification_passed=True,
+                            )
+                        else:
+                            fail_reasons = []
+                            if rep.overall_status != ProofVerificationStatus.VALID:
+                                fail_reasons.append(f"verifier status: {rep.overall_status.value}")
+                            if proof_verdict.status != "VERIFIED":
+                                fail_reasons.append(f"verdict status: {proof_verdict.status}")
+                            if gate_errors:
+                                fail_reasons.extend(gate_errors)
+                            fail_summary = f"Verification failed for work {work_id}: {'; '.join(fail_reasons) or 'Evidence mismatch'}."
+                            self.remote_work.transition_for_approval(
+                                str(approval_id),
+                                WorkStatus.FAILED,
+                                failure=WorkFailure(
+                                    code="VERIFICATION_FAILED",
+                                    stage="verifying",
+                                    summary=fail_summary,
+                                    retryable=False,
+                                ),
+                                resume_metadata=resume_meta,
+                            )
+                            remote_result = self.remote_work.result(
+                                str(approval_id),
+                                "failed",
+                                fail_summary,
+                                error_code="verification_failed",
+                                proof_path=proof_path_str,
+                                verification_passed=False,
+                            )
+
+        finally:
+            ws_lock.release()
 
         # 7. Format Outgoing Response Text
         reply_texts: List[str] = []

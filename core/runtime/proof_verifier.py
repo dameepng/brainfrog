@@ -28,6 +28,8 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass, field
+
+from core.runtime.process import run_hardened_subprocess
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
@@ -47,7 +49,14 @@ from core.runtime.task_finalization import (
 logger = logging.getLogger(__name__)
 
 SUPPORTED_SCHEMA_VERSIONS: Set[str] = {"1.0.0"}
-VALID_CHANGES_STATUSES: Set[str] = {"COMMITTED", "ROLLED_BACK", "FAILED", "CANCELLED"}
+VALID_CHANGES_STATUSES: Set[str] = {
+    "COMMITTED",
+    "COMMITTED_UNTESTED",
+    "VERIFIED",
+    "ROLLED_BACK",
+    "FAILED",
+    "CANCELLED",
+}
 GIT_HEX_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 
 MANDATORY_VERIFICATION_GATES: Tuple[str, ...] = (
@@ -650,12 +659,12 @@ class DeterministicProofVerifier:
         # Check 6: Verdict vs Transaction Outcome Consistency
         # -----------------------------------------------------------------
         if claimed_verdict == "VERIFIED":
-            if claimed_changes_status != "COMMITTED":
+            if claimed_changes_status not in ("COMMITTED", "VERIFIED"):
                 report.checks.append(
                     VerificationCheckResult(
                         check_name="verdict_transaction_consistency",
                         status=ProofVerificationStatus.INVALID,
-                        message=f"Contradiction: Verdict is VERIFIED but changes status is '{claimed_changes_status}' (must be COMMITTED).",
+                        message=f"Contradiction: Verdict is VERIFIED but changes status is '{claimed_changes_status}' (must be COMMITTED or VERIFIED).",
                     )
                 )
                 report.reasons.append(f"VERIFIED verdict contradicts changes status '{claimed_changes_status}'.")
@@ -665,7 +674,7 @@ class DeterministicProofVerifier:
                     VerificationCheckResult(
                         check_name="verdict_transaction_consistency",
                         status=ProofVerificationStatus.VALID,
-                        message="VERIFIED verdict aligns with COMMITTED changes status.",
+                        message=f"VERIFIED verdict aligns with {claimed_changes_status} changes status.",
                     )
                 )
         elif claimed_changes_status == "ROLLED_BACK":
@@ -687,16 +696,35 @@ class DeterministicProofVerifier:
                         message=f"Non-verified verdict '{claimed_verdict}' aligns with ROLLED_BACK changes status.",
                     )
                 )
-        elif claimed_changes_status == "COMMITTED" and claimed_verdict != "VERIFIED":
+        elif claimed_changes_status in ("COMMITTED", "VERIFIED") and claimed_verdict != "VERIFIED":
             report.checks.append(
                 VerificationCheckResult(
                     check_name="verdict_transaction_consistency",
                     status=ProofVerificationStatus.INVALID,
-                    message=f"Contradiction: Changes were COMMITTED, but verdict is '{claimed_verdict}' (must be VERIFIED to commit).",
+                    message=f"Contradiction: Changes were {claimed_changes_status}, but verdict is '{claimed_verdict}' (must be VERIFIED to commit).",
                 )
             )
-            report.reasons.append(f"COMMITTED changes contradict non-verified verdict '{claimed_verdict}'.")
+            report.reasons.append(f"{claimed_changes_status} changes contradict non-verified verdict '{claimed_verdict}'.")
             report.overall_status = ProofVerificationStatus.INVALID
+        elif claimed_changes_status == "COMMITTED_UNTESTED":
+            if claimed_verdict == "VERIFIED":
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="verdict_transaction_consistency",
+                        status=ProofVerificationStatus.INVALID,
+                        message="Contradiction: Changes were COMMITTED_UNTESTED, but verdict claims VERIFIED.",
+                    )
+                )
+                report.reasons.append("COMMITTED_UNTESTED changes contradict VERIFIED verdict.")
+                report.overall_status = ProofVerificationStatus.INVALID
+            else:
+                report.checks.append(
+                    VerificationCheckResult(
+                        check_name="verdict_transaction_consistency",
+                        status=ProofVerificationStatus.VALID,
+                        message=f"Non-verified verdict '{claimed_verdict}' aligns with COMMITTED_UNTESTED changes status.",
+                    )
+                )
 
         # -----------------------------------------------------------------
         # Check 7: Test Command, Execution Evidence, and Gate Invariants
@@ -988,12 +1016,10 @@ class DeterministicProofVerifier:
             # If workspace has .git, verify whether commit SHA exists in object database
             if is_git and c_sha and (self.workspace / ".git").exists():
                 try:
-                    chk = subprocess.run(
+                    chk = run_hardened_subprocess(
                         ["git", "cat-file", "-e", f"{c_sha}^{{commit}}"],
                         cwd=self.workspace,
-                        capture_output=True,
-                        text=True,
-                        check=False,
+                        timeout=5.0,
                     )
                     if chk.returncode != 0:
                         # Commit SHA does not exist in local Git database

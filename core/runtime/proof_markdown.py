@@ -97,6 +97,11 @@ def render_proof_markdown(artifact: ProofArtifact) -> str:
     lines.append(f"- **Test Command:** `{artifact.verification.test_command or '(none)'}`")
     exit_code_display = artifact.verification.exit_code if artifact.verification.exit_code is not None else "(not run)"
     lines.append(f"- **Exit Code:** `{exit_code_display}`")
+    proc_ev = artifact.verification.process_evidence
+    if proc_ev and proc_ev.cwd:
+        lines.append(f"- **Working Directory:** `{proc_ev.cwd}`")
+    if proc_ev and proc_ev.timed_out:
+        lines.append(f"- **Timed Out:** `true`")
     lines.append("")
 
     lines.append("### stdout")

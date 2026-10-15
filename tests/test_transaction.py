@@ -30,6 +30,12 @@ from core.runtime.transaction import (
     TransactionVerifier,
     recover_incomplete_transaction,
 )
+from core.runtime.workspace_lock import (
+    WorkspaceLock,
+    WorkspaceLockedError,
+    WorkspaceLockCapability,
+    WorkspaceLockRevokedError,
+)
 from orchestrator import RunConfig, _write_files
 
 
@@ -39,7 +45,8 @@ class TestTransactionStatusAndTransitions(unittest.TestCase):
     def test_status_enum_values(self) -> None:
         expected = {
             "created", "staging", "executing", "verifying",
-            "committed", "rolling_back", "rolled_back", "failed",
+            "committed", "committed_untested", "verified",
+            "rolling_back", "rolled_back", "failed",
         }
         actual = {s.value for s in TransactionStatus}
         self.assertEqual(actual, expected)
@@ -208,9 +215,13 @@ class TestTransactionCoordinatorFilesystemOperations(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.mkdtemp()
         self.workspace = Path(self.tmp_dir)
+        self.lock = WorkspaceLock(self.workspace)
+        self.lock.acquire()
         self.coordinator = TransactionCoordinator(self.workspace)
 
     def tearDown(self) -> None:
+        if hasattr(self, "lock"):
+            self.lock.release()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_create_file_operation(self) -> None:
@@ -312,10 +323,14 @@ class TestTransactionCoordinatorAtomicityAndRollback(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.mkdtemp()
         self.workspace = Path(self.tmp_dir)
+        self.lock = WorkspaceLock(self.workspace)
+        self.lock.acquire()
         self.store = InMemoryTransactionStore()
         self.coordinator = TransactionCoordinator(self.workspace, store=self.store)
 
     def tearDown(self) -> None:
+        if hasattr(self, "lock"):
+            self.lock.release()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_successful_multi_op_commit(self) -> None:
@@ -327,7 +342,7 @@ class TestTransactionCoordinatorAtomicityAndRollback(unittest.TestCase):
 
         result = self.coordinator.run()
         self.assertTrue(result.success)
-        self.assertEqual(result.status, TransactionStatus.COMMITTED)
+        self.assertIn(result.status, (TransactionStatus.COMMITTED, TransactionStatus.COMMITTED_UNTESTED))
         self.assertEqual(len(result.operations), 2)
         self.assertEqual((self.workspace / "file1.txt").read_text(encoding="utf-8"), "mod1")
         self.assertEqual((self.workspace / "file2.txt").read_text(encoding="utf-8"), "created2")
@@ -336,7 +351,7 @@ class TestTransactionCoordinatorAtomicityAndRollback(unittest.TestCase):
         saved = self.store.get(result.transaction_id)
         self.assertIsNotNone(saved)
         assert saved is not None
-        self.assertEqual(saved.status, TransactionStatus.COMMITTED)
+        self.assertIn(saved.status, (TransactionStatus.COMMITTED, TransactionStatus.COMMITTED_UNTESTED))
 
     def test_atomic_rollback_on_step_failure(self) -> None:
         # Setup pre-existing files
@@ -398,9 +413,13 @@ class TestTransactionVerificationAndFailure(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.mkdtemp()
         self.workspace = Path(self.tmp_dir)
+        self.lock = WorkspaceLock(self.workspace)
+        self.lock.acquire()
         self.store = InMemoryTransactionStore()
 
     def tearDown(self) -> None:
+        if hasattr(self, "lock"):
+            self.lock.release()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_verification_failure_triggers_rollback(self) -> None:
@@ -572,9 +591,13 @@ class TestOrchestratorTransactionalWrites(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.mkdtemp()
         self.workspace = Path(self.tmp_dir)
+        self.lock = WorkspaceLock(self.workspace)
+        self.lock.acquire()
         self.store = InMemoryTransactionStore()
 
     def tearDown(self) -> None:
+        if hasattr(self, "lock"):
+            self.lock.release()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_write_files_success_under_transaction(self) -> None:
@@ -592,7 +615,7 @@ class TestOrchestratorTransactionalWrites(unittest.TestCase):
         )
         self.assertIsInstance(res, TransactionResult)
         self.assertTrue(res.success)
-        self.assertEqual(res.status, TransactionStatus.COMMITTED)
+        self.assertIn(res.status, (TransactionStatus.COMMITTED, TransactionStatus.COMMITTED_UNTESTED))
         self.assertTrue((self.workspace / "module_a.py").exists())
         self.assertTrue((self.workspace / "module_b.py").exists())
 
@@ -602,7 +625,7 @@ class TestOrchestratorTransactionalWrites(unittest.TestCase):
         assert saved is not None
         self.assertEqual(saved.work_id, "work-001")
         self.assertEqual(saved.plan_id, "plan-001")
-        self.assertEqual(saved.status, TransactionStatus.COMMITTED)
+        self.assertIn(saved.status, (TransactionStatus.COMMITTED, TransactionStatus.COMMITTED_UNTESTED))
 
     def test_write_files_plan_mode_fails_closed_without_transaction(self) -> None:
         files = {"bad.py": "print(1)"}

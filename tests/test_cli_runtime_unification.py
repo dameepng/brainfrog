@@ -217,49 +217,55 @@ class TestCLIRuntimeUnification(unittest.TestCase):
 
     def test_d_transaction_rollback(self):
         """Test D: Controlled execution mutates state and then fails; verification triggers rollback to pre-execution state."""
-        target_file = self.repo_dir / "service.py"
-        target_file.write_text("INITIAL_CONTENT = True\n", encoding="utf-8")
+        from core.runtime.workspace_lock import WorkspaceLock
+        lock = WorkspaceLock(self.repo_dir)
+        lock.acquire()
+        try:
+            target_file = self.repo_dir / "service.py"
+            target_file.write_text("INITIAL_CONTENT = True\n", encoding="utf-8")
 
-        tx_store = FileTransactionStore(self.repo_dir)
+            tx_store = FileTransactionStore(self.repo_dir)
 
-        # 1. Direct coordinator controlled mutation and rollback
-        coordinator = TransactionCoordinator(
-            workspace=self.repo_dir,
-            session_id="cli:local:default",
-            store=tx_store,
-        )
-        coordinator.begin()
-        coordinator.stage_modify("service.py", "CORRUPTED_MUTATION = True\n")
-        coordinator.execute()
-
-        # Mutation occurred on disk during execution
-        self.assertIn("CORRUPTED_MUTATION", target_file.read_text(encoding="utf-8"))
-
-        # Controlled failure triggers rollback
-        tx_result = coordinator.rollback(reason="Test suite verification failed with exit code 1")
-
-        # Execution failed and rollback occurred
-        self.assertFalse(tx_result.success)
-        self.assertEqual(tx_result.status.value, "rolled_back")
-        # Final state == pre-execution state
-        self.assertEqual(target_file.read_text(encoding="utf-8"), "INITIAL_CONTENT = True\n")
-
-        # 2. Automated rollback through _write_files when verifier fails
-        class FailingVerifier(TransactionVerifier):
-            def verify(self, tx: Transaction, workspace: Path) -> Tuple[bool, Optional[str], Dict[str, Any]]:
-                return False, "Lint checks failed", {"violations": 3}
-
-        with self.assertRaises(RuntimeError) as ctx:
-            _write_files(
-                repo_dir=self.repo_dir,
-                files={"service.py": "MUTATED_VIA_WRITE_FILES = True\n"},
-                mode="build",
+            # 1. Direct coordinator controlled mutation and rollback
+            coordinator = TransactionCoordinator(
+                workspace=self.repo_dir,
+                session_id="cli:local:default",
                 store=tx_store,
-                verifier=FailingVerifier(),
             )
-        self.assertIn("Transaction verification failed", str(ctx.exception))
-        # File on disk restored to pre-execution state
-        self.assertEqual(target_file.read_text(encoding="utf-8"), "INITIAL_CONTENT = True\n")
+            coordinator.begin()
+            coordinator.stage_modify("service.py", "CORRUPTED_MUTATION = True\n")
+            coordinator.execute()
+
+            # Mutation occurred on disk during execution
+            self.assertIn("CORRUPTED_MUTATION", target_file.read_text(encoding="utf-8"))
+
+            # Controlled failure triggers rollback
+            tx_result = coordinator.rollback(reason="Test suite verification failed with exit code 1")
+
+            # Execution failed and rollback occurred
+            self.assertFalse(tx_result.success)
+            self.assertEqual(tx_result.status.value, "rolled_back")
+            # Final state == pre-execution state
+            self.assertEqual(target_file.read_text(encoding="utf-8"), "INITIAL_CONTENT = True\n")
+
+            # 2. Automated rollback through _write_files when verifier fails
+            class FailingVerifier(TransactionVerifier):
+                def verify(self, tx: Transaction, workspace: Path) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+                    return False, "Lint checks failed", {"violations": 3}
+
+            with self.assertRaises(RuntimeError) as ctx:
+                _write_files(
+                    repo_dir=self.repo_dir,
+                    files={"service.py": "MUTATED_VIA_WRITE_FILES = True\n"},
+                    mode="build",
+                    store=tx_store,
+                    verifier=FailingVerifier(),
+                )
+            self.assertIn("Transaction verification failed", str(ctx.exception))
+            # File on disk restored to pre-execution state
+            self.assertEqual(target_file.read_text(encoding="utf-8"), "INITIAL_CONTENT = True\n")
+        finally:
+            lock.release()
 
     def test_e_contract_propagation(self):
         """Test E: ApprovedExecutionContract propagates through runtime to downstream orchestrator without metadata loss."""

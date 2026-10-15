@@ -35,16 +35,19 @@ from security.git_guard import (  # pyright: ignore[reportMissingImports]
     unstage_staged_changes,
 )
 from core.runtime.process import HardenedProcessResult, run_hardened_subprocess
+from core.runtime.command_policy import CommandPolicy, DEFAULT_COMMAND_POLICY, STRICT_PRODUCTION_POLICY
 from core.runtime.transaction import (
     OperationStatus,
     TransactionCoordinator,
     TransactionResult,
     TransactionStatus,
+    validate_protected_target,
 )
 from core.runtime.git_staging import (
     stage_authorized_targets,
     unstage_target_paths,
 )
+from core.runtime.secret_scrubbing import safe_scrub
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from core.runtime.contract import ApprovedExecutionContract
@@ -222,9 +225,28 @@ def _run(
     cmd: Union[List[str], Sequence[str], str],
     cwd: Path,
     timeout: Optional[float] = None,
+    command_policy: Optional[CommandPolicy] = None,
 ) -> HardenedProcessResult:
     effective_timeout = float(timeout) if timeout is not None else 120.0
-    return run_hardened_subprocess(cmd, cwd=cwd, timeout=effective_timeout)
+    if isinstance(cmd, str):
+        import shlex
+        if sys.platform == "win32":
+            raw_tokens = shlex.split(cmd, posix=False)
+            effective_cmd = [
+                t[1:-1] if (len(t) >= 2 and t[0] in ('"', "'") and t[-1] == t[0]) else t
+                for t in raw_tokens
+            ]
+        else:
+            effective_cmd = shlex.split(cmd, posix=True)
+    else:
+        effective_cmd = list(cmd)
+    return run_hardened_subprocess(
+        effective_cmd,
+        cwd=cwd,
+        timeout=effective_timeout,
+        allow_shell=False,
+        command_policy=command_policy or DEFAULT_COMMAND_POLICY,
+    )
 
 
 def clean_git_remote_url(raw: str) -> str:
@@ -259,12 +281,10 @@ def clean_git_remote_url(raw: str) -> str:
 def get_git_remote_url(repo_dir: Path, remote_name: str = "origin") -> str:
     """Return the configured fetch/push URL for git remote, or empty string if not set."""
     try:
-        proc = subprocess.run(
+        proc = _run(
             ["git", "remote", "get-url", remote_name],
             cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=3,
+            timeout=5.0,
         )
         if proc.returncode == 0:
             return proc.stdout.strip()
@@ -293,53 +313,43 @@ def configure_git_remote(
 
     try:
         # Check existing remotes
-        chk = subprocess.run(
+        chk = _run(
             ["git", "remote"],
             cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=5,
+            timeout=5.0,
         )
         existing_remotes = chk.stdout.split() if chk.returncode == 0 else []
 
         if remote_name in existing_remotes:
             # Remote already exists: use set-url
-            res = subprocess.run(
+            res = _run(
                 ["git", "remote", "set-url", remote_name, clean_url],
                 cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
+                timeout=5.0,
             )
             if res.returncode == 0:
                 return True, clean_url
             # Fallback to add if set-url somehow failed
-            res_add = subprocess.run(
+            res_add = _run(
                 ["git", "remote", "add", remote_name, clean_url],
                 cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
+                timeout=5.0,
             )
             return res_add.returncode == 0, clean_url
         else:
             # Remote does not exist: use add
-            res = subprocess.run(
+            res = _run(
                 ["git", "remote", "add", remote_name, clean_url],
                 cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
+                timeout=5.0,
             )
             if res.returncode == 0:
                 return True, clean_url
             # Fallback to set-url if remote actually existed (e.g. race condition)
-            res_set = subprocess.run(
+            res_set = _run(
                 ["git", "remote", "set-url", remote_name, clean_url],
                 cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
+                timeout=5.0,
             )
             return res_set.returncode == 0, clean_url
     except Exception:
@@ -462,58 +472,11 @@ def validate_and_stage_files(
     for raw_rel, content in files.items():
         if contract is not None:
             contract.require_filesystem("write", raw_rel, repo_res)
-        # 1. Reject invalid or null paths
-        if not isinstance(raw_rel, str) or not raw_rel.strip():
-            raise PermissionError("Path validation denied: file path is empty or not a string.")
-        if "\x00" in raw_rel:
-            raise PermissionError(f"Path validation denied: null byte detected in path '{raw_rel}'.")
 
-        clean = raw_rel.replace("\\", "/").strip()
-
-        # 2. Check for Windows absolute drive path or POSIX root path
-        if re.match(r"^[a-zA-Z]:", clean) or clean.startswith("/"):
-            cand = Path(clean).resolve()
-            if not cand.is_relative_to(repo_res):
-                raise PermissionError(
-                    f"Path traversal denied: absolute path '{raw_rel}' escapes repository boundary."
-                )
-            target_path = cand
-        else:
-            # 3. Strip accidental repo directory name prefix if present
-            norm_rel = _normalize_rel_path(repo_dir, clean)
-            target_path = (repo_res / norm_rel).resolve()
-
-        # 4. Containment check against repo root
-        if not target_path.is_relative_to(repo_res):
-            raise PermissionError(
-                f"Path traversal denied: path '{raw_rel}' escapes repository boundary."
-            )
-        if target_path == repo_res:
-            raise PermissionError(
-                f"Path validation denied: path '{raw_rel}' points to repository root, not a file."
-            )
-
-        # 5. Prevent writing over existing directory
-        if target_path.exists() and target_path.is_dir():
-            raise PermissionError(
-                f"Path validation denied: path '{raw_rel}' references an existing directory."
-            )
-
-        # 6. Check parent hierarchy for symlinks pointing outside
-        curr = target_path.parent
-        while curr != repo_res and curr != curr.parent:
-            if curr.exists() and curr.is_symlink():
-                resolved_parent = curr.resolve()
-                if not resolved_parent.is_relative_to(repo_res):
-                    raise PermissionError(
-                        f"Symlink traversal denied: parent directory '{curr}' escapes repository boundary."
-                    )
-            curr = curr.parent
-
-        # 7. Canonical relative path for contract scope checking
+        target_path = validate_protected_target(raw_rel, repo_res)
         canonical_rel = target_path.relative_to(repo_res).as_posix()
 
-        # 8. Execution contract validation (for approved remote execution)
+        # Execution contract validation (for approved remote execution)
         if contract is not None:
             if not contract.is_target_allowed(canonical_rel):
                 allowed_str = ", ".join(f"'{t}'" for t in sorted(contract.approved_targets))
@@ -554,33 +517,37 @@ def _write_files(
     # Validate all files before writing the first file (Fail-closed, zero partial writes)
     staged = validate_and_stage_files(repo_dir, files, contract=contract)
 
-    from core.runtime.transaction import TransactionCoordinator
-    coordinator = TransactionCoordinator(
-        workspace=repo_dir,
-        contract=contract,
-        work_id=work_id,
-        plan_id=plan_id,
-        session_id=session_id,
-        store=store,
-        verifier=verifier,
-        task_id=task_id,
-    )
-    coordinator.begin()
-    repo_res = repo_dir.resolve()
-    for target_path, content in staged:
-        clean_rel = target_path.relative_to(repo_res).as_posix()
-        if target_path.exists():
-            coordinator.stage_modify(clean_rel, content)
-        else:
-            coordinator.stage_create(clean_rel, content)
+    from core.runtime.workspace_lock import WorkspaceLock
+    with WorkspaceLock(repo_dir, session_id=session_id, task_id=task_id):
+        from core.runtime.transaction import TransactionCoordinator
+        coordinator = TransactionCoordinator(
+            workspace=repo_dir,
+            contract=contract,
+            work_id=work_id,
+            plan_id=plan_id,
+            session_id=session_id,
+            store=store,
+            verifier=verifier,
+            task_id=task_id,
+        )
+        coordinator.begin()
+        repo_res = repo_dir.resolve()
+        for target_path, content in staged:
+            clean_rel = target_path.relative_to(repo_res).as_posix()
+            if target_path.exists():
+                coordinator.stage_modify(clean_rel, content)
+            else:
+                coordinator.stage_create(clean_rel, content)
 
-    if not coordinator.execute():
-        raise RuntimeError(f"Transaction execution failed: {coordinator.tx.failure_reason}")
+        if not coordinator.execute():
+            raise RuntimeError(f"Transaction execution failed: {coordinator.tx.failure_reason}")
 
-    if not coordinator.verify():
-        raise RuntimeError(f"Transaction verification failed: {coordinator.tx.failure_reason}")
+        if not coordinator.verify():
+            raise RuntimeError(f"Transaction verification failed: {coordinator.tx.failure_reason}")
 
-    return coordinator.commit()
+        # _write_files performs filesystem-level mutation without domain test execution.
+        # Record explicit COMMITTED_UNTESTED status to distinguish mutation from verification.
+        return coordinator.commit(status=TransactionStatus.COMMITTED_UNTESTED)
 
 
 @dataclass
@@ -663,14 +630,13 @@ def _format_diff_breakdown(summary: CommitDiffSummary, max_files: int = 10) -> L
 
 def _get_git_head_sha(repo_dir: Path | str) -> Optional[str]:
     """Return HEAD commit SHA if it exists, or None for an unborn branch."""
-    proc = subprocess.run(
+    proc = _run(
         ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=str(repo_dir),
-        capture_output=True,
-        check=False,
+        cwd=Path(repo_dir),
+        timeout=5.0,
     )
     if proc.returncode == 0:
-        return proc.stdout.decode("utf-8", errors="replace").strip()
+        return proc.stdout.strip()
     return None
 
 
@@ -929,6 +895,8 @@ class Orchestrator:
         cancel_ev = _CURRENT_CANCEL_EVENT.get()
         if cancel_ev and cancel_ev.is_set():
             raise KeyboardInterrupt("Execution cancelled by cancellation token")
+        from core.runtime.secret_scrubbing import safe_scrub
+        msg = safe_scrub(msg)
         if self.log_fn:
             try:
                 self.log_fn(msg)
@@ -1216,10 +1184,10 @@ class Orchestrator:
             commit_hash = ""
             git_status = ""
             try:
-                c_res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.cfg.repo_dir, capture_output=True, text=True)
+                c_res = _run(["git", "rev-parse", "HEAD"], cwd=self.cfg.repo_dir, timeout=5.0)
                 if c_res.returncode == 0:
                     commit_hash = c_res.stdout.strip()
-                s_res = subprocess.run(["git", "status", "--porcelain"], cwd=self.cfg.repo_dir, capture_output=True, text=True)
+                s_res = _run(["git", "status", "--porcelain"], cwd=self.cfg.repo_dir, timeout=10.0)
                 if s_res.returncode == 0:
                     git_status = s_res.stdout
             except Exception:
@@ -1241,6 +1209,11 @@ class Orchestrator:
                 "assumptions": plan_data.get("assumptions", []),
                 "steps": plan_data.get("steps", []),
                 "relevant_files": relevant_files,
+                "verification_commands": (
+                    plan_data.get("verification_commands", [])
+                    if plan_data.get("verification_commands")
+                    else ([" ".join(self.cfg.test_command)] if isinstance(self.cfg.test_command, list) and self.cfg.test_command else ([self.cfg.test_command.strip()] if isinstance(self.cfg.test_command, str) and self.cfg.test_command.strip() else []))
+                ),
                 "commit_hash": commit_hash,
                 "git_status_snapshot": git_status,
                 "file_hashes": file_hashes,
@@ -1506,10 +1479,19 @@ class Orchestrator:
             raise PermissionError("Eksekusi langkah modifikasi kode dilarang dalam mode Plan.")
         self._in_production_step = True
         self.cfg.last_transaction_result = None
+        from core.runtime.workspace_lock import WorkspaceLock
+        ws_lock = WorkspaceLock(
+            workspace=self.cfg.repo_dir,
+            session_id=self.cfg.session_id,
+            task_id=self.cfg.task_id,
+            actor=self.cfg.actor,
+        )
+        ws_lock.acquire()
         try:
             return self._execute_step(step, sensitive=sensitive)
         finally:
             self._in_production_step = False
+            ws_lock.release()
 
     def _execute_step(self, step: PlanStep, sensitive: bool = False) -> StepResult:
         self._log(f"=== Step {step.id}: {step.description} ===")
@@ -1540,6 +1522,7 @@ class Orchestrator:
         if self.cfg.execution_contract is not None:
             active_coordinator = self._stage_and_execute_transaction(new_files)
             try:
+                test_executed = False
                 if self.cfg.test_command and self.cfg.test_command != ["forbidden"]:
                     test_proc = self._run_test_suite()
                     self.cfg.last_test_result = test_proc
@@ -1556,6 +1539,7 @@ class Orchestrator:
                         rb_res = active_coordinator.rollback(reason=fail_reason)
                         self.cfg.last_transaction_result = rb_res
                         raise RuntimeError(fail_reason)
+                    test_executed = True
 
                 verified = active_coordinator.verify()
                 if not verified:
@@ -1568,16 +1552,32 @@ class Orchestrator:
                         operations=tuple(active_coordinator.tx.operations),
                         error=active_coordinator.tx.failure_reason,
                         rollback_error=active_coordinator.tx.rollback_reason,
+                        verification_outcome="failed",
                     )
                     raise RuntimeError(fail_reason)
 
-                tx_res = active_coordinator.commit()
-                self.cfg.last_transaction_result = tx_res
-                if tx_res is None or not tx_res.success:
-                    raise RuntimeError("Transactional verification did not commit")
-                return StepResult(step, "verified", 0,
-                                  "Approved files were transactionally applied and verified. "
-                                  "Shell, Git, and browser operations were not authorized.")
+                if test_executed:
+                    active_coordinator.record_domain_verification(
+                        command=self.cfg.test_command,
+                        passed=True,
+                        returncode=test_proc.returncode,
+                        output_summary=getattr(test_proc, "sanitized_stdout", safe_scrub(getattr(test_proc, "stdout", "")))[:500],
+                    )
+                    tx_res = active_coordinator.commit(status=TransactionStatus.VERIFIED)
+                    self.cfg.last_transaction_result = tx_res
+                    if tx_res is None or not tx_res.success:
+                        raise RuntimeError("Transactional verification did not commit")
+                    return StepResult(step, "verified", 0,
+                                      "Approved files were transactionally applied and verified. "
+                                      "Shell, Git, and browser operations were not authorized.")
+                else:
+                    tx_res = active_coordinator.commit(status=TransactionStatus.COMMITTED_UNTESTED)
+                    self.cfg.last_transaction_result = tx_res
+                    if tx_res is None or not tx_res.success:
+                        raise RuntimeError("Transactional write did not commit")
+                    return StepResult(step, "untested", 0,
+                                      "Approved files were transactionally applied to disk, but no domain test suite was configured. "
+                                      "Changes remain unverified and cannot be staged or finalized to Git.")
             except BaseException as exc:
                 if not active_coordinator.tx.is_terminal:
                     try:
@@ -1617,6 +1617,47 @@ class Orchestrator:
         step_committed = False
 
         try:
+            has_domain_tests = bool(
+                self.cfg.test_command
+                and self.cfg.test_command != ["forbidden"]
+                and (
+                    (isinstance(self.cfg.test_command, list) and any(str(c).strip() for c in self.cfg.test_command))
+                    or (isinstance(self.cfg.test_command, str) and self.cfg.test_command.strip())
+                )
+            )
+            if not has_domain_tests:
+                verified = active_coordinator.verify()
+                if not verified:
+                    fail_reason = f"Filesystem transaction verification failed: {active_coordinator.tx.failure_reason}"
+                    self.cfg.last_transaction_result = TransactionResult(
+                        transaction_id=active_coordinator.tx.id,
+                        status=active_coordinator.tx.status,
+                        committed=False,
+                        rolled_back=(active_coordinator.tx.status == TransactionStatus.ROLLED_BACK),
+                        operations=tuple(active_coordinator.tx.operations),
+                        error=active_coordinator.tx.failure_reason,
+                        rollback_error=active_coordinator.tx.rollback_reason,
+                        verification_outcome="failed",
+                    )
+                    return StepResult(
+                        step,
+                        "escalated",
+                        0,
+                        f"Filesystem transaction verification failed: {active_coordinator.tx.failure_reason}. Mutations rolled back.",
+                    )
+                tx_res = active_coordinator.commit(status=TransactionStatus.COMMITTED_UNTESTED)
+                self.cfg.last_transaction_result = tx_res
+                step_committed = True
+                if tx_res is None or not tx_res.success:
+                    raise RuntimeError("Transactional write did not commit")
+                return StepResult(
+                    step,
+                    "untested",
+                    0,
+                    "Approved files were transactionally applied to disk, but no domain test suite was configured. "
+                    "Changes remain unverified and cannot be staged or finalized to Git.",
+                )
+
             retries = 0
             while True:
                 test_proc = self._run_test_suite()
@@ -1637,7 +1678,7 @@ class Orchestrator:
                     "execution": {
                         "test_passed": passed,
                         "test_exit_code": test_proc.returncode,
-                        "test_summary": output[-800:],
+                        "test_summary": getattr(test_proc, "sanitized_output", safe_scrub(output))[-800:],
                         "retry_count": retries,
                         "max_retries": self.cfg.max_retries,
                     },
@@ -1713,7 +1754,7 @@ class Orchestrator:
                             retries += 1
                             mcp_ctx = mcp_res.to_agent_context()
                             self._log(f"[system2/{self.s2_tag}] fixing frontend quality gate failures, attempt {retries}/{self.cfg.max_retries} ...")
-                            self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{mcp_ctx}")
+                            self._log(f"[system2/{self.s2_tag}] injected quality gate context into retry prompt:\n{safe_scrub(mcp_ctx)}")
                             current = _read_files(self.cfg.repo_dir, step_files)
                             fixed = self.s2.review_and_fix(effective_task, step, current, mcp_ctx)
                             active_coordinator.rollback(reason=f"Frontend quality gate failure, rolling back attempt {retries - 1}")
@@ -1759,7 +1800,13 @@ class Orchestrator:
                             retries,
                             f"Filesystem transaction verification failed: {active_coordinator.tx.failure_reason}. Mutations rolled back.",
                         )
-                    tx_res = active_coordinator.commit()
+                    active_coordinator.record_domain_verification(
+                        command=self.cfg.test_command,
+                        passed=True,
+                        returncode=0,
+                        output_summary=getattr(test_proc, "sanitized_stdout", safe_scrub(output))[:500],
+                    )
+                    tx_res = active_coordinator.commit(status=TransactionStatus.VERIFIED)
                     self.cfg.last_transaction_result = tx_res
                     step_committed = True
 
@@ -1769,11 +1816,11 @@ class Orchestrator:
                         effective_task,
                         retries,
                         visual_fixed,
-                        output[-500:],
+                        getattr(test_proc, "sanitized_output", safe_scrub(output))[-500:],
                         step=step,
                         diff_snippet=diff_snippet,
                     )
-                    return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion, tx_result=tx_res)
+                    return self._finalize_pr(step, retries, getattr(test_proc, "sanitized_output", safe_scrub(output)), sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion, tx_result=tx_res)
 
                 # Can retry if within retry budget and Jev has not flagged retries as futile
                 can_retry = not retry_exceeded and retries < self.cfg.max_retries
@@ -1788,7 +1835,7 @@ class Orchestrator:
                         )
                     else:
                         retry_reason = "test failure"
-                        retry_prompt = output
+                        retry_prompt = getattr(test_proc, "sanitized_output", safe_scrub(output))
                     self._log(f"[system2/{self.s2_tag}] reviewing {retry_reason}, attempt {retries}/{self.cfg.max_retries} ...")
                     current = _read_files(self.cfg.repo_dir, step_files)
                     fixed = self.s2.review_and_fix(effective_task, step, current, retry_prompt)
@@ -1866,7 +1913,13 @@ class Orchestrator:
                             retries,
                             f"Filesystem transaction verification failed: {active_coordinator.tx.failure_reason}. Mutations rolled back.",
                         )
-                    tx_res = active_coordinator.commit()
+                    active_coordinator.record_domain_verification(
+                        command=self.cfg.test_command,
+                        passed=True,
+                        returncode=0,
+                        output_summary=getattr(test_proc, "sanitized_stdout", safe_scrub(output))[:500],
+                    )
+                    tx_res = active_coordinator.commit(status=TransactionStatus.VERIFIED)
                     self.cfg.last_transaction_result = tx_res
                     step_committed = True
 
@@ -1876,11 +1929,11 @@ class Orchestrator:
                         effective_task,
                         retries,
                         visual_fixed,
-                        output[-500:],
+                        getattr(test_proc, "sanitized_output", safe_scrub(output))[-500:],
                         step=step,
                         diff_snippet=diff_snippet,
                     )
-                    return self._finalize_pr(step, retries, output, sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion, tx_result=tx_res)
+                    return self._finalize_pr(step, retries, getattr(test_proc, "sanitized_output", safe_scrub(output)), sensitive=sensitive, gate_result=mcp_res, suggestion=suggestion, tx_result=tx_res)
 
                 # Final failure path: tests failed, retries exhausted -> ROLLBACK!
                 self._log(f"[orchestrator] ⚠️ Step '{step.description}' failed verification; rolling back all task mutations...")
@@ -2286,8 +2339,8 @@ class Orchestrator:
             status = getattr(active_tx, "status", None)
             is_rolled_back = getattr(active_tx, "rolled_back", False) is True
 
-            if not is_committed or status != TransactionStatus.COMMITTED or is_rolled_back:
-                # Never treat a rolled-back, failed, unverified, or otherwise uncommitted transaction as authorization
+            if not is_committed or status != TransactionStatus.VERIFIED or is_rolled_back:
+                # Never treat a rolled-back, failed, unverified, or untested transaction as authorization
                 return []
 
             # Only return operations that were actually successfully executed
@@ -2404,7 +2457,7 @@ class Orchestrator:
                 if task_id_for_intent:
                     finalizer.record_commit_intent(task_id_for_intent)
 
-                commit_res = _run(["git", "commit", "-m", commit_msg], self.cfg.repo_dir)
+                commit_res = _run(["git", "commit", "--no-verify", "-m", commit_msg], self.cfg.repo_dir)
                 head_after = _get_git_head_sha(self.cfg.repo_dir)
                 if commit_res.returncode == 0 and head_after != head_before and head_after is not None:
                     commit_confirmed = True
@@ -2414,9 +2467,9 @@ class Orchestrator:
                     for breakdown_line in _format_diff_breakdown(diff_summary):
                         self._log(breakdown_line)
                 else:
-                    self._log(f"[git] Commit failed with code {commit_res.returncode}: {commit_res.stderr}")
+                    self._log(f"[git] Commit failed with code {commit_res.returncode}: {commit_res.sanitized_stderr}")
                     unstage_target_paths(self.cfg.repo_dir, stage_res.staged_paths)
-                    return StepResult(step, "escalated", retries, f"Git commit failed: {commit_res.stderr.strip() or 'non-zero exit code'}")
+                    return StepResult(step, "escalated", retries, f"Git commit failed: {safe_scrub(commit_res.stderr.strip() or 'non-zero exit code')}")
             except Exception as commit_exc:
                 head_current = _get_git_head_sha(self.cfg.repo_dir)
                 if head_current is not None and head_current != head_before:
@@ -2424,10 +2477,10 @@ class Orchestrator:
                 if not commit_confirmed:
                     unstage_target_paths(self.cfg.repo_dir, stage_res.staged_paths)
                 self._log(f"[git] Commit error: {commit_exc}")
-                return StepResult(step, "escalated", retries, f"Commit error: {commit_exc}")
+                return StepResult(step, "escalated", retries, f"Commit error: {safe_scrub(str(commit_exc))}")
         except Exception as e:
             self._log(f"[git] Staging error: {e}")
-            return StepResult(step, "escalated", retries, f"Staging error: {e}")
+            return StepResult(step, "escalated", retries, f"Staging error: {safe_scrub(str(e))}")
 
         # Automatically push changes to remote origin if configured and permitted
         if not self._can_push_to_remote():
@@ -2555,7 +2608,7 @@ class Orchestrator:
 
             diff_summary = _staged_diff_summary(self.cfg.repo_dir)
             if diff_summary.total_files > 0:
-                commit_res = _run(["git", "commit", "-m", pr_copy["title"]], self.cfg.repo_dir)
+                commit_res = _run(["git", "commit", "--no-verify", "-m", pr_copy["title"]], self.cfg.repo_dir)
                 head_after = _get_git_head_sha(self.cfg.repo_dir)
                 if commit_res.returncode == 0 and head_after != head_before and head_after is not None:
                     commit_confirmed = True

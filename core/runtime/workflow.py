@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Un
 from core.runtime.messages import IncomingMessage, OutgoingMessage
 from core.runtime.permissions import ChannelTrustLevel, PermissionAction
 from core.runtime.process import HardenedProcessResult
-from core.runtime.workspace_lock import is_pid_running
+from core.runtime.workspace_lock import WorkspaceLock, WorkspaceLockedError, is_pid_running
 from core.runtime.task import FileChangeSummary, FileMutationStatus
 from core.runtime.transaction import (
     FileTransactionStore,
@@ -51,6 +51,79 @@ from core.runtime.proof import (
     sample_git_state,
 )
 from core.runtime.proof_markdown import render_proof_markdown
+
+
+def is_tx_committed(status: Any, tx_success: bool = True) -> bool:
+    """Check if transaction outcome indicates filesystem changes were committed (persisted)."""
+    if status is None:
+        return False
+    if hasattr(status, "committed"):
+        return bool(status.committed)
+    norm = str(getattr(status, "value", status) or "").lower()
+    return norm in ("committed", "committed_untested", "verified") and tx_success
+
+
+def is_tx_verified(status: Any, tx_success: bool = True) -> bool:
+    """Check if transaction outcome indicates verified correctness."""
+    if status is None:
+        return False
+    if hasattr(status, "is_verified"):
+        return bool(status.is_verified)
+    norm = str(getattr(status, "value", status) or "").lower()
+    return norm == "verified" and tx_success
+
+
+def is_tx_untested(status: Any, tx_success: bool = True) -> bool:
+    """Check if transaction changes were committed without successful verification."""
+    if status is None:
+        return False
+    if hasattr(status, "status"):
+        return getattr(status.status, "value", str(status.status)) == TransactionStatus.COMMITTED_UNTESTED.value
+    norm = str(getattr(status, "value", status) or "").lower()
+    return norm == "committed_untested" and tx_success
+
+
+def is_tx_rolled_back(status: Any) -> bool:
+    """Check if transaction was rolled back."""
+    if status is None:
+        return False
+    if hasattr(status, "rolled_back"):
+        return bool(status.rolled_back)
+    norm = str(getattr(status, "value", status) or "").lower()
+    return norm == "rolled_back"
+
+
+def effective_tx_status(
+    status: Any = None,
+    tx_res: Optional[TransactionResult] = None,
+    tx_success: bool = True,
+) -> str:
+    """Return canonical uppercase string status for proof and change records."""
+    if tx_res is not None:
+        if getattr(tx_res, "is_verified", False):
+            return "VERIFIED"
+        if getattr(tx_res, "status", None) == TransactionStatus.COMMITTED_UNTESTED:
+            return "COMMITTED_UNTESTED"
+        if getattr(tx_res, "committed", False):
+            return "COMMITTED"
+        if getattr(tx_res, "rolled_back", False):
+            return "ROLLED_BACK"
+
+    if status is not None:
+        norm = str(getattr(status, "value", status) or "").lower()
+        if norm == "verified" and tx_success:
+            return "VERIFIED"
+        if norm == "committed_untested" and tx_success:
+            return "COMMITTED_UNTESTED"
+        if norm == "committed" and tx_success:
+            return "COMMITTED"
+        if norm == "rolled_back":
+            return "ROLLED_BACK"
+        if norm in ("failed", "cancelled"):
+            return norm.upper()
+        return norm.upper()
+
+    return "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -145,6 +218,12 @@ class TaskResult:
             raise ValueError(
                 "Invariant Violation: Autonomous coding task cannot report success=True when verified=False."
             )
+        if self.test_output:
+            self.test_output = redact_secrets(self.test_output)
+        if self.summary:
+            self.summary = redact_secrets(self.summary)
+        if self.failure_reason:
+            self.failure_reason = redact_secrets(self.failure_reason)
 
     def format_report(self) -> str:
         """Produce clean, structured observability output."""
@@ -279,7 +358,7 @@ class VerificationGate:
 
         # C. Transaction Integrity: must be committed cleanly
         if tx_res is not None:
-            if tx_res.status != TransactionStatus.COMMITTED or not tx_res.success:
+            if tx_res.status not in (TransactionStatus.COMMITTED, TransactionStatus.VERIFIED) or not tx_res.success:
                 details["transaction_integrity"] = False
                 errors.append(
                     f"Transaction integrity violated: transaction in state '{tx_res.status.value}' (success={tx_res.success})."
@@ -362,7 +441,7 @@ def execute_autonomous_task(
         except Exception:
             pass
 
-    emit_event("TASK_CREATED", payload={"task": request.user_request})
+    emit_event("TASK_CREATED", payload={"task": redact_secrets(request.user_request)})
 
     proof_store = FileProofStore(workspace)
     if proof_store.exists(request.task_id):
@@ -434,7 +513,38 @@ def execute_autonomous_task(
         metadata=msg_metadata,
     )
 
+    # Upfront provider preflight check before workspace locking or git sampling
+    req_prov = (request.metadata or {}).get("provider") or getattr(runtime, "default_provider", None)
+    try:
+        from system2 import validate_system2_provider_preflight
+        validate_system2_provider_preflight(req_prov)
+    except Exception:
+        _CURRENT_TASK_ID.reset(token_task)
+        _CURRENT_CANCEL_EVENT.reset(token_cancel)
+        raise
+
     init_head_sha, init_was_dirty = sample_git_state(workspace)
+
+    ws_lock = WorkspaceLock(
+        workspace=workspace,
+        session_id=session_id_str,
+        task_id=request.task_id,
+        actor=request.metadata.get("user_id", "local") if request.metadata else "local",
+        timeout=float(request.metadata.get("lock_timeout", 10.0)) if request.metadata else 10.0,
+    )
+    try:
+        ws_lock.acquire()
+    except WorkspaceLockedError as lock_err:
+        emit_event("TASK_FAILED", payload={"status": "FAILED", "reason": str(lock_err)})
+        return TaskResult(
+            task_id=request.task_id,
+            user_request=request.user_request,
+            success=False,
+            verified=False,
+            status="FAILED",
+            summary=f"❌ Workspace Locked: {lock_err}",
+            failure_reason=str(lock_err),
+        )
 
     try:
         return _do_execute_autonomous_task(
@@ -450,8 +560,11 @@ def execute_autonomous_task(
             init_was_dirty=init_was_dirty,
         )
     finally:
-        _CURRENT_TASK_ID.reset(token_task)
-        _CURRENT_CANCEL_EVENT.reset(token_cancel)
+        try:
+            ws_lock.release()
+        finally:
+            _CURRENT_TASK_ID.reset(token_task)
+            _CURRENT_CANCEL_EVENT.reset(token_cancel)
 
 
 def _do_execute_autonomous_task(
@@ -662,14 +775,24 @@ def _do_execute_autonomous_task(
             or (isinstance(cmd_args, str) and not cmd_args.strip())
         )
         tests_passed = (test_proc.returncode == 0 and not is_empty_cmd)
-        test_output = (test_proc.stdout or "") + (test_proc.stderr or "")
+        raw_out = (test_proc.stdout or "") + (test_proc.stderr or "")
+        bounded_out, is_trunc = capture_bounded_output(raw_out)
+        test_output = redact_secrets(bounded_out)
+        if is_trunc and not test_output.endswith("\n[... output truncated ...]"):
+            test_output += "\n[... output truncated ...]"
     else:
         tests_passed = False
         test_output = ""
 
-    is_tx_committed = (tx_status == "committed" and tx_success)
-    is_tx_rolled_back = (tx_status == "rolled_back")
-    recovery_req = (tx_status == "failed" or (tx_res is not None and getattr(tx_res, "is_recovery_required", False)))
+    tx_status_norm = str(tx_status or "").lower()
+    tx_is_committed = is_tx_committed(tx_res if tx_res is not None else tx_status, tx_success=tx_success)
+    tx_is_verified = is_tx_verified(tx_res if tx_res is not None else tx_status, tx_success=tx_success)
+    tx_is_untested = is_tx_untested(tx_res if tx_res is not None else tx_status, tx_success=tx_success)
+    tx_is_rolled_back = is_tx_rolled_back(tx_res if tx_res is not None else tx_status)
+    recovery_req = (
+        tx_status_norm == "failed"
+        or (tx_res is not None and getattr(tx_res, "is_recovery_required", False))
+    )
 
     # Fallback synthesize tx_res for transaction metadata if needed
     is_synthesized_tx = False
@@ -678,8 +801,8 @@ def _do_execute_autonomous_task(
         tx_res = TransactionResult(
             transaction_id=tx_id or "tx_unknown",
             status=TransactionStatus(tx_status) if tx_status in [s.value for s in TransactionStatus] else TransactionStatus.COMMITTED,
-            committed=is_tx_committed,
-            rolled_back=is_tx_rolled_back,
+            committed=tx_is_committed,
+            rolled_back=tx_is_rolled_back,
             operations=tuple(),
         )
 
@@ -695,7 +818,7 @@ def _do_execute_autonomous_task(
         effective_changed_files = list(dict.fromkeys(changed_files))
 
     if request.test_command:
-        emit_event("TEST_STARTED", transaction_id=tx_id, payload={"command": " ".join(request.test_command)})
+        emit_event("TEST_STARTED", transaction_id=tx_id, payload={"command": redact_secrets(" ".join(request.test_command))})
     if test_proc is not None:
         emit_event("TEST_COMPLETED", transaction_id=tx_id, payload={"returncode": test_proc.returncode})
 
@@ -715,8 +838,13 @@ def _do_execute_autonomous_task(
     # Authoritative Verdict Computation (Pure runtime logic)
     proc_stat = getattr(test_proc, "status", "success")
     rollback_err = getattr(tx_res, "rollback_error", None)
+    eff_tx_status = effective_tx_status(
+        status=tx_status,
+        tx_res=tx_res,
+        tx_success=tx_success,
+    )
     proof_verdict = compute_proof_verdict(
-        tx_status=tx_status or ("committed" if is_tx_committed else "rolled_back"),
+        tx_status=eff_tx_status.lower(),
         tests_passed=tests_passed,
         gate_passed=gate_passed and outgoing.success,
         process_status=proc_stat,
@@ -728,7 +856,7 @@ def _do_execute_autonomous_task(
     # 6. Build Proof Artifact & Persist
     tx_ops = getattr(tx_res, "operations", []) if tx_res else []
     change_records = build_change_records(tx_ops, workspace)
-    if not change_records and is_tx_committed and changed_files:
+    if not change_records and tx_is_committed and changed_files:
         for cf in changed_files:
             try:
                 cf_rel = normalize_workspace_relative_path(cf, workspace)
@@ -759,10 +887,12 @@ def _do_execute_autonomous_task(
     raw_stderr = getattr(test_proc, "stderr", "") or ""
     stdout_bounded, stdout_trunc = capture_bounded_output(raw_stdout)
     stderr_bounded, stderr_trunc = capture_bounded_output(raw_stderr)
+    stdout_clean = redact_secrets(stdout_bounded)
+    stderr_clean = redact_secrets(stderr_bounded)
 
-    test_cmd_str = " ".join(request.test_command) if request.test_command else (
+    test_cmd_str = redact_secrets(" ".join(request.test_command) if request.test_command else (
         getattr(test_proc, "args", "") if isinstance(getattr(test_proc, "args", None), str) else " ".join(getattr(test_proc, "args", []) or [])
-    )
+    ))
 
     proc_evidence = None
     if test_proc is not None:
@@ -775,6 +905,7 @@ def _do_execute_autonomous_task(
             task_id=request.task_id,
             transaction_id=tx_id,
             command=test_cmd_str,
+            cwd=str(workspace),
             started_at=p_start_iso,
             completed_at=p_comp_iso,
             duration_ms=getattr(test_proc, "duration_ms", 0) or 0,
@@ -788,8 +919,8 @@ def _do_execute_autonomous_task(
     v_evidence = VerificationEvidence(
         test_command=test_cmd_str,
         exit_code=test_proc.returncode if test_proc else None,
-        stdout_summary=stdout_bounded,
-        stderr_summary=stderr_bounded,
+        stdout_summary=stdout_clean,
+        stderr_summary=stderr_clean,
         stdout_truncated=stdout_trunc,
         stderr_truncated=stderr_trunc,
         gate_checks=v_details,
@@ -798,7 +929,7 @@ def _do_execute_autonomous_task(
 
     changes_evidence = ChangesEvidence(
         transaction_id=tx_id,
-        status=(tx_status or ("COMMITTED" if is_tx_committed else ("ROLLED_BACK" if is_tx_rolled_back else "FAILED"))).upper(),
+        status=eff_tx_status,
         files=change_records,
     )
 
@@ -902,7 +1033,7 @@ def _do_execute_autonomous_task(
                 status="CANCELLED",
                 summary="⚠️ Task cancelled by user.",
                 failure_reason="Execution cancelled by cancellation token",
-                changed_files=[] if is_tx_rolled_back else effective_changed_files,
+                changed_files=[] if tx_is_rolled_back else effective_changed_files,
                 file_changes=file_change_summaries,
                 verification_details=v_details,
                 proof_path=proof_path_str,
@@ -933,19 +1064,31 @@ def _do_execute_autonomous_task(
         )
 
     # Failed path: fail-closed
-    is_recovery = (proof_verdict.status == "RECOVERY_REQUIRED" or recovery_req or (is_tx_committed and not tests_passed))
+    is_recovery = (
+        proof_verdict.status == "RECOVERY_REQUIRED"
+        or recovery_req
+        or (tx_is_committed and not tests_passed and not tx_is_untested)
+    )
     final_status = (
         "ROLLED_BACK"
-        if is_tx_rolled_back
-        else ("RECOVERY_REQUIRED" if is_recovery else "FAILED")
+        if tx_is_rolled_back
+        else (
+            "RECOVERY_REQUIRED"
+            if is_recovery
+            else ("COMMITTED_UNTESTED" if tx_is_untested else "FAILED")
+        )
     )
     fail_reason = outgoing.error or (
         "Execution recovery required."
         if is_recovery
         else (
-            "Verification or finalization failed after transaction commit; changes retained, recovery required."
-            if is_tx_committed
-            else "Verification or tests failed; mutations rolled back."
+            "Task mutations committed without domain test verification."
+            if tx_is_untested
+            else (
+                "Verification or finalization failed after transaction commit; changes retained, recovery required."
+                if tx_is_committed
+                else "Verification or tests failed; mutations rolled back."
+            )
         )
     )
     if is_recovery:

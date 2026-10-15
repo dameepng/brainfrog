@@ -31,6 +31,13 @@ from typing import Any, Dict, FrozenSet, List, Optional, Protocol, Sequence, Set
 from core.runtime.contract import ApprovedExecutionContract, reject_secrets
 from core.runtime.session import scrub_secrets
 from core.runtime.task import FileChangeSummary, FileMutationStatus
+from core.runtime.workspace_lock import (
+    WorkspaceLock,
+    WorkspaceLockedError,
+    WorkspaceLockCapability,
+    WorkspaceLockRevokedError,
+    get_active_workspace_capability,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +65,9 @@ class TransactionStatus(str, Enum):
     STAGING = "staging"
     EXECUTING = "executing"
     VERIFYING = "verifying"
-    COMMITTED = "committed"
+    COMMITTED = "committed"  # Legacy / general committed state
+    COMMITTED_UNTESTED = "committed_untested"  # Filesystem mutation committed without domain test verification
+    VERIFIED = "verified"  # Filesystem mutation committed AND domain verification passed
     ROLLING_BACK = "rolling_back"
     ROLLED_BACK = "rolled_back"
     FAILED = "failed"
@@ -66,6 +75,8 @@ class TransactionStatus(str, Enum):
 
 TERMINAL_TRANSACTION_STATUSES: FrozenSet[TransactionStatus] = frozenset({
     TransactionStatus.COMMITTED,
+    TransactionStatus.COMMITTED_UNTESTED,
+    TransactionStatus.VERIFIED,
     TransactionStatus.ROLLED_BACK,
     TransactionStatus.FAILED,
 })
@@ -84,11 +95,14 @@ ALLOWED_TRANSACTION_TRANSITIONS: Dict[TransactionStatus, FrozenSet[TransactionSt
     }),
     TransactionStatus.EXECUTING: frozenset({
         TransactionStatus.VERIFYING,
+        TransactionStatus.COMMITTED_UNTESTED,
         TransactionStatus.ROLLING_BACK,
         TransactionStatus.FAILED,
     }),
     TransactionStatus.VERIFYING: frozenset({
         TransactionStatus.COMMITTED,
+        TransactionStatus.COMMITTED_UNTESTED,
+        TransactionStatus.VERIFIED,
         TransactionStatus.ROLLING_BACK,
         TransactionStatus.FAILED,
     }),
@@ -97,6 +111,8 @@ ALLOWED_TRANSACTION_TRANSITIONS: Dict[TransactionStatus, FrozenSet[TransactionSt
         TransactionStatus.FAILED,
     }),
     TransactionStatus.COMMITTED: frozenset(),
+    TransactionStatus.COMMITTED_UNTESTED: frozenset(),
+    TransactionStatus.VERIFIED: frozenset(),
     TransactionStatus.ROLLED_BACK: frozenset(),
     TransactionStatus.FAILED: frozenset(),
 }
@@ -304,8 +320,20 @@ class Transaction:
 
     @property
     def is_terminal(self) -> bool:
-        """True if transaction is in a terminal state (COMMITTED, ROLLED_BACK, FAILED)."""
+        """True if transaction is in a terminal state (COMMITTED, COMMITTED_UNTESTED, VERIFIED, ROLLED_BACK, FAILED)."""
         return self.status in TERMINAL_TRANSACTION_STATUSES
+
+    @property
+    def is_committed(self) -> bool:
+        return self.status in (
+            TransactionStatus.COMMITTED,
+            TransactionStatus.COMMITTED_UNTESTED,
+            TransactionStatus.VERIFIED,
+        )
+
+    @property
+    def is_verified(self) -> bool:
+        return self.status == TransactionStatus.VERIFIED
 
     @property
     def error(self) -> Optional[str]:
@@ -317,7 +345,7 @@ class Transaction:
 
     @property
     def committed_at(self) -> Optional[float]:
-        return self.completed_at if self.status == TransactionStatus.COMMITTED else None
+        return self.completed_at if self.is_committed else None
 
     @property
     def rolled_back_at(self) -> Optional[float]:
@@ -458,10 +486,15 @@ class TransactionResult:
     error: Optional[str] = None
     rollback_error: Optional[str] = None
     recovery: Optional[RecoveryResult] = None
+    verification_outcome: Optional[str] = None
 
     @property
     def success(self) -> bool:
         return self.committed
+
+    @property
+    def is_verified(self) -> bool:
+        return self.status == TransactionStatus.VERIFIED
 
     @property
     def is_recovery_required(self) -> bool:
@@ -1099,8 +1132,224 @@ class FileTransactionStore:
 
 
 # =============================================================================
-# 6. Transaction Coordinator & Execution Engine
+# 6. Protected Filesystem Target Validator & Transaction Coordinator
 # =============================================================================
+
+WIN32_RESERVED_NAMES: FrozenSet[str] = frozenset({
+    "con", "prn", "aux", "nul",
+    "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+    "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+})
+
+
+def validate_protected_target(
+    target: str,
+    workspace: Union[str, Path],
+    allow_dir: bool = False,
+) -> Path:
+    """Validate that a target path is safe for agent-controlled filesystem mutation.
+
+    Enforces Phase 2A Step 4C.1 security invariants:
+    1. Rejects non-string, empty, whitespace-only, and null-byte-containing paths.
+    2. Normalizes path separators and checks for absolute, drive-relative, or UNC escapes.
+    3. Asserts strict containment within the canonical workspace directory.
+    4. Prohibits mutations targeting internal '.git' metadata and its descendants
+       (including worktree/submodule gitdir locations when .git is a file).
+    5. Prohibits mutations targeting internal '.brainfrog' control-plane state.
+    6. Prohibits mutations targeting '.env' and '.env.*' files, with an explicit,
+       narrowly scoped exception for '.env.example'.
+    7. Evaluates path components case-insensitively across all platforms to prevent
+       case-folding bypasses on Windows/macOS.
+    8. Verifies symlink targets and ancestor directories, preventing symlink redirection
+       outside the workspace or into protected metadata.
+    9. Fails closed on any ambiguity, traversal attempt, or path resolution failure.
+
+    Returns:
+        The canonical, resolved absolute Path to the validated target.
+
+    Raises:
+        PermissionError: If the target violates any security invariant.
+    """
+    if not isinstance(target, str) or not target.strip():
+        raise PermissionError("Path validation denied: empty or invalid path.")
+    if "\x00" in target:
+        raise PermissionError(f"Path validation denied: null byte detected in path '{target}'.")
+
+    ws_resolved = Path(workspace).resolve()
+    clean = target.replace("\\", "/").strip()
+
+    if clean.startswith("//") or clean.startswith("\\\\"):
+        raise PermissionError(f"Path traversal denied: UNC path '{target}' is prohibited.")
+
+    # Strip redundant leading slash
+    norm_clean = clean.lstrip("/")
+
+    # Normalize accidental repo root prefix e.g. "my-repo/src/app.py"
+    parts_check = norm_clean.split("/")
+    if parts_check and parts_check[0].lower() == ws_resolved.name.lower() and len(parts_check) > 1:
+        norm_clean = "/".join(parts_check[1:])
+
+    # 1. Drive letter or absolute POSIX path check
+    if re.match(r"^[a-zA-Z]:", clean) or clean.startswith("/"):
+        cand = Path(clean).resolve()
+        if not cand.is_relative_to(ws_resolved):
+            raise PermissionError(
+                f"Path traversal denied: absolute path '{target}' escapes workspace '{ws_resolved}'."
+            )
+        target_path = cand
+    else:
+        target_path = (ws_resolved / norm_clean).resolve()
+
+    # 2. Strict containment check against canonical workspace root
+    if not target_path.is_relative_to(ws_resolved):
+        raise PermissionError(
+            f"Path traversal denied: path '{target}' escapes workspace root boundary."
+        )
+
+    if target_path == ws_resolved:
+        raise PermissionError("Path validation denied: path points to repository root, not a file.")
+
+    # 3. Check for directory targeting when file target expected
+    if not allow_dir:
+        if clean.endswith("/"):
+            raise PermissionError(
+                f"Path validation denied: path '{target}' references a directory, not a file."
+            )
+        if target_path.exists() and target_path.is_dir():
+            raise PermissionError(
+                f"Path validation denied: path '{target}' references an existing directory."
+            )
+
+    # 4. Relative component inspection (case-insensitive across all platforms)
+    rel = target_path.relative_to(ws_resolved)
+    rel_parts_lower = [p.lower() for p in rel.parts]
+
+    # Rejection: internal .git directory or descendants
+    if ".git" in rel_parts_lower:
+        raise PermissionError(
+            f"Protected path denied: target '{target}' points to internal .git repository metadata."
+        )
+
+    # Rejection: worktree/submodule gitdir if .git is a file
+    try:
+        from core.runtime.git_staging import get_git_metadata_dir
+        git_dir = get_git_metadata_dir(ws_resolved)
+    except Exception:
+        git_dir = None
+
+    if git_dir is not None:
+        if target_path == git_dir or target_path.is_relative_to(git_dir):
+            raise PermissionError(
+                f"Protected path denied: target '{target}' resolves to internal Git directory '{git_dir}'."
+            )
+
+    # Rejection: internal .brainfrog control-plane state
+    if ".brainfrog" in rel_parts_lower:
+        raise PermissionError(
+            f"Protected path denied: target '{target}' points to internal .brainfrog control-plane state."
+        )
+
+    # Rejection: sensitive credential and agent control directories (.aws, .ssh, .gnupg, .agents, .codex)
+    for p in rel_parts_lower:
+        if p in (".aws", ".ssh", ".gnupg", ".agents", ".codex"):
+            raise PermissionError(
+                f"Protected path denied: target '{target}' references sensitive or agent control directory '{p}'."
+            )
+
+    # Rejection: sensitive environment files (.env, .env.* except .env.example)
+    for p in rel_parts_lower:
+        if p == ".env":
+            raise PermissionError(
+                f"Protected path denied: target '{target}' references sensitive environment file."
+            )
+        if p.startswith(".env.") and p != ".env.example":
+            raise PermissionError(
+                f"Protected path denied: target '{target}' references sensitive environment file."
+            )
+
+    # Rejection: Windows reserved device names
+    for p in rel_parts_lower:
+        base_stem = p.split(".")[0]
+        if base_stem in WIN32_RESERVED_NAMES:
+            raise PermissionError(
+                f"Protected path denied: target '{target}' references Windows reserved device name '{p}'."
+            )
+
+    # 5. Symlink / Junction Traversal Security
+    # Case A: target_path itself is an existing symlink/junction
+    if target_path.is_symlink() or os.path.islink(target_path):
+        try:
+            sym_target = target_path.resolve()
+        except Exception as exc:
+            raise PermissionError(f"Symlink validation failed for '{target}': {exc}")
+        if not sym_target.is_relative_to(ws_resolved):
+            raise PermissionError(
+                f"Symlink traversal denied: target '{target}' resolves outside workspace boundary."
+            )
+        if sym_target == ws_resolved:
+            raise PermissionError("Symlink traversal denied: target resolves to repository root.")
+        sym_rel = sym_target.relative_to(ws_resolved)
+        sym_parts_lower = [p.lower() for p in sym_rel.parts]
+        if ".git" in sym_parts_lower:
+            raise PermissionError(
+                f"Symlink traversal denied: target '{target}' redirects into .git metadata."
+            )
+        if git_dir is not None and (sym_target == git_dir or sym_target.is_relative_to(git_dir)):
+            raise PermissionError(
+                f"Symlink traversal denied: target '{target}' redirects into Git directory '{git_dir}'."
+            )
+        if ".brainfrog" in sym_parts_lower:
+            raise PermissionError(
+                f"Symlink traversal denied: target '{target}' redirects into .brainfrog state."
+            )
+        for p in sym_parts_lower:
+            if p in (".aws", ".ssh", ".gnupg", ".agents", ".codex"):
+                raise PermissionError(
+                    f"Symlink traversal denied: target '{target}' redirects into sensitive credential or agent control directory '{p}'."
+                )
+            if p == ".env" or (p.startswith(".env.") and p != ".env.example"):
+                raise PermissionError(
+                    f"Symlink traversal denied: target '{target}' redirects into sensitive environment file."
+                )
+
+    # Case B: Ancestor directory is an existing symlink/junction
+    curr = target_path.parent
+    while curr != ws_resolved and curr != curr.parent:
+        if curr.exists() and (curr.is_symlink() or os.path.islink(curr)):
+            try:
+                resolved_parent = curr.resolve()
+            except Exception as exc:
+                raise PermissionError(f"Symlink validation failed for parent '{curr}': {exc}")
+            if not resolved_parent.is_relative_to(ws_resolved):
+                raise PermissionError(
+                    f"Symlink traversal denied: parent directory '{curr.name}' resolves outside workspace boundary."
+                )
+            if resolved_parent == ws_resolved:
+                curr = curr.parent
+                continue
+            parent_rel = resolved_parent.relative_to(ws_resolved)
+            parent_parts_lower = [p.lower() for p in parent_rel.parts]
+            if ".git" in parent_parts_lower:
+                raise PermissionError(
+                    f"Symlink traversal denied: parent directory '{curr.name}' resolves into .git metadata."
+                )
+            if git_dir is not None and (resolved_parent == git_dir or resolved_parent.is_relative_to(git_dir)):
+                raise PermissionError(
+                    f"Symlink traversal denied: parent directory '{curr.name}' resolves into Git directory."
+                )
+            if ".brainfrog" in parent_parts_lower:
+                raise PermissionError(
+                    f"Symlink traversal denied: parent directory '{curr.name}' resolves into .brainfrog state."
+                )
+            for p in parent_parts_lower:
+                if p in (".aws", ".ssh", ".gnupg", ".agents", ".codex"):
+                    raise PermissionError(
+                        f"Symlink traversal denied: parent directory '{curr.name}' resolves into sensitive or agent control directory '{p}'."
+                    )
+        curr = curr.parent
+
+    return target_path
+
 
 class TransactionCoordinator:
     """Coordinates atomic staging, execution, verification, and rollback of filesystem operations.
@@ -1120,11 +1369,13 @@ class TransactionCoordinator:
         store: Optional[TransactionStore] = None,
         verifier: Optional[TransactionVerifier] = None,
         task_id: Optional[str] = None,
+        lock_capability: Optional[WorkspaceLockCapability] = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.contract = contract
         self.store = store
         self.verifier = verifier or BasicFilesystemVerifier()
+        self._explicit_lock_capability: Optional[WorkspaceLockCapability] = lock_capability
 
         self.tx = Transaction(
             id=tx_id or f"tx_{secrets.token_hex(16)}",
@@ -1136,6 +1387,36 @@ class TransactionCoordinator:
             workspace=str(self.workspace),
             status=TransactionStatus.CREATED,
         )
+
+    def _require_lock_capability(self, caller_cap: Optional[Any] = None) -> WorkspaceLockCapability:
+        """Validate that an active, live WorkspaceLockCapability is held for this workspace.
+
+        Fails closed if:
+        - No capability is provided or active in ContextVar.
+        - An invalid object (e.g. boolean, path, or string) is passed.
+        - The capability has been revoked or the OS lock is no longer active.
+        - The capability was granted for a different canonical workspace.
+        - The calling thread/process does not match the capability.
+        """
+        cap = caller_cap if caller_cap is not None else (
+            self._explicit_lock_capability if self._explicit_lock_capability is not None
+            else get_active_workspace_capability(self.workspace)
+        )
+        if cap is None:
+            raise WorkspaceLockRevokedError(
+                f"Transaction mutation rejected: workspace '{self.workspace}' does not hold an active WorkspaceLockCapability.",
+                workspace=self.workspace,
+            )
+        if not isinstance(cap, WorkspaceLockCapability):
+            raise TypeError(
+                f"Transaction mutation rejected: invalid lock capability type '{type(cap).__name__}'. Authority cannot be manufactured."
+            )
+        cap.validate_live(
+            workspace=self.workspace,
+            session_id=self.tx.session_id,
+            task_id=self.tx.task_id,
+        )
+        return cap
 
     @property
     def current_transaction(self) -> Transaction:
@@ -1149,6 +1430,7 @@ class TransactionCoordinator:
         new_target: Optional[str] = None,
     ) -> TransactionOperation:
         """Stage an operation by type with automatic begin() if needed."""
+        self._require_lock_capability()
         if len(self.tx.operations) >= MAX_TRANSACTION_OPERATIONS:
             raise TransactionResourceLimitError(
                 f"Cannot stage operation: transaction '{self.tx.id}' reached maximum operation limit ({MAX_TRANSACTION_OPERATIONS})"
@@ -1168,19 +1450,9 @@ class TransactionCoordinator:
         raise ValueError(f"Unsupported operation type: {type}")
 
     def _resolve_and_validate(self, rel_path: str) -> Path:
-        """Normalize path and assert workspace containment and contract authority."""
-        if not isinstance(rel_path, str) or not rel_path.strip():
-            raise PermissionError("Path validation denied: empty or invalid path.")
-        if "\x00" in rel_path:
-            raise PermissionError(f"Path validation denied: null byte in path '{rel_path}'.")
-
-        clean = rel_path.replace("\\", "/").strip().lstrip("/")
-        target_path = (self.workspace / clean).resolve()
-
-        if not target_path.is_relative_to(self.workspace):
-            raise PermissionError(
-                f"Path traversal denied: path '{rel_path}' escapes workspace '{self.workspace}'."
-            )
+        """Normalize path and assert workspace containment, protected-target policy, and contract authority."""
+        target_path = validate_protected_target(rel_path, self.workspace)
+        clean = target_path.relative_to(self.workspace.resolve()).as_posix()
 
         if self.contract is not None:
             self.contract.require_filesystem("write", clean, self.workspace)
@@ -1218,8 +1490,11 @@ class TransactionCoordinator:
                 }
         return {"exists": True, "is_dir": True}
 
-    def begin(self) -> Transaction:
+    def begin(self, lock_capability: Optional[WorkspaceLockCapability] = None) -> Transaction:
         """Begin the transaction and transition to STAGING."""
+        cap = self._require_lock_capability(lock_capability)
+        if lock_capability is not None:
+            self._explicit_lock_capability = cap
         self.tx.transition(TransactionStatus.STAGING)
         if self.store:
             self.store.save(self.tx)
@@ -1233,6 +1508,7 @@ class TransactionCoordinator:
 
     def stage_create(self, target: str, content: Union[str, bytes]) -> TransactionOperation:
         """Stage a file creation mutation."""
+        self._require_lock_capability()
         self._check_op_limit()
         if self.tx.status == TransactionStatus.CREATED:
             self.begin()
@@ -1270,6 +1546,7 @@ class TransactionCoordinator:
 
     def stage_modify(self, target: str, content: Union[str, bytes]) -> TransactionOperation:
         """Stage a file modification mutation."""
+        self._require_lock_capability()
         self._check_op_limit()
         if self.tx.status == TransactionStatus.CREATED:
             self.begin()
@@ -1307,6 +1584,7 @@ class TransactionCoordinator:
 
     def stage_delete(self, target: str) -> TransactionOperation:
         """Stage a file deletion mutation."""
+        self._require_lock_capability()
         self._check_op_limit()
         if self.tx.status == TransactionStatus.CREATED:
             self.begin()
@@ -1332,15 +1610,16 @@ class TransactionCoordinator:
 
     def stage_rename(self, target: str, new_target: str) -> TransactionOperation:
         """Stage a file rename mutation."""
+        self._require_lock_capability()
         self._check_op_limit()
         if self.tx.status == TransactionStatus.CREATED:
             self.begin()
         if self.tx.status != TransactionStatus.STAGING:
             raise InvalidTransactionTransition("Cannot stage operations outside STAGING state")
 
-        _ = self._resolve_and_validate(target)
-        _ = self._resolve_and_validate(new_target)
-        before = self._capture_snapshot(self.workspace / target)
+        target_path = self._resolve_and_validate(target)
+        dest_path = self._resolve_and_validate(new_target)
+        before = self._capture_snapshot(target_path)
 
         rollback = {"action": "rename", "source": new_target, "destination": target}
         op = TransactionOperation(
@@ -1358,11 +1637,20 @@ class TransactionCoordinator:
         return op
 
     def stage_write_batch(self, files: Dict[str, Union[str, bytes]]) -> List[TransactionOperation]:
-        """Stage a batch of file writes, automatically discerning create vs modify."""
-        staged: List[TransactionOperation] = []
+        """Stage a batch of file writes, automatically discerning create vs modify.
+
+        Pre-validates all targets against protected path policy before staging any operation.
+        Fails closed with zero partial staging if any target is prohibited.
+        """
+        self._require_lock_capability()
+        validated: List[Tuple[str, Path, Union[str, bytes]]] = []
         for path_str, content in files.items():
             target_path = self._resolve_and_validate(path_str)
-            clean_rel = target_path.relative_to(self.workspace).as_posix()
+            validated.append((path_str, target_path, content))
+
+        staged: List[TransactionOperation] = []
+        for path_str, target_path, content in validated:
+            clean_rel = target_path.relative_to(self.workspace.resolve()).as_posix()
             if target_path.exists():
                 op = self.stage_modify(clean_rel, content)
             else:
@@ -1375,6 +1663,7 @@ class TransactionCoordinator:
 
         If any operation fails, immediately triggers reverse rollback.
         """
+        self._require_lock_capability()
         self.tx.transition(TransactionStatus.EXECUTING)
         if self.store:
             self.store.save(self.tx)
@@ -1383,8 +1672,8 @@ class TransactionCoordinator:
             if op.status != OperationStatus.STAGED:
                 continue
 
-            target_path = self.workspace / op.target
             try:
+                target_path = self._resolve_and_validate(op.target)
                 # WRITE-AHEAD: Persist PREPARED operation state before filesystem mutation
                 op.status = OperationStatus.PREPARED
                 if self.store:
@@ -1407,7 +1696,7 @@ class TransactionCoordinator:
                 elif op.type == OperationType.RENAME_FILE:
                     if not op.new_target:
                         raise ValueError(f"Rename operation '{op.id}' lacks new_target")
-                    dest_path = self.workspace / op.new_target
+                    dest_path = self._resolve_and_validate(op.new_target)
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(target_path), str(dest_path))
 
@@ -1437,11 +1726,30 @@ class TransactionCoordinator:
 
         If verification fails, triggers reverse rollback.
         """
+        self._require_lock_capability()
         self.tx.transition(TransactionStatus.VERIFYING)
         if self.store:
             self.store.save(self.tx)
 
-        passed, err_msg, details = self.verifier.verify(self.tx, self.workspace)
+        try:
+            raw_res = self.verifier.verify(self.tx, self.workspace)
+            if not isinstance(raw_res, tuple) or len(raw_res) != 3:
+                raise TypeError(f"Verifier returned malformed result: expected 3-tuple, got {type(raw_res).__name__}")
+            passed, err_msg, details = raw_res
+            if not isinstance(passed, bool):
+                raise TypeError(f"Verifier returned non-boolean passed flag: {type(passed).__name__}")
+            if not isinstance(details, dict):
+                details = {"details": details}
+        except Exception as exc:
+            reason = f"Verification error: {exc}"
+            logger.error(f"Transaction '{self.tx.id}' verifier exception: {reason}")
+            self.tx.failure_reason = reason
+            self.tx.verification_result = {"passed": False, "error": str(exc), "malformed": True}
+            if self.store:
+                self.store.save(self.tx)
+            self.rollback(reason=reason)
+            return False
+
         self.tx.verification_result = details
 
         if not passed:
@@ -1455,20 +1763,108 @@ class TransactionCoordinator:
 
         # Record verified state in durable journal
         details["passed"] = True
+        if not isinstance(self.verifier, BasicFilesystemVerifier):
+            details["domain_verified"] = True
         self.tx.verification_result = details
         if self.store:
             self.store.save(self.tx)
         return True
 
-    def commit(self) -> TransactionResult:
-        """Commit the verified transaction to COMMITTED state.
+    def record_domain_verification(
+        self,
+        *,
+        command: Union[str, Sequence[str]],
+        passed: bool,
+        returncode: int = 0,
+        output_summary: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record authoritative domain verification evidence on the active transaction.
 
-        Writes a durable commit marker before transitioning to COMMITTED.
+        Validates that test command is non-empty, execution passed, and returncode is 0.
         """
+        self._require_lock_capability()
+        is_empty_cmd = (
+            not command
+            or (isinstance(command, (list, tuple)) and len(command) == 0)
+            or (isinstance(command, str) and not command.strip())
+        )
+        if is_empty_cmd:
+            raise ValueError("Domain verification requires a non-empty test command.")
+
+        is_passed = bool(passed and returncode == 0)
+        verif_data: Dict[str, Any] = {
+            "domain_verified": is_passed,
+            "passed": is_passed,
+            "command": list(command) if isinstance(command, (list, tuple)) else str(command),
+            "returncode": returncode,
+            "recorded_at": time.time(),
+        }
+        if output_summary is not None:
+            verif_data["output_summary"] = output_summary
+        if details:
+            verif_data.update(details)
+
+        self.tx.verification_result = verif_data
+        if self.store:
+            self.store.save(self.tx)
+
+    def commit(
+        self,
+        *,
+        status: Optional[TransactionStatus] = None,
+        verified: bool = False,
+    ) -> TransactionResult:
+        """Commit the verified or executed transaction.
+
+        Writes a durable commit marker before transitioning to target commit state.
+        Enforces that VERIFIED status strictly requires internally recorded,
+        valid domain verification evidence. A caller requesting VERIFIED without
+        such evidence fails closed to COMMITTED_UNTESTED.
+        """
+        self._require_lock_capability()
         marker_time = time.time()
+
+        requested_status = status
+        wants_verified = (
+            requested_status == TransactionStatus.VERIFIED
+            or (isinstance(requested_status, str) and str(requested_status).lower() == "verified")
+            or verified is True
+        )
+
+        has_domain_evidence = False
+        if isinstance(self.tx.verification_result, dict):
+            vr = self.tx.verification_result
+            if (
+                vr.get("domain_verified") is True
+                and vr.get("passed") is True
+                and not vr.get("malformed", False)
+                and not vr.get("error")
+            ):
+                has_domain_evidence = True
+
+        if wants_verified:
+            if has_domain_evidence:
+                target_status = TransactionStatus.VERIFIED
+            else:
+                logger.warning(
+                    f"Transaction '{self.tx.id}' commit requested VERIFIED without valid domain verification evidence; "
+                    "failing closed to COMMITTED_UNTESTED."
+                )
+                target_status = TransactionStatus.COMMITTED_UNTESTED
+        elif requested_status is not None:
+            target_status = TransactionStatus(requested_status) if isinstance(requested_status, str) else requested_status
+        elif has_domain_evidence:
+            target_status = TransactionStatus.VERIFIED
+        else:
+            target_status = TransactionStatus.COMMITTED_UNTESTED
+
+        if self.tx.status == TransactionStatus.EXECUTING:
+            self.tx.transition(TransactionStatus.VERIFYING)
+
         self.tx.commit_marker = {
             "marked_at": marker_time,
-            "status": "committed",
+            "status": target_status.value,
             "transaction_id": self.tx.id,
             "work_id": self.tx.work_id,
             "plan_id": self.tx.plan_id,
@@ -1476,10 +1872,15 @@ class TransactionCoordinator:
         if self.store:
             self.store.save(self.tx)
 
-        self.tx.transition(TransactionStatus.COMMITTED)
+        self.tx.transition(target_status)
         if self.store:
             self.store.save(self.tx)
 
+        outcome_str = (
+            "verified"
+            if target_status == TransactionStatus.VERIFIED
+            else ("untested" if target_status == TransactionStatus.COMMITTED_UNTESTED else "committed")
+        )
         return TransactionResult(
             transaction_id=self.tx.id,
             status=self.tx.status,
@@ -1487,6 +1888,7 @@ class TransactionCoordinator:
             rolled_back=False,
             operations=tuple(self.tx.operations),
             verification=self.tx.verification_result,
+            verification_outcome=outcome_str,
         )
 
     def run(self) -> TransactionResult:
@@ -1500,6 +1902,7 @@ class TransactionCoordinator:
                 operations=tuple(self.tx.operations),
                 error=self.tx.failure_reason,
                 rollback_error=self.tx.rollback_reason,
+                verification_outcome="failed",
             )
         if not self.verify():
             return TransactionResult(
@@ -1510,8 +1913,11 @@ class TransactionCoordinator:
                 operations=tuple(self.tx.operations),
                 error=self.tx.failure_reason,
                 rollback_error=self.tx.rollback_reason,
+                verification=self.tx.verification_result,
+                verification_outcome="failed",
             )
-        return self.commit()
+        is_domain = not isinstance(self.verifier, BasicFilesystemVerifier)
+        return self.commit(verified=is_domain)
 
     def _rollback_operation(self, op: TransactionOperation) -> bool:
         """Roll back a single executed operation.
@@ -1520,7 +1926,7 @@ class TransactionCoordinator:
         user or editor. If external modifications are detected, aborts rollback
         to prevent destroying user work and fails closed.
         """
-        target_path = self.workspace / op.target
+        target_path = validate_protected_target(op.target, self.workspace)
         if op.type == OperationType.CREATE_FILE:
             # Check for external concurrent modification during transaction
             if target_path.exists():
@@ -1539,20 +1945,24 @@ class TransactionCoordinator:
                 target_path.unlink()
 
         elif op.type == OperationType.MODIFY_FILE:
-            # Check for external concurrent modification during transaction
-            if target_path.exists():
-                after = op.after_state or {}
-                if after.get("is_text", True):
-                    current_disk = target_path.read_text(encoding="utf-8", errors="replace")
-                    expected = after.get("content", "")
-                else:
-                    current_disk = base64.b64encode(target_path.read_bytes()).decode("ascii")
-                    expected = after.get("content_b64", "")
-                if current_disk != expected:
-                    raise RuntimeError(
-                        f"External mutation detected on modified file '{op.target}' (content on disk differs from BrainFrog mutation). "
-                        "Rollback aborted to preserve user modifications."
-                    )
+            # Check for external concurrent modification or deletion during transaction
+            if not target_path.exists():
+                raise RuntimeError(
+                    f"External mutation detected on modified file '{op.target}' (file was deleted externally). "
+                    "Rollback aborted to preserve user modifications."
+                )
+            after = op.after_state or {}
+            if after.get("is_text", True):
+                current_disk = target_path.read_text(encoding="utf-8", errors="replace")
+                expected = after.get("content", "")
+            else:
+                current_disk = base64.b64encode(target_path.read_bytes()).decode("ascii")
+                expected = after.get("content_b64", "")
+            if current_disk != expected:
+                raise RuntimeError(
+                    f"External mutation detected on modified file '{op.target}' (content on disk differs from BrainFrog mutation). "
+                    "Rollback aborted to preserve user modifications."
+                )
             before = op.before_state or {}
             if not before.get("exists", False):
                 if target_path.exists():
@@ -1589,10 +1999,33 @@ class TransactionCoordinator:
         elif op.type == OperationType.RENAME_FILE:
             # Rollback rename: move from destination back to source
             if op.new_target:
-                dest_path = self.workspace / op.new_target
-                if dest_path.exists():
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(dest_path), str(target_path))
+                dest_path = validate_protected_target(op.new_target, self.workspace)
+                if not dest_path.exists():
+                    raise RuntimeError(
+                        f"External mutation detected on rename destination '{op.new_target}' (destination file was deleted or moved externally). "
+                        "Rollback aborted to preserve user modifications."
+                    )
+                # Verify destination content matches before_state snapshot (content at time of rename)
+                before = op.before_state or {}
+                if before.get("is_text", True):
+                    current_dest = dest_path.read_text(encoding="utf-8", errors="replace")
+                    expected_dest = before.get("content", "")
+                else:
+                    current_dest = base64.b64encode(dest_path.read_bytes()).decode("ascii")
+                    expected_dest = before.get("content_b64", "")
+                if current_dest != expected_dest:
+                    raise RuntimeError(
+                        f"External mutation detected on rename destination '{op.new_target}' (content modified externally). "
+                        "Rollback aborted to preserve user modifications."
+                    )
+                # Check if source target_path was recreated by external actor
+                if target_path.exists():
+                    raise RuntimeError(
+                        f"External collision detected on rename source '{op.target}' (source file was recreated externally). "
+                        "Rollback aborted to prevent overwriting user file."
+                    )
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(dest_path), str(target_path))
 
         op.status = OperationStatus.ROLLED_BACK
         op.result = "rolled_back"
@@ -1600,6 +2033,7 @@ class TransactionCoordinator:
 
     def rollback(self, reason: str = "Rollback requested") -> TransactionResult:
         """Roll back all executed operations in strict reverse order (LIFO)."""
+        self._require_lock_capability()
         self.tx.transition(TransactionStatus.ROLLING_BACK, reason=reason)
         if self.store:
             self.store.save(self.tx)
@@ -1749,10 +2183,41 @@ class TransactionRecoveryManager:
             target_path.write_bytes(raw)
 
     def recover(self, transaction_id: str) -> RecoveryResult:
-        """Deterministically recover an interrupted transaction.
+        """Deterministically recover an interrupted transaction under exclusive OS lock.
 
         Returns structured RecoveryResult with final status and rollback details.
+        Fails closed with zero filesystem or journal mutations if workspace is actively locked.
         """
+        lock = WorkspaceLock(
+            self.workspace,
+            session_id=f"recovery_{transaction_id}",
+            actor="recovery_manager",
+            timeout=0.0,
+        )
+        try:
+            lock.acquire(timeout=0.0)
+        except WorkspaceLockedError as exc:
+            logger.warning(
+                f"Cannot recover transaction '{transaction_id}': workspace '{self.workspace}' is actively locked by another process ({exc})."
+            )
+            return RecoveryResult(
+                transaction_id=transaction_id,
+                previous_status=TransactionStatus.FAILED,
+                final_status=TransactionStatus.FAILED,
+                recovered=False,
+                rolled_back=False,
+                ambiguous=True,
+                error=f"Workspace '{self.workspace}' is actively locked by another process: {exc}",
+                operations_recovered=0,
+            )
+
+        try:
+            return self._do_recover(transaction_id)
+        finally:
+            lock.release()
+
+    def _do_recover(self, transaction_id: str) -> RecoveryResult:
+        """Execute recovery algorithm while holding the exclusive workspace lock."""
         tx = self.store.get(transaction_id)
         if not tx:
             return RecoveryResult(
@@ -1787,28 +2252,53 @@ class TransactionRecoveryManager:
 
         # 1. Idempotency check: Already terminal
         if tx.is_terminal:
+            is_ambiguous = bool(
+                initial_status == TransactionStatus.FAILED
+                and (
+                    (tx.failure_reason and "External mutation" in tx.failure_reason)
+                    or any(getattr(op, "status", None) == OperationStatus.FAILED for op in tx.operations)
+                )
+            )
             return RecoveryResult(
                 transaction_id=tx.id,
                 previous_status=initial_status,
                 final_status=initial_status,
-                recovered=(initial_status in (TransactionStatus.COMMITTED, TransactionStatus.ROLLED_BACK)),
+                recovered=(
+                    initial_status in (
+                        TransactionStatus.COMMITTED,
+                        TransactionStatus.COMMITTED_UNTESTED,
+                        TransactionStatus.VERIFIED,
+                        TransactionStatus.ROLLED_BACK,
+                    )
+                ),
                 rolled_back=(initial_status == TransactionStatus.ROLLED_BACK),
+                ambiguous=is_ambiguous,
                 error=tx.failure_reason if initial_status == TransactionStatus.FAILED else None,
             )
 
         # 2. Check durable commit marker
         # If durable commit marker was persisted, transaction was committed before shutdown.
         if tx.commit_marker is not None:
+            marker_status_str = tx.commit_marker.get("status", "committed")
+            try:
+                marker_status = TransactionStatus(marker_status_str)
+            except ValueError:
+                marker_status = TransactionStatus.COMMITTED
+
+            # Never promote unverified marker to VERIFIED!
+            if marker_status == TransactionStatus.VERIFIED and initial_status != TransactionStatus.VERIFIED:
+                marker_status = TransactionStatus.COMMITTED_UNTESTED
+
             logger.info(
-                f"Transaction '{tx.id}' has durable commit marker: finalizing status to COMMITTED without rollback."
+                f"Transaction '{tx.id}' has durable commit marker: finalizing status to {marker_status.value} without rollback."
             )
-            if tx.status != TransactionStatus.COMMITTED:
-                tx.transition(TransactionStatus.COMMITTED)
+            if tx.status != marker_status:
+                tx.transition(marker_status)
                 self.store.save(tx)
             return RecoveryResult(
                 transaction_id=tx.id,
                 previous_status=initial_status,
-                final_status=TransactionStatus.COMMITTED,
+                final_status=marker_status,
                 recovered=True,
                 rolled_back=False,
             )
@@ -1856,7 +2346,86 @@ class TransactionRecoveryManager:
             if op.status == OperationStatus.ROLLED_BACK:
                 continue
 
-            target_path = self.workspace / op.target
+            try:
+                target_path = validate_protected_target(op.target, self.workspace)
+            except PermissionError as p_err:
+                err = f"Security violation during recovery: operation '{op.id}' targets protected path '{op.target}': {p_err}"
+                logger.error(err)
+                op.status = OperationStatus.FAILED
+                op.error = err
+                tx.transition(TransactionStatus.FAILED, reason=err)
+                self.store.save(tx)
+                return RecoveryResult(
+                    transaction_id=tx.id,
+                    previous_status=initial_status,
+                    final_status=TransactionStatus.FAILED,
+                    recovered=False,
+                    rolled_back=False,
+                    ambiguous=True,
+                    error=err,
+                    operations_recovered=ops_recovered,
+                )
+
+            # Validate op.new_target for rename operations or any operation carrying a destination
+            dest_path: Optional[Path] = None
+            if op.type == OperationType.RENAME_FILE:
+                if not op.new_target:
+                    err = f"Malformed rename operation '{op.id}': missing new_target"
+                    logger.error(err)
+                    op.status = OperationStatus.FAILED
+                    op.error = err
+                    tx.transition(TransactionStatus.FAILED, reason=err)
+                    self.store.save(tx)
+                    return RecoveryResult(
+                        transaction_id=tx.id,
+                        previous_status=initial_status,
+                        final_status=TransactionStatus.FAILED,
+                        recovered=False,
+                        rolled_back=False,
+                        ambiguous=True,
+                        error=err,
+                        operations_recovered=ops_recovered,
+                    )
+                try:
+                    dest_path = validate_protected_target(op.new_target, self.workspace)
+                except PermissionError as p_err:
+                    err = f"Security violation during recovery: rename operation '{op.id}' targets protected destination '{op.new_target}': {p_err}"
+                    logger.error(err)
+                    op.status = OperationStatus.FAILED
+                    op.error = err
+                    tx.transition(TransactionStatus.FAILED, reason=err)
+                    self.store.save(tx)
+                    return RecoveryResult(
+                        transaction_id=tx.id,
+                        previous_status=initial_status,
+                        final_status=TransactionStatus.FAILED,
+                        recovered=False,
+                        rolled_back=False,
+                        ambiguous=True,
+                        error=err,
+                        operations_recovered=ops_recovered,
+                    )
+            elif op.new_target is not None:
+                try:
+                    dest_path = validate_protected_target(op.new_target, self.workspace)
+                except PermissionError as p_err:
+                    err = f"Security violation during recovery: operation '{op.id}' has protected new_target '{op.new_target}': {p_err}"
+                    logger.error(err)
+                    op.status = OperationStatus.FAILED
+                    op.error = err
+                    tx.transition(TransactionStatus.FAILED, reason=err)
+                    self.store.save(tx)
+                    return RecoveryResult(
+                        transaction_id=tx.id,
+                        previous_status=initial_status,
+                        final_status=TransactionStatus.FAILED,
+                        recovered=False,
+                        rolled_back=False,
+                        ambiguous=True,
+                        error=err,
+                        operations_recovered=ops_recovered,
+                    )
+
             actual = self._inspect_target_state(target_path)
 
             # STAGED operation: Mutation never prepared or started
@@ -2039,7 +2608,8 @@ class TransactionRecoveryManager:
                             error=err,
                             operations_recovered=ops_recovered,
                         )
-                    dest_path = self.workspace / op.new_target
+                    if dest_path is None:
+                        dest_path = validate_protected_target(op.new_target, self.workspace)
                     src_exists = target_path.exists()
                     dest_exists = dest_path.exists()
                     if src_exists and not dest_exists:
@@ -2093,19 +2663,195 @@ class TransactionRecoveryManager:
             if op.status == OperationStatus.EXECUTED:
                 try:
                     if op.type == OperationType.CREATE_FILE:
-                        if target_path.exists():
+                        actual = self._inspect_target_state(target_path)
+                        if actual.get("exists", False):
+                            if not self._states_equal(actual, op.after_state):
+                                err = (
+                                    f"External mutation detected on created file '{op.target}' for op '{op.id}' "
+                                    "(disk content differs from BrainFrog mutation). Rollback aborted to preserve user modifications."
+                                )
+                                logger.error(err)
+                                op.status = OperationStatus.FAILED
+                                op.error = err
+                                tx.transition(TransactionStatus.FAILED, reason=err)
+                                self.store.save(tx)
+                                return RecoveryResult(
+                                    transaction_id=tx.id,
+                                    previous_status=initial_status,
+                                    final_status=TransactionStatus.FAILED,
+                                    recovered=False,
+                                    rolled_back=False,
+                                    ambiguous=True,
+                                    error=err,
+                                    operations_recovered=ops_recovered,
+                                )
                             target_path.unlink()
                             ops_recovered += 1
-                    elif op.type in (OperationType.MODIFY_FILE, OperationType.DELETE_FILE):
+
+                    elif op.type == OperationType.MODIFY_FILE:
+                        actual = self._inspect_target_state(target_path)
+                        if not actual.get("exists", False):
+                            err = (
+                                f"External mutation detected on modified file '{op.target}' for op '{op.id}' "
+                                "(file was deleted externally). Rollback aborted to preserve user modifications."
+                            )
+                            logger.error(err)
+                            op.status = OperationStatus.FAILED
+                            op.error = err
+                            tx.transition(TransactionStatus.FAILED, reason=err)
+                            self.store.save(tx)
+                            return RecoveryResult(
+                                transaction_id=tx.id,
+                                previous_status=initial_status,
+                                final_status=TransactionStatus.FAILED,
+                                recovered=False,
+                                rolled_back=False,
+                                ambiguous=True,
+                                error=err,
+                                operations_recovered=ops_recovered,
+                            )
+                        if not self._states_equal(actual, op.after_state):
+                            err = (
+                                f"External mutation detected on modified file '{op.target}' for op '{op.id}' "
+                                "(content on disk differs from BrainFrog mutation). Rollback aborted to preserve user modifications."
+                            )
+                            logger.error(err)
+                            op.status = OperationStatus.FAILED
+                            op.error = err
+                            tx.transition(TransactionStatus.FAILED, reason=err)
+                            self.store.save(tx)
+                            return RecoveryResult(
+                                transaction_id=tx.id,
+                                previous_status=initial_status,
+                                final_status=TransactionStatus.FAILED,
+                                recovered=False,
+                                rolled_back=False,
+                                ambiguous=True,
+                                error=err,
+                                operations_recovered=ops_recovered,
+                            )
                         self._restore_snapshot(target_path, op.before_state)
                         ops_recovered += 1
+
+                    elif op.type == OperationType.DELETE_FILE:
+                        actual = self._inspect_target_state(target_path)
+                        if actual.get("exists", False):
+                            err = (
+                                f"External mutation detected on deleted file '{op.target}' for op '{op.id}' "
+                                "(file was recreated externally). Rollback aborted to preserve user modifications."
+                            )
+                            logger.error(err)
+                            op.status = OperationStatus.FAILED
+                            op.error = err
+                            tx.transition(TransactionStatus.FAILED, reason=err)
+                            self.store.save(tx)
+                            return RecoveryResult(
+                                transaction_id=tx.id,
+                                previous_status=initial_status,
+                                final_status=TransactionStatus.FAILED,
+                                recovered=False,
+                                rolled_back=False,
+                                ambiguous=True,
+                                error=err,
+                                operations_recovered=ops_recovered,
+                            )
+                        self._restore_snapshot(target_path, op.before_state)
+                        ops_recovered += 1
+
                     elif op.type == OperationType.RENAME_FILE:
-                        if op.new_target:
-                            dest_path = self.workspace / op.new_target
-                            if dest_path.exists():
-                                target_path.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.move(str(dest_path), str(target_path))
-                                ops_recovered += 1
+                        if not op.new_target:
+                            err = f"Malformed rename operation '{op.id}': missing new_target"
+                            logger.error(err)
+                            op.status = OperationStatus.FAILED
+                            op.error = err
+                            tx.transition(TransactionStatus.FAILED, reason=err)
+                            self.store.save(tx)
+                            return RecoveryResult(
+                                transaction_id=tx.id,
+                                previous_status=initial_status,
+                                final_status=TransactionStatus.FAILED,
+                                recovered=False,
+                                rolled_back=False,
+                                ambiguous=True,
+                                error=err,
+                                operations_recovered=ops_recovered,
+                            )
+                        if dest_path is None:
+                            dest_path = validate_protected_target(op.new_target, self.workspace)
+                        actual_dest = self._inspect_target_state(dest_path)
+                        if not actual_dest.get("exists", False):
+                            err = (
+                                f"External mutation detected on rename destination '{op.new_target}' for op '{op.id}' "
+                                "(destination file was deleted or moved externally). Rollback aborted to preserve user modifications."
+                            )
+                            logger.error(err)
+                            op.status = OperationStatus.FAILED
+                            op.error = err
+                            tx.transition(TransactionStatus.FAILED, reason=err)
+                            self.store.save(tx)
+                            return RecoveryResult(
+                                transaction_id=tx.id,
+                                previous_status=initial_status,
+                                final_status=TransactionStatus.FAILED,
+                                recovered=False,
+                                rolled_back=False,
+                                ambiguous=True,
+                                error=err,
+                                operations_recovered=ops_recovered,
+                            )
+                        has_after_snapshot = bool(
+                            op.after_state
+                            and (
+                                op.after_state.get("content") is not None
+                                or op.after_state.get("content_b64") is not None
+                                or op.after_state.get("content_hash") is not None
+                            )
+                        )
+                        expected_dest = op.after_state if has_after_snapshot else op.before_state
+                        if expected_dest and not self._states_equal(actual_dest, expected_dest):
+                            err = (
+                                f"External mutation detected on rename destination '{op.new_target}' for op '{op.id}' "
+                                "(content modified externally). Rollback aborted to preserve user modifications."
+                            )
+                            logger.error(err)
+                            op.status = OperationStatus.FAILED
+                            op.error = err
+                            tx.transition(TransactionStatus.FAILED, reason=err)
+                            self.store.save(tx)
+                            return RecoveryResult(
+                                transaction_id=tx.id,
+                                previous_status=initial_status,
+                                final_status=TransactionStatus.FAILED,
+                                recovered=False,
+                                rolled_back=False,
+                                ambiguous=True,
+                                error=err,
+                                operations_recovered=ops_recovered,
+                            )
+                        actual_src = self._inspect_target_state(target_path)
+                        if actual_src.get("exists", False):
+                            err = (
+                                f"External collision detected on rename source '{op.target}' for op '{op.id}' "
+                                "(source file was recreated externally). Rollback aborted to prevent overwriting user file."
+                            )
+                            logger.error(err)
+                            op.status = OperationStatus.FAILED
+                            op.error = err
+                            tx.transition(TransactionStatus.FAILED, reason=err)
+                            self.store.save(tx)
+                            return RecoveryResult(
+                                transaction_id=tx.id,
+                                previous_status=initial_status,
+                                final_status=TransactionStatus.FAILED,
+                                recovered=False,
+                                rolled_back=False,
+                                ambiguous=True,
+                                error=err,
+                                operations_recovered=ops_recovered,
+                            )
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(dest_path), str(target_path))
+                        ops_recovered += 1
 
                     op.status = OperationStatus.ROLLED_BACK
                     op.result = "rolled_back"
