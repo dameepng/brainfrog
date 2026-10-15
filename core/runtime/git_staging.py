@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Set, Tuple, Union
 
+from core.runtime.process import run_hardened_subprocess
 from core.runtime.transaction import (
     OperationStatus,
     OperationType,
@@ -132,26 +133,25 @@ def resolve_canonical_repo_path(repo_dir: Path | str, target: str) -> str:
 
 def inspect_staged_index(repo_dir: Path | str) -> List[str]:
     """Return repository-relative POSIX paths of all files currently staged in Git index."""
-    proc = subprocess.run(
+    proc = run_hardened_subprocess(
         ["git", "diff", "--cached", "--name-only", "-z"],
-        cwd=str(repo_dir),
-        capture_output=True,
-        check=False,
+        cwd=Path(repo_dir),
+        timeout=15.0,
     )
     if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        err = proc.stderr.strip()
         raise GitStagingError(f"Failed to inspect git index: {err}")
 
     raw_output = proc.stdout
     if not raw_output:
         return []
 
-    entries = raw_output.split(b"\0")
+    entries = raw_output.split("\0")
     staged_paths: List[str] = []
     for entry in entries:
         if not entry:
             continue
-        decoded = entry.decode("utf-8", errors="replace").strip().replace("\\", "/")
+        decoded = entry.strip().replace("\\", "/")
         if decoded:
             staged_paths.append(decoded)
     return sorted(staged_paths)
@@ -163,26 +163,25 @@ def inspect_unstaged_diff(repo_dir: Path | str, targets: Sequence[str]) -> List[
         return []
 
     cmd = ["git", "diff", "--name-only", "-z", "--"] + list(targets)
-    proc = subprocess.run(
+    proc = run_hardened_subprocess(
         cmd,
-        cwd=str(repo_dir),
-        capture_output=True,
-        check=False,
+        cwd=Path(repo_dir),
+        timeout=15.0,
     )
     if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        err = proc.stderr.strip()
         raise GitStagingError(f"Failed to inspect unstaged git diff: {err}")
 
     raw_output = proc.stdout
     if not raw_output:
         return []
 
-    entries = raw_output.split(b"\0")
+    entries = raw_output.split("\0")
     unstaged: List[str] = []
     for entry in entries:
         if not entry:
             continue
-        decoded = entry.decode("utf-8", errors="replace").strip().replace("\\", "/")
+        decoded = entry.strip().replace("\\", "/")
         if decoded:
             unstaged.append(decoded)
     return sorted(unstaged)
@@ -190,11 +189,10 @@ def inspect_unstaged_diff(repo_dir: Path | str, targets: Sequence[str]) -> List[
 
 def is_file_tracked_in_git(repo_dir: Path | str, rel_path: str) -> bool:
     """Return True if rel_path is tracked in Git index or HEAD."""
-    proc = subprocess.run(
+    proc = run_hardened_subprocess(
         ["git", "ls-files", "--", rel_path],
-        cwd=str(repo_dir),
-        capture_output=True,
-        check=False,
+        cwd=Path(repo_dir),
+        timeout=10.0,
     )
     if proc.returncode != 0:
         return False
@@ -266,11 +264,17 @@ def stage_authorized_targets(
         is_committed = getattr(last_tx_result, "committed", False) is True
         status = getattr(last_tx_result, "status", None)
         is_rolled_back = getattr(last_tx_result, "rolled_back", False) is True
-        if not is_committed or status != TransactionStatus.COMMITTED or is_rolled_back:
+        if not is_committed or is_rolled_back or status in (TransactionStatus.FAILED, TransactionStatus.ROLLED_BACK):
             return GitStageResult(
                 success=False,
                 error=f"Transaction result '{getattr(last_tx_result, 'transaction_id', '?')}' is not committed (status={status}, rolled_back={is_rolled_back}). Staging rejected fail-closed.",
                 rejection_code="uncommitted_transaction",
+            )
+        if status != TransactionStatus.VERIFIED:
+            return GitStageResult(
+                success=False,
+                error=f"Transaction result '{getattr(last_tx_result, 'transaction_id', '?')}' is not verified (status={status}, rolled_back={is_rolled_back}). Staging rejected fail-closed.",
+                rejection_code="unverified_transaction",
             )
 
     # 1. Resolve and validate canonical paths
@@ -356,65 +360,60 @@ def stage_authorized_targets(
 
             if op_type_val == OperationType.DELETE_FILE.value:
                 if is_file_tracked_in_git(repo_path, canon_target):
-                    proc = subprocess.run(
+                    proc = run_hardened_subprocess(
                         ["git", "add", "--", canon_target],
-                        cwd=str(repo_path),
-                        capture_output=True,
-                        check=False,
+                        cwd=repo_path,
+                        timeout=15.0,
                     )
                     if proc.returncode != 0:
-                        raise GitStagingError(f"Failed to stage deletion for '{canon_target}': {proc.stderr.decode()}")
+                        raise GitStagingError(f"Failed to stage deletion for '{canon_target}': {proc.stderr.strip()}")
                 staged_so_far.append(canon_target)
 
             elif op_type_val == OperationType.RENAME_FILE.value and op.new_target:
                 canon_new = resolve_canonical_repo_path(repo_path, op.new_target)
-                proc = subprocess.run(
+                proc = run_hardened_subprocess(
                     ["git", "add", "--", canon_target, canon_new],
-                    cwd=str(repo_path),
-                    capture_output=True,
-                    check=False,
+                    cwd=repo_path,
+                    timeout=15.0,
                 )
                 if proc.returncode != 0:
                     raise GitStagingError(
-                        f"Failed to stage rename '{canon_target}' -> '{canon_new}': {proc.stderr.decode()}"
+                        f"Failed to stage rename '{canon_target}' -> '{canon_new}': {proc.stderr.strip()}"
                     )
                 staged_so_far.extend([canon_target, canon_new])
 
             else:  # CREATE_FILE, MODIFY_FILE
                 if target_file.exists():
-                    proc = subprocess.run(
+                    proc = run_hardened_subprocess(
                         ["git", "add", "--", canon_target],
-                        cwd=str(repo_path),
-                        capture_output=True,
-                        check=False,
+                        cwd=repo_path,
+                        timeout=15.0,
                     )
                     if proc.returncode != 0:
-                        raise GitStagingError(f"Failed to stage file '{canon_target}': {proc.stderr.decode()}")
+                        raise GitStagingError(f"Failed to stage file '{canon_target}': {proc.stderr.strip()}")
                     staged_so_far.append(canon_target)
                 elif is_file_tracked_in_git(repo_path, canon_target):
                     # File was deleted on disk
-                    proc = subprocess.run(
+                    proc = run_hardened_subprocess(
                         ["git", "add", "--", canon_target],
-                        cwd=str(repo_path),
-                        capture_output=True,
-                        check=False,
+                        cwd=repo_path,
+                        timeout=15.0,
                     )
                     if proc.returncode != 0:
-                        raise GitStagingError(f"Failed to stage deletion for '{canon_target}': {proc.stderr.decode()}")
+                        raise GitStagingError(f"Failed to stage deletion for '{canon_target}': {proc.stderr.strip()}")
                     staged_so_far.append(canon_target)
 
         # B. Process string targets (when operations not provided)
         for rel_target in str_targets:
             target_file = repo_path / rel_target
             if target_file.exists() or is_file_tracked_in_git(repo_path, rel_target):
-                proc = subprocess.run(
+                proc = run_hardened_subprocess(
                     ["git", "add", "--", rel_target],
-                    cwd=str(repo_path),
-                    capture_output=True,
-                    check=False,
+                    cwd=repo_path,
+                    timeout=15.0,
                 )
                 if proc.returncode != 0:
-                    raise GitStagingError(f"Failed to stage target '{rel_target}': {proc.stderr.decode()}")
+                    raise GitStagingError(f"Failed to stage target '{rel_target}': {proc.stderr.strip()}")
                 staged_so_far.append(rel_target)
 
     except Exception as exc:
@@ -470,24 +469,21 @@ def unstage_target_paths(repo_dir: Path | str, targets: Sequence[str]) -> None:
         return
 
     # Check if HEAD exists in repository
-    head_proc = subprocess.run(
+    head_proc = run_hardened_subprocess(
         ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=str(repo_path),
-        capture_output=True,
-        check=False,
+        cwd=repo_path,
+        timeout=10.0,
     )
     if head_proc.returncode == 0:
-        subprocess.run(
+        run_hardened_subprocess(
             ["git", "reset", "HEAD", "--"] + valid_rel_targets,
-            cwd=str(repo_path),
-            capture_output=True,
-            check=False,
+            cwd=repo_path,
+            timeout=15.0,
         )
     else:
         # No HEAD yet (initial commit in fresh repo)
-        subprocess.run(
+        run_hardened_subprocess(
             ["git", "rm", "--cached", "-r", "--quiet", "--"] + valid_rel_targets,
-            cwd=str(repo_path),
-            capture_output=True,
-            check=False,
+            cwd=repo_path,
+            timeout=15.0,
         )

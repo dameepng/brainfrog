@@ -199,14 +199,18 @@ class McpClient:
                 pass
 
             try:
-                self.proc.terminate()
-                self.proc.wait(timeout=2.0)
+                from core.runtime.process import terminate_process_tree
+                terminate_process_tree(self.proc)
             except Exception:
                 try:
-                    self.proc.kill()
-                    self.proc.wait(timeout=1.0)
+                    self.proc.terminate()
+                    self.proc.wait(timeout=2.0)
                 except Exception:
-                    pass
+                    try:
+                        self.proc.kill()
+                        self.proc.wait(timeout=1.0)
+                    except Exception:
+                        pass
 
             self.proc = None
 

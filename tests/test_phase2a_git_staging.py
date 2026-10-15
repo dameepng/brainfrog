@@ -193,7 +193,7 @@ class TestPhase2AGitStagingHardening(unittest.TestCase):
             )
             tx_res = TransactionResult(
                 transaction_id="tx_test_001",
-                status=TransactionStatus.COMMITTED,
+                status=TransactionStatus.VERIFIED,
                 committed=True,
                 rolled_back=False,
                 operations=(op,),
@@ -381,7 +381,7 @@ class TestPhase2AGitStagingHardening(unittest.TestCase):
             )
             tx_res = TransactionResult(
                 transaction_id="tx_test_orch_01",
-                status=TransactionStatus.COMMITTED,
+                status=TransactionStatus.VERIFIED,
                 committed=True,
                 rolled_back=False,
                 operations=(op,),
@@ -543,7 +543,7 @@ class TestPhase2AGitStagingHardening(unittest.TestCase):
             )
             tx_res = TransactionResult(
                 transaction_id="tx_exc",
-                status=TransactionStatus.COMMITTED,
+                status=TransactionStatus.VERIFIED,
                 committed=True,
                 rolled_back=False,
                 operations=(op,),
@@ -598,7 +598,7 @@ class TestPhase2AGitStagingHardening(unittest.TestCase):
             )
             tx_res = TransactionResult(
                 transaction_id="tx_scratch",
-                status=TransactionStatus.COMMITTED,
+                status=TransactionStatus.VERIFIED,
                 committed=True,
                 rolled_back=False,
                 operations=(op,),
