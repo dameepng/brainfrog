@@ -58,6 +58,23 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "o3-mini": 200_000,
     "deepseek-chat": 64_000,
     "deepseek-reasoner": 64_000,
+    "deepseek-v3": 64_000,
+    "deepseek-r1": 64_000,
+    # Kimi / Moonshot models
+    "kimi-latest": 128_000,
+    "moonshot-v1-8k": 8_000,
+    "moonshot-v1-32k": 32_000,
+    "moonshot-v1-128k": 128_000,
+    # GLM / Zhipu models
+    "glm-4": 128_000,
+    "glm-4-flash": 128_000,
+    "glm-4-plus": 128_000,
+    "glm-4-long": 1_000_000,
+    # Priority Sumopod models
+    "deepseek-v4-pro": 64_000,
+    "deepseek-v4.1-flash:netra": 64_000,
+    "glm-5.3-flash": 128_000,
+    "kimi-k3": 128_000,
 }
 DEFAULT_CONTEXT_LIMIT = 128_000
 

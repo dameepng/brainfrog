@@ -13,6 +13,8 @@ class TestOpenAISystem2Client(unittest.TestCase):
     def test_provider_resolution(self):
         self.assertEqual(get_system2_provider("openai"), "openai")
         self.assertEqual(get_system2_provider("openrouter"), "openrouter")
+        self.assertEqual(get_system2_provider("sumopod"), "sumopod")
+        self.assertEqual(get_system2_provider("sumo"), "sumopod")
         self.assertEqual(get_system2_provider("openai-compatible"), "openai-compatible")
         self.assertEqual(get_system2_provider("custom"), "openai-compatible")
         self.assertEqual(get_system2_provider("ollama"), "openai-compatible")
