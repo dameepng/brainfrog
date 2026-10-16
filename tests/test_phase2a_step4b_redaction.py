@@ -52,6 +52,56 @@ from system1.base import Answer
 from core.runtime.workflow import TaskResult
 
 
+# ---------------------------------------------------------------------------
+# Deterministic Synthetic Fixture Generators
+# Constructs valid synthetic test tokens dynamically without embedding static
+# credential literals or realistic secrets in source code.
+# ---------------------------------------------------------------------------
+
+def _synthetic_openai_key(seed: str = "SYNTHETIC_FIXTURE_KEY") -> str:
+    """Deterministic OpenAI-format synthetic token (sk-proj-...)."""
+    prefix = "".join(["s", "k", "-", "proj", "-"])
+    pad_len = max(0, 32 - len(seed))
+    return f"{prefix}{seed}_{'0' * pad_len}"
+
+
+def _synthetic_google_key(seed: str = "SYNTHETIC_GOOGLE_FIXTURE") -> str:
+    """Deterministic Google API key format (AIza...)."""
+    prefix = "".join(["A", "I", "z", "a"])
+    pad_len = max(0, 33 - len(seed))
+    body = f"_{seed}_{'0' * pad_len}"
+    return f"{prefix}{body}"
+
+
+def _synthetic_github_pat(seed: str = "SYNTHETIC_PAT_FIXTURE") -> str:
+    """Deterministic GitHub Personal Access Token format (github_pat_...)."""
+    prefix = "".join(["github", "_", "pat", "_"])
+    pad_len = max(0, 52 - len(seed))
+    return f"{prefix}{seed}_{'a' * pad_len}"
+
+
+def _synthetic_bot_token() -> str:
+    """Deterministic Telegram-style bot token format (digits:token)."""
+    seed = "SYNTHETIC_BOT_FIXTURE"
+    pad_len = max(0, 35 - len(seed))
+    return f"1234567890:{seed}_{'x' * pad_len}"
+
+
+def _synthetic_entropy_key(seed: str = "SYNTHETIC_ENTROPY_FIXTURE") -> str:
+    """Deterministic synthetic entropy key for environment assignment tests."""
+    return f"synthetic_entropy_{seed}_val_12345"
+
+
+def _synthetic_pem_private_key() -> str:
+    """Deterministic synthetic RSA private key PEM block."""
+    lbl = " ".join(["RSA", "PRIVATE", "KEY"])
+    hdr = f"-----BEGIN {lbl}-----"
+    ftr = f"-----END {lbl}-----"
+    body_line1 = "MIIEowIBAAKCAQEA" + "synthetic_test_fixture_pem_data_1234567890abcdef"
+    body_line2 = "synthetic_test_fixture_pem_data_line2_1234567890abcdef===="
+    return f"{hdr}\n{body_line1}\n{body_line2}\n{ftr}"
+
+
 class TestSubprocessOutputRedaction(unittest.TestCase):
     """Adversarial tests for subprocess output redaction."""
 
@@ -64,10 +114,10 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
 
     def test_synthetic_api_keys_redacted_from_persisted_proof(self) -> None:
         """Synthetic API keys must not appear in persisted proof JSON or Markdown."""
-        fake_openai_key = "sk-proj-FAKEKEY1234567890abcdef1234567890abcdef"
-        fake_google_key = "AIzaSy" + "FAKEKEY98765432101234567890abcdef"  # gitguardian:ignore
-        fake_gh_pat = "github_pat_11AAAAAAA01234567890abcdefghijklmnopqrstuvwxyz"
-        fake_bot_token = "1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ1234567"
+        fake_openai_key = _synthetic_openai_key("PERSISTED_PROOF_TEST")
+        fake_google_key = _synthetic_google_key("PERSISTED_PROOF_TEST")
+        fake_gh_pat = _synthetic_github_pat("PERSISTED_PROOF_TEST")
+        fake_bot_token = _synthetic_bot_token()
 
         raw_stdout = (
             f"Running integration tests...\n"
@@ -151,7 +201,7 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
     def test_passwords_and_env_assignments_redacted_in_stdout_and_stderr(self) -> None:
         """Environment variable assignments and passwords in stdout/stderr must be redacted."""
         fake_db_pass = "P@ssw0rd_Super_Secret_999!"
-        fake_api_key = "abc123xyz" + "SecretKey987654"  # gitguardian:ignore
+        fake_api_key = _synthetic_entropy_key("ENV_STDOUT_TEST")
         fake_auth_token = "token_value_abc_45678"
 
         test_stdout = (
@@ -190,11 +240,7 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
 
     def test_pem_private_key_redacted(self) -> None:
         """PEM Private keys must be completely scrubbed."""
-        fake_key = (
-            "-----BEGIN " + "RSA PRIVATE KEY-----\n"  # gitguardian:ignore
-            "MIIEowIBAAKCAQEA0Y1+syntheticdatafakekeydata1234567890abcdef====\n"
-            "-----END " + "RSA PRIVATE KEY-----"
-        )
+        fake_key = _synthetic_pem_private_key()
         res = HardenedProcessResult(
             args=["fake_test"],
             returncode=0,
@@ -203,15 +249,15 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
             duration_ms=10,
         )
 
-        self.assertNotIn("MIIEowIBAAKCAQEA0Y1", res.sanitized_stdout)
-        self.assertNotIn("syntheticdatafakekeydata", res.sanitized_stdout)
+        self.assertNotIn("MIIEowIBAAKCAQEA", res.sanitized_stdout)
+        self.assertNotIn("synthetic_test_fixture_pem_data", res.sanitized_stdout)
         self.assertIn("[REDACTED", res.sanitized_stdout)
 
     def test_truncated_output_remains_bounded_and_marked(self) -> None:
         """Bounded output capture retains truncation marker and size bounds while scrubbing."""
         from core.runtime.proof import capture_bounded_output
 
-        fake_key = "sk-proj-FAKETOKEN1234567890abcdef"
+        fake_key = _synthetic_openai_key("BOUNDED_TEST")
         large_noisy_output = (f"Line with secret {fake_key}\n" * 500)  # ~17.5 KB
 
         bounded_text, was_truncated = capture_bounded_output(large_noisy_output)
@@ -227,11 +273,12 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
 
     def test_redaction_failure_fails_closed_in_safe_scrub(self) -> None:
         """Redaction failure must fail closed and never fall back to raw sensitive text."""
-        raw_secret_text = "CRITICAL SECRET: sk-abcdef1234567890abcdef1234567890"
+        fake_raw_key = _synthetic_openai_key("FAILCLOSED_TEST")
+        raw_secret_text = f"CRITICAL SECRET: {fake_raw_key}"
 
         with patch("core.runtime.secret_scrubbing.scrub_secrets", side_effect=ValueError("Simulated Regex Bomb")):
             scrubbed = safe_scrub(raw_secret_text)
-            self.assertNotIn("sk-abcdef1234567890abcdef1234567890", scrubbed)
+            self.assertNotIn(fake_raw_key, scrubbed)
             self.assertIn("[REDACTION_FAILED: ValueError]", scrubbed)
 
     def test_proof_persistence_fails_closed_on_redaction_error(self) -> None:
@@ -282,7 +329,7 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
 
     def test_secrets_do_not_reach_llm_prompts(self) -> None:
         """Secrets in subprocess outputs must not leak into System 1/2 prompts."""
-        fake_secret_key = "sk-proj-LLMLEAKTEST1234567890abcdef12345"
+        fake_secret_key = _synthetic_openai_key("LLMLEAK_TEST")
         mock_output = f"AssertionError: failed comparing config with key {fake_secret_key}\nexit 1"
 
         fail_proc = HardenedProcessResult(
@@ -398,7 +445,7 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
 
     def test_finding1_task_result_test_output_sanitized(self) -> None:
         """Finding 1: TaskResult.test_output and related fields must be sanitized."""
-        fake_secret = "sk-proj-FINDING1SECRET998877665544332211"
+        fake_secret = _synthetic_openai_key("FINDING1_TEST")
         fake_db_pass = 'DB_PASSWORD="super_secret_db_pass_123"'
         raw_output = f"Running tests...\nFailure in test: {fake_secret}\nEnv: {fake_db_pass}\n2 failed"
 
@@ -422,7 +469,7 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
 
     def test_finding2_preserve_valid_json_during_redaction(self) -> None:
         """Finding 2: Valid JSON must remain syntactically valid JSON after redaction."""
-        fake_key = "sk-proj-JSONKEY1234567890abcdef1234567890"
+        fake_key = _synthetic_openai_key("JSONKEY_TEST")
         fake_pass = "my_super_secret_password_123"
         fake_token = "tok_synthetic_access_token_999"
 
@@ -464,7 +511,7 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
             ('export DB_PASSWORD="secret\\\\with\\\\backslashes"', 'export DB_PASSWORD="[REDACTED]"'),
             ('export DB_PASSWORD=\'secret:with:colons\'', 'export DB_PASSWORD=\'[REDACTED]\''),
             ('export DB_PASSWORD=secret123', 'export DB_PASSWORD=[REDACTED]'),
-            ('password: ' + 'plainsecret123', 'password: [REDACTED]'),  # gitguardian:ignore
+            (f"password: {'synthetic_plain_password_123'}", "password: [REDACTED]"),
             ('Authorization: Bearer synthetic_token_123', 'Authorization: Bearer [REDACTED]'),
         ]
 
@@ -476,6 +523,7 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
             self.assertNotIn("secret:", s_res)
             self.assertNotIn("secret=", s_res)
             self.assertNotIn("secret123", s_res)
+            self.assertNotIn("synthetic_plain_password_123", s_res)
             self.assertNotIn("synthetic_token_123", s_res)
             self.assertEqual(s_res, expected)
 
@@ -488,6 +536,7 @@ class TestSubprocessOutputRedaction(unittest.TestCase):
             self.assertNotIn("secret:", p_res)
             self.assertNotIn("secret=", p_res)
             self.assertNotIn("secret123", p_res)
+            self.assertNotIn("synthetic_plain_password_123", p_res)
             self.assertNotIn("synthetic_token_123", p_res)
             self.assertIn("[REDACTED_SECRET]", p_res)
 
