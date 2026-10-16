@@ -17,8 +17,70 @@ from typing import Any, Dict, List, Optional, Tuple
 from system2.claude_client import PlanStep, usage_tracker
 from system2.json_utils import extract_json, _extract_json, repair_json_content
 
+
 DEFAULT_ANTIGRAVITY_MODEL = os.environ.get("ANTIGRAVITY_MODEL", "gemini-3.8-flash-high")
 DEFAULT_ANTIGRAVITY_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TIMEOUT", "240.0"))
+OPT_IN_ENV_VAR = "BRAINFROG_ALLOW_UNRESTRICTED_ANTIGRAVITY_CLI"
+
+
+# =====================================================================
+# Antigravity CLI (agy) Execution & Boundary Documentation:
+#
+# Installed CLI binary: agy (Google Antigravity CLI)
+# Verified supported flags from `agy --help`:
+#   --model <name>            Specify model
+#   --output-format json      Output as JSON
+#   --sandbox                 Enable terminal restrictions
+#   --disable-slash-commands  Disable interactive slash commands
+#   --mode <plan|code|ask>    Mode selection
+#
+# CRITICAL SECURITY BOUNDARY NOTE:
+# The installed CLI does NOT support any --no-tools or tool-disabling flag.
+# Neither --sandbox (terminal restrictions) nor --mode plan (agent prompt setting)
+# prevents the CLI from executing registered tools (file viewing, search, etc.)
+# during the agentic turn loop before producing the final JSON response.
+# Furthermore, the CLI's JSON schema does not emit a top-level `tool_calls` field.
+#
+# Therefore, BrainFrog CANNOT technically guarantee that invoking `agy` will not
+# execute tools with host privileges.
+# Invocation fails closed by default unless explicitly opted in via
+# BRAINFROG_ALLOW_UNRESTRICTED_ANTIGRAVITY_CLI=1 or allow_unrestricted=True.
+# =====================================================================
+
+
+class AntigravityClientError(RuntimeError):
+    """Base exception for Antigravity System 2 client operations."""
+
+
+class AntigravityOptInRequiredError(AntigravityClientError):
+    """Raised when Antigravity CLI invocation is attempted without explicit opt-in.
+
+    Because the installed Antigravity CLI lacks a technically enforced no-tools mode,
+    invoking it may execute tools on the host with the user's privileges. BrainFrog
+    fails closed by default unless explicitly opted in.
+    """
+
+
+class AntigravityOutputError(AntigravityClientError):
+    """Raised when Antigravity CLI output is empty, malformed, truncated, or invalid JSON."""
+
+
+class AntigravityExecutionError(AntigravityClientError):
+    """Raised when Antigravity CLI returns a non-zero exit code or non-success status."""
+
+
+class AntigravityTimeoutError(AntigravityClientError):
+    """Raised when Antigravity CLI process execution times out."""
+
+
+def is_antigravity_opt_in_enabled() -> bool:
+    """Check if the user has explicitly opted in to invoking the Antigravity CLI.
+
+    Auditable via environment variable BRAINFROG_ALLOW_UNRESTRICTED_ANTIGRAVITY_CLI=1
+    or passing allow_unrestricted=True directly.
+    """
+    val = os.environ.get(OPT_IN_ENV_VAR, "").strip().lower()
+    return val in ("1", "true", "yes", "enabled")
 
 
 def find_antigravity_bin() -> Optional[str]:
@@ -64,10 +126,14 @@ class AntigravitySystem2Client:
         model: str = DEFAULT_ANTIGRAVITY_MODEL,
         guidelines: str = "",
         bin_path: Optional[str] = None,
+        allow_unrestricted: Optional[bool] = None,
     ) -> None:
         self.model = model
         self.guidelines = guidelines
         self.bin_path = bin_path or find_antigravity_bin()
+        self.allow_unrestricted = (
+            is_antigravity_opt_in_enabled() if allow_unrestricted is None else bool(allow_unrestricted)
+        )
         if not self.bin_path or not os.path.exists(self.bin_path):
             raise FileNotFoundError(
                 "Google Antigravity CLI binary ('agy.exe') not found. "
@@ -86,6 +152,14 @@ class AntigravitySystem2Client:
         max_tokens: int = 4000,
         images: Optional[List[Any]] = None,
     ) -> str:
+        if not self.allow_unrestricted:
+            raise AntigravityOptInRequiredError(
+                f"Antigravity CLI invocation failed closed: The installed Antigravity CLI ('{self.bin_path}') "
+                f"does not provide a technically enforced restricted tool execution boundary. Autonomous invocation "
+                f"is blocked by default to prevent unauthorized host tool execution. To explicitly opt in with "
+                f"full auditability, set environment variable {OPT_IN_ENV_VAR}=1 or pass allow_unrestricted=True."
+            )
+
         full_system = self._apply_guidelines(system)
         tool_guard_top = (
             "CRITICAL INSTRUCTION: You are operating strictly as a stateless, non-interactive JSON generator. "
@@ -129,7 +203,7 @@ class AntigravitySystem2Client:
             self.bin_path,
             "--model", self.model,
             "--output-format", "json",
-            "--dangerously-skip-permissions",
+            "--sandbox",
             "--disable-slash-commands",
         ]
 
@@ -153,7 +227,7 @@ class AntigravitySystem2Client:
             )
             try:
                 stdout, stderr = proc.communicate(input=prompt, timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 try:
                     proc.kill()
                     proc.communicate(timeout=3.0)
@@ -162,10 +236,10 @@ class AntigravitySystem2Client:
                 if attempt < max_attempts - 1:
                     time.sleep(1.0)
                     continue
-                raise RuntimeError(
+                raise AntigravityTimeoutError(
                     f"Antigravity process timed out after {int(timeout_seconds)}s. "
                     "If this persists, check ANTIGRAVITY_TIMEOUT or switch models/providers with /models or /provider."
-                )
+                ) from exc
 
             if proc.returncode != 0:
                 err_msg = (stderr.strip() or stdout.strip() or
@@ -173,29 +247,58 @@ class AntigravitySystem2Client:
                 if _TRANSIENT in err_msg and attempt < max_attempts - 1:
                     time.sleep(1.0)
                     continue
-                raise RuntimeError(f"Antigravity (Google Auth) error: {err_msg}")
+                raise AntigravityExecutionError(f"Antigravity (Google Auth) error: {err_msg}")
+
+            if not stdout or not stdout.strip():
+                if attempt < max_attempts - 1:
+                    time.sleep(1.0)
+                    continue
+                raise AntigravityOutputError(
+                    f"Antigravity process produced empty output after {attempt + 1} attempt(s)."
+                )
 
             try:
                 data = json.loads(stdout)
-                response_text = data.get("response", "")
-                if not response_text.strip():
-                    if attempt < max_attempts - 1:
-                        time.sleep(1.0)
-                        continue
-                    raise RuntimeError(
-                        f"Antigravity model returned empty output after {max_attempts} attempts. "
-                        "Try rephrasing your request or switching models with /models."
-                    )
-                usage = data.get("usage") or {}
-                usage_tracker.record(
-                    usage.get("input_tokens", 0),
-                    usage.get("output_tokens", 0),
-                )
-                return response_text
-            except json.JSONDecodeError:
-                return stdout.strip()
+            except json.JSONDecodeError as exc:
+                raise AntigravityOutputError(
+                    f"Antigravity process returned malformed JSON output: {exc}. "
+                    f"Raw output snippet: {stdout.strip()[:200]!r}"
+                ) from exc
 
-        raise RuntimeError(
+            if not isinstance(data, dict):
+                raise AntigravityOutputError(
+                    f"Antigravity process returned non-dictionary JSON ({type(data).__name__})."
+                )
+
+            status = data.get("status")
+            if status and str(status).upper() != "SUCCESS":
+                raise AntigravityExecutionError(
+                    f"Antigravity CLI returned non-success status '{status}': {stdout.strip()[:300]}"
+                )
+
+            if data.get("tool_calls"):
+                raise AntigravityExecutionError(
+                    "Antigravity System 2 model attempted unauthorized tool calls in stateless reasoning mode."
+                )
+
+            response_text = data.get("response")
+            if response_text is None or not isinstance(response_text, str) or not response_text.strip():
+                if attempt < max_attempts - 1:
+                    time.sleep(1.0)
+                    continue
+                raise AntigravityOutputError(
+                    f"Antigravity model returned empty or missing 'response' field after {max_attempts} attempts. "
+                    "Try rephrasing your request or switching models with /models."
+                )
+
+            usage = data.get("usage") or {}
+            usage_tracker.record(
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+            )
+            return response_text
+
+        raise AntigravityOutputError(
             f"Antigravity model returned empty output after {max_attempts} attempts. "
             "Try rephrasing your request or switching models with /models."
         )

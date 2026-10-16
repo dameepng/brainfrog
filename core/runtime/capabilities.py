@@ -15,16 +15,21 @@ def scope_path(value: str, repo_dir: Optional[Path] = None) -> str:
     if not candidate.is_valid:
         raise ValueError("Invalid filesystem capability target")
     normalized = candidate.normalized
-    if normalized.split("/")[0].lower() in (".git", ".brainfrog", ".codex", ".agents", ".aws"):
+    norm_parts = [p.lower() for p in normalized.split("/")]
+    if any(p in (".git", ".brainfrog", ".codex", ".agents", ".aws", ".ssh", ".gnupg") for p in norm_parts):
         raise ValueError("Capability cannot target authorization or tool state")
+    if any(p == ".env" or (p.startswith(".env.") and p != ".env.example") for p in norm_parts):
+        raise ValueError("Capability cannot target sensitive environment files")
     if repo_dir is not None:
         root = repo_dir.resolve()
         resolved = (root / normalized).resolve()
         if not resolved.is_relative_to(root):
             raise ValueError("Filesystem capability escapes workspace")
-        if resolved.relative_to(root).parts and resolved.relative_to(root).parts[0].lower() in (
-                ".git", ".brainfrog", ".codex", ".agents", ".aws"):
+        res_parts = [p.lower() for p in resolved.relative_to(root).parts]
+        if any(p in (".git", ".brainfrog", ".codex", ".agents", ".aws", ".ssh", ".gnupg") for p in res_parts):
             raise ValueError("Capability resolves to authorization or tool state")
+        if any(p == ".env" or (p.startswith(".env.") and p != ".env.example") for p in res_parts):
+            raise ValueError("Capability resolves to sensitive environment files")
     return normalized
 
 

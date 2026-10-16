@@ -62,7 +62,7 @@ KNOWN_EXTENSIONLESS_FILES: Set[str] = {
 
 VALID_CODE_EXTENSIONS: Set[str] = {
     "py", "js", "ts", "tsx", "jsx", "json", "md", "txt", "yaml", "yml", "toml",
-    "html", "css", "sql", "sh", "bat", "env", "lock", "cfg", "ini", "xml", "csv",
+    "html", "css", "sql", "sh", "bat", "env", "example", "lock", "cfg", "ini", "xml", "csv",
     "rst", "c", "cpp", "h", "hpp", "go", "rs", "java", "kt", "rb", "php", "proto",
     "graphql", "svg", "scss", "sass", "less", "gradle", "properties", "conf",
 }

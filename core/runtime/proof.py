@@ -22,9 +22,12 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
+
+from core.runtime.process import run_hardened_subprocess
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -64,15 +67,20 @@ SECRET_PATTERNS: Sequence[Tuple[re.Pattern, str]] = (
     (re.compile(r"sk-[a-zA-Z0-9_\-]{20,}", re.IGNORECASE), "[REDACTED_SECRET]"),
     # Google API Keys
     (re.compile(r"AIza[0-9A-Za-z-_]{30,}", re.IGNORECASE), "[REDACTED_SECRET]"),
+    # Telegram Bot Tokens
+    (re.compile(r"\b\d{8,11}:[A-Za-z0-9_-]{30,40}\b"), "[REDACTED_SECRET]"),
     # Bearer tokens
     (re.compile(r"(Bearer\s+)[a-zA-Z0-9_\-\.]{15,}", re.IGNORECASE), r"\1[REDACTED_SECRET]"),
-    # Key-value secret assignments
-    (re.compile(r"((?:password|passwd|pwd)\s*[:=]\s*)[^\s,;&\"']+", re.IGNORECASE), r"\1[REDACTED_SECRET]"),
-    (re.compile(r"((?:api[_-]?key)\s*[:=]\s*)[^\s,;&\"']+", re.IGNORECASE), r"\1[REDACTED_SECRET]"),
-    (re.compile(r"((?:secret[_-]?key|secret)\s*[:=]\s*)[^\s,;&\"']+", re.IGNORECASE), r"\1[REDACTED_SECRET]"),
-    (re.compile(r"((?:access[_-]?token|auth[_-]?token|token)\s*[:=]\s*)[^\s,;&\"']+", re.IGNORECASE), r"\1[REDACTED_SECRET]"),
+    # Key-value secret assignments & environment variables (e.g. DB_PASSWORD=..., "password": "...")
+    (
+        re.compile(
+            r'((?:["\']?[a-zA-Z0-9_]*(?:password|passwd|pwd|api[_-]?key|secret|token|auth)[a-zA-Z0-9_]*["\']?)\s*[:=]\s*)(?:[^\s,;&"\']+|"[^"]*"|\'[^\']*\')',
+            re.IGNORECASE,
+        ),
+        r"\1[REDACTED_SECRET]",
+    ),
     # Private Key blocks
-    (re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----.*?-----END [A-Z ]+ PRIVATE KEY-----", re.DOTALL), "[REDACTED_SECRET]"),
+    (re.compile(r"-----BEGIN [A-Z0-9 ]+ PRIVATE KEY-----.*?-----END [A-Z0-9 ]+ PRIVATE KEY-----", re.DOTALL | re.IGNORECASE), "[REDACTED_SECRET]"),
 )
 
 
@@ -90,14 +98,23 @@ class ProofVerificationError(ValueError):
 # 2. Secret Redaction & Path Normalization Helpers
 # =============================================================================
 
-def redact_secrets(text: Optional[str]) -> str:
-    """Scrub sensitive credentials, tokens, and keys from text."""
+class RedactionError(Exception):
+    """Raised when proof secret redaction fails unexpectedly."""
+    pass
+
+
+def redact_secrets(text: Optional[str], *, raise_on_error: bool = False) -> str:
+    """Scrub sensitive credentials, tokens, and keys from text with fail-closed protection."""
     if not text:
         return ""
-    result = text
-    for pattern, replacement in SECRET_PATTERNS:
-        result = pattern.sub(replacement, result)
-    return result
+    try:
+        from core.runtime.secret_scrubbing import scrub_secrets as _canonical_scrub
+        return _canonical_scrub(text, replacement="[REDACTED_SECRET]", raise_on_error=True)
+    except Exception as exc:
+        if raise_on_error:
+            raise RedactionError(f"Proof secret redaction failed closed: {exc}") from exc
+        # Fail closed: never return raw output when redaction encounters an error
+        return f"[REDACTED_SECRET: {type(exc).__name__}]"
 
 
 def is_sensitive_path(path_str: str) -> bool:
@@ -216,6 +233,7 @@ class ProcessEvidence:
     task_id: str
     transaction_id: Optional[str] = None
     command: str = ""
+    cwd: Optional[str] = None
     started_at: str = ""
     completed_at: str = ""
     duration_ms: int = 0
@@ -224,6 +242,9 @@ class ProcessEvidence:
     timed_out: bool = False
     cancelled: bool = False
     truncated: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command", redact_secrets(self.command))
 
 
 @dataclass(frozen=True)
@@ -265,6 +286,11 @@ class VerificationEvidence:
     gate_checks: Dict[str, bool] = field(default_factory=dict)
     process_evidence: Optional[ProcessEvidence] = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "test_command", redact_secrets(self.test_command))
+        object.__setattr__(self, "stdout_summary", redact_secrets(self.stdout_summary))
+        object.__setattr__(self, "stderr_summary", redact_secrets(self.stderr_summary))
+
 
 @dataclass(frozen=True)
 class ReproducibilityEvidence:
@@ -273,6 +299,9 @@ class ReproducibilityEvidence:
     command: str
     expected_exit_code: int = 0
     expected_file_hashes: Dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command", redact_secrets(self.command))
 
 
 @dataclass
@@ -345,6 +374,7 @@ class ProofArtifact:
                 task_id=proc_data.get("task_id", task.task_id),
                 transaction_id=proc_data.get("transaction_id"),
                 command=proc_data.get("command", ""),
+                cwd=proc_data.get("cwd"),
                 started_at=proc_data.get("started_at", ""),
                 completed_at=proc_data.get("completed_at", ""),
                 duration_ms=proc_data.get("duration_ms", 0),
@@ -452,7 +482,7 @@ def compute_proof_verdict(
         )
 
     # Invariant 4: Normal Success (VERIFIED)
-    if tx_str == "committed" and tests_passed and gate_passed and proc_str in ("success", "normal"):
+    if tx_str in ("committed", "verified") and tests_passed and gate_passed and proc_str in ("success", "normal"):
         return ProofVerdict(
             status="VERIFIED",
             reason="All verification gate invariants satisfied and transaction committed cleanly.",
@@ -483,30 +513,24 @@ def sample_git_state(workspace: Path) -> Tuple[Optional[str], bool]:
     if not git_dir.exists():
         return None, False
     try:
-        res = subprocess.run(
+        res = run_hardened_subprocess(
             ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=str(ws_res),
-            capture_output=True,
-            text=True,
+            cwd=ws_res,
             timeout=5.0,
         )
         if res.returncode != 0 or res.stdout.strip() != "true":
             return None, False
 
-        sha_res = subprocess.run(
+        sha_res = run_hardened_subprocess(
             ["git", "rev-parse", "HEAD"],
-            cwd=str(ws_res),
-            capture_output=True,
-            text=True,
+            cwd=ws_res,
             timeout=5.0,
         )
         head_sha = sha_res.stdout.strip() if sha_res.returncode == 0 else None
 
-        stat_res = subprocess.run(
+        stat_res = run_hardened_subprocess(
             ["git", "status", "--porcelain"],
-            cwd=str(ws_res),
-            capture_output=True,
-            text=True,
+            cwd=ws_res,
             timeout=5.0,
         )
         was_dirty = bool(stat_res.stdout.strip()) if stat_res.returncode == 0 else False
@@ -530,53 +554,43 @@ def capture_git_provenance(
 
     try:
         # Check inside work tree
-        res = subprocess.run(
+        res = run_hardened_subprocess(
             ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=str(ws_res),
-            capture_output=True,
-            text=True,
+            cwd=ws_res,
             timeout=5.0,
         )
         if res.returncode != 0 or res.stdout.strip() != "true":
             return None
 
         # Root
-        root_res = subprocess.run(
+        root_res = run_hardened_subprocess(
             ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(ws_res),
-            capture_output=True,
-            text=True,
+            cwd=ws_res,
             timeout=5.0,
         )
         repo_root = root_res.stdout.strip() or ws_res.name
 
         # Branch
-        br_res = subprocess.run(
+        br_res = run_hardened_subprocess(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=str(ws_res),
-            capture_output=True,
-            text=True,
+            cwd=ws_res,
             timeout=5.0,
         )
         branch = br_res.stdout.strip() if br_res.returncode == 0 else None
 
         # Head SHA (final sample)
-        sha_res = subprocess.run(
+        sha_res = run_hardened_subprocess(
             ["git", "rev-parse", "HEAD"],
-            cwd=str(ws_res),
-            capture_output=True,
-            text=True,
+            cwd=ws_res,
             timeout=5.0,
         )
         final_head_sha = sha_res.stdout.strip() if sha_res.returncode == 0 else None
 
         # Status porcelain
         if was_dirty_before is None:
-            stat_res = subprocess.run(
+            stat_res = run_hardened_subprocess(
                 ["git", "status", "--porcelain"],
-                cwd=str(ws_res),
-                capture_output=True,
-                text=True,
+                cwd=ws_res,
                 timeout=5.0,
             )
             dirty = bool(stat_res.stdout.strip()) if stat_res.returncode == 0 else False
@@ -670,12 +684,43 @@ def build_change_records(
     return records
 
 
-# =============================================================================
-# 7. Atomic Proof Persistence (FileProofStore)
-# =============================================================================
+def _safe_unlink(path: Optional[Path]) -> None:
+    """Best-effort file removal that suppresses FileNotFoundError and OS errors."""
+    if path is None:
+        return
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def _cleanup_backup(bak_path: Optional[Path], final_path: Optional[Path]) -> None:
+    """Clean up backup artifact without destroying the only remaining valid copy."""
+    if bak_path is None:
+        return
+    try:
+        if not bak_path.exists():
+            return
+    except Exception:
+        return
+    # If the final artifact is missing, preserve the backup as the only valid copy
+    if final_path is not None:
+        try:
+            if not final_path.exists():
+                logger.warning(
+                    "Preserving proof backup '%s' because final artifact '%s' is missing.",
+                    bak_path,
+                    final_path,
+                )
+                return
+        except Exception:
+            return
+    _safe_unlink(bak_path)
+
 
 class FileProofStore:
-    """Atomic, fail-closed filesystem storage for proof artifacts.
+    """Fail-closed filesystem storage for proof artifacts with replacement recovery.
 
     Layout:
     <workspace>/.brainfrog/proofs/<task_id>.json
@@ -865,7 +910,11 @@ class FileProofStore:
         *,
         allow_overwrite: bool = False,
     ) -> Tuple[Path, Optional[Path]]:
-        """Atomically persist ProofArtifact JSON and Markdown report.
+        """Persist ProofArtifact JSON and Markdown report with two-stage replacement recovery.
+
+        Multi-file replacement across separate JSON and Markdown files is implemented with
+        staging, backups, and rollback recovery to prevent inconsistent artifacts upon failure.
+        Note: OS filesystems do not guarantee transactional multi-file atomicity across separate files.
 
         Rejects overwriting existing artifacts unless allow_overwrite=True.
         """
@@ -884,11 +933,26 @@ class FileProofStore:
                 "Silent overwriting of historical verification evidence is prohibited."
             )
 
-        # 1. Staging phase: write and fsync both temporary files
+        # 1. Redact secrets BEFORE creating temporary staging files on disk
+        try:
+            raw_json = proof.to_json(indent=2)
+            json_payload = redact_secrets(raw_json, raise_on_error=True)
+            clean_md = redact_secrets(markdown_content, raise_on_error=True) if markdown_content is not None else None
+            # Authoritatively validate that json_payload is syntactically valid JSON before disk staging
+            json.loads(json_payload)
+        except Exception as scrub_err:
+            raise IOError(f"Proof redaction failed closed: {scrub_err}") from scrub_err
+
+        # Track existing file presence for rollback and recovery
+        had_existing_json = final_json.exists()
+        had_existing_md = final_md.exists() if final_md is not None else False
+
+        # 2. Staging phase: write and fsync temporary files
         nonce = secrets.token_hex(6)
         tmp_json = self.proofs_dir / f".tmp_proof_{task_id}_{nonce}.json"
         tmp_md = self.proofs_dir / f".tmp_proof_{task_id}_{nonce}.md" if (markdown_content is not None and final_md is not None) else None
-        json_payload = proof.to_json(indent=2)
+        bak_json = self.proofs_dir / f".bak_proof_{task_id}_{nonce}.json" if had_existing_json else None
+        bak_md = self.proofs_dir / f".bak_proof_{task_id}_{nonce}.md" if had_existing_md else None
 
         try:
             with open(tmp_json, "w", encoding="utf-8") as f:
@@ -899,45 +963,88 @@ class FileProofStore:
                 except Exception:
                     pass
 
-            if tmp_md is not None and markdown_content is not None:
+            if tmp_md is not None and clean_md is not None:
                 with open(tmp_md, "w", encoding="utf-8") as f:
-                    f.write(markdown_content)
+                    f.write(clean_md)
                     f.flush()
                     try:
                         os.fsync(f.fileno())
                     except Exception:
                         pass
         except Exception as exc:
-            if tmp_json.exists():
-                try:
-                    tmp_json.unlink()
-                except Exception:
-                    pass
-            if tmp_md is not None and tmp_md.exists():
-                try:
-                    tmp_md.unlink()
-                except Exception:
-                    pass
+            _safe_unlink(tmp_json)
+            _safe_unlink(tmp_md)
             raise IOError(f"Staging proof artifacts for '{task_id}' failed: {exc}") from exc
 
-        # 2. Atomic commit phase: replace Markdown first, then JSON
-        # Placing Markdown first guarantees that when exists() (which checks JSON) becomes true, Markdown is already present
+        # 3. Backup phase: if overwriting pre-existing artifacts, preserve backups before replacement
         try:
-            if tmp_md is not None and final_md is not None:
-                os.replace(tmp_md, final_md)
-            os.replace(tmp_json, final_json)
+            if bak_json is not None and final_json.exists():
+                shutil.copy2(final_json, bak_json)
+            if bak_md is not None and final_md is not None and final_md.exists():
+                shutil.copy2(final_md, bak_md)
         except Exception as exc:
-            if tmp_json.exists():
+            _safe_unlink(tmp_json)
+            _safe_unlink(tmp_md)
+            _cleanup_backup(bak_json, final_json)
+            _cleanup_backup(bak_md, final_md)
+            raise IOError(f"Creating proof backups for '{task_id}' failed: {exc}") from exc
+
+        # 4. Replacement phase: replace Markdown first, then JSON
+        # Placing Markdown first guarantees that when exists() (which checks JSON) becomes true, Markdown is already present
+
+        # Step 4A: Replace Markdown
+        if tmp_md is not None and final_md is not None:
+            try:
+                os.replace(tmp_md, final_md)
+            except Exception as md_err:
+                # Markdown replacement failed.
+                # If overwriting and final_md was lost, restore from backup
+                if had_existing_md and bak_md is not None and not final_md.exists():
+                    try:
+                        os.replace(bak_md, final_md)
+                    except Exception:
+                        pass
+                _safe_unlink(tmp_json)
+                _safe_unlink(tmp_md)
+                _cleanup_backup(bak_json, final_json)
+                _cleanup_backup(bak_md, final_md)
+                raise IOError(f"Proof markdown replacement for '{task_id}' failed: {md_err}") from md_err
+
+        # Step 4B: Replace JSON
+        try:
+            os.replace(tmp_json, final_json)
+        except Exception as json_err:
+            # JSON replacement failed after Markdown replacement succeeded (or was skipped).
+            # Recovery for Markdown:
+            if tmp_md is not None and final_md is not None:
+                if had_existing_md and bak_md is not None:
+                    # Overwrite case: restore original Markdown from backup
+                    try:
+                        os.replace(bak_md, final_md)
+                    except Exception as restore_err:
+                        logger.error("Failed to restore markdown backup for task %s: %s", task_id, restore_err)
+                elif not had_existing_md:
+                    # Fresh save case: unlink the newly placed final_md to prevent orphaned markdown
+                    _safe_unlink(final_md)
+
+            # Recovery for JSON (if overwriting and final_json was somehow lost):
+            if had_existing_json and bak_json is not None and not final_json.exists():
                 try:
-                    tmp_json.unlink()
-                except Exception:
-                    pass
-            if tmp_md is not None and tmp_md.exists():
-                try:
-                    tmp_md.unlink()
-                except Exception:
-                    pass
-            raise IOError(f"Atomic commitment of proof artifacts for '{task_id}' failed: {exc}") from exc
+                    os.replace(bak_json, final_json)
+                except Exception as restore_err:
+                    logger.error("Failed to restore json backup for task %s: %s", task_id, restore_err)
+
+            _safe_unlink(tmp_json)
+            _safe_unlink(tmp_md)
+            _cleanup_backup(bak_json, final_json)
+            _cleanup_backup(bak_md, final_md)
+            raise IOError(f"Proof JSON replacement for '{task_id}' failed: {json_err}") from json_err
+
+        # 5. Success: clean up temporary and backup artifacts
+        _safe_unlink(tmp_json)
+        _safe_unlink(tmp_md)
+        _cleanup_backup(bak_json, final_json)
+        _cleanup_backup(bak_md, final_md)
 
         return final_json, final_md
 

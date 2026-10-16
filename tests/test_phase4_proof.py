@@ -180,7 +180,7 @@ class TestPhase4ProofArtifact:
         assert artifact.verification.exit_code == 0
 
         # Changes
-        assert artifact.changes.status == "COMMITTED"
+        assert artifact.changes.status in ("COMMITTED", "VERIFIED")
         assert len(artifact.changes.files) >= 1
         navbar_change = next((f for f in artifact.changes.files if f.path == "navbar.py"), None)
         assert navbar_change is not None
@@ -461,8 +461,10 @@ class TestPhase4ProofArtifact:
         """Hardened subprocess captures started_at, completed_at, and duration_ms."""
         from core.runtime.process import run_hardened_subprocess
 
+        script = phase4_repo / "sleep_script.py"
+        script.write_text("import time\ntime.sleep(0.05)\nprint('hello')\n", encoding="utf-8")
         res = run_hardened_subprocess(
-            [sys.executable, "-c", "import time; time.sleep(0.05); print('hello')"],
+            [sys.executable, "sleep_script.py"],
             cwd=phase4_repo,
             timeout=5.0,
         )

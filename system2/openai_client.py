@@ -19,8 +19,10 @@ from system2.json_utils import _extract_json
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_SUMOPOD_BASE_URL = "https://ai.sumopod.com/v1"
 DEFAULT_OPENAI_MODEL = "gpt-4o"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o"
+DEFAULT_SUMOPOD_MODEL = "deepseek-chat"
 
 
 class OpenAISystem2Client:
@@ -44,12 +46,19 @@ class OpenAISystem2Client:
             or os.environ.get("CUSTOM_API_KEY")
         )
         if not resolved_key:
-            if "openrouter" in self.provider_name:
+            if "sumopod" in self.provider_name:
+                resolved_key = os.environ.get("SUMOPOD_API_KEY")
+            elif "openrouter" in self.provider_name:
                 resolved_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
             else:
                 resolved_key = os.environ.get("OPENAI_API_KEY")
 
         if not resolved_key:
+            if "sumopod" in self.provider_name:
+                raise RuntimeError(
+                    f"API key missing for provider '{self.provider_name}'. "
+                    "Please configure SUMOPOD_API_KEY in your .env file."
+                )
             raise RuntimeError(
                 f"API key missing for provider '{self.provider_name}'. "
                 "Please configure OPENAI_API_KEY, OPENROUTER_API_KEY, or BRAINFROG_MODEL_API_KEY in your .env file."
@@ -63,7 +72,9 @@ class OpenAISystem2Client:
             or os.environ.get("CUSTOM_BASE_URL")
         )
         if not resolved_url:
-            if "openrouter" in self.provider_name:
+            if "sumopod" in self.provider_name:
+                resolved_url = os.environ.get("SUMOPOD_BASE_URL") or DEFAULT_SUMOPOD_BASE_URL
+            elif "openrouter" in self.provider_name:
                 resolved_url = os.environ.get("OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL
             else:
                 resolved_url = os.environ.get("OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL
@@ -77,7 +88,9 @@ class OpenAISystem2Client:
             or os.environ.get("CUSTOM_MODEL")
         )
         if not resolved_model:
-            if "openrouter" in self.provider_name:
+            if "sumopod" in self.provider_name:
+                resolved_model = os.environ.get("SUMOPOD_MODEL") or DEFAULT_SUMOPOD_MODEL
+            elif "openrouter" in self.provider_name:
                 resolved_model = os.environ.get("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL
             else:
                 resolved_model = os.environ.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
@@ -168,7 +181,62 @@ class OpenAISystem2Client:
         if not choices:
             raise RuntimeError(f"OpenAI-compatible endpoint returned empty choices: {data}")
 
-        return choices[0].get("message", {}).get("content", "")
+        choice = choices[0]
+        msg = choice.get("message", {})
+        refusal = msg.get("refusal")
+        if refusal:
+            raise RuntimeError(f"Model '{self.model}' refused request: {refusal}")
+
+        content = msg.get("content")
+        # Handle reasoning models where output is placed in reasoning_content or content is empty
+        if not content and msg.get("reasoning_content"):
+            content = msg.get("reasoning_content")
+
+        if content is None or (isinstance(content, str) and not content.strip()):
+            raise RuntimeError(f"Model '{self.model}' returned empty content.")
+
+        return content
+
+    def list_models(self) -> List[Dict[str, Any]]:
+        """Query the endpoint's GET /models to discover available models.
+
+        Returns a list of model dicts (e.g. [{"id": "deepseek-chat", ...}]) if supported,
+        or raises RuntimeError if the endpoint fails or returns an error.
+        """
+        endpoint = f"{self.base_url}/models"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = requests.get(
+                endpoint,
+                headers=headers,
+                timeout=15,
+                allow_redirects=False,
+            )
+            if resp.status_code in (301, 302, 303, 307, 308) or resp.is_redirect is True:
+                location = resp.headers.get("Location", "")
+                raise RuntimeError(
+                    f"Model list endpoint redirected to '{location}' ({resp.status_code}): transport-level redirects are prohibited."
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                return data["data"]
+            elif isinstance(data, list):
+                return data
+            return []
+        except requests.exceptions.HTTPError as exc:
+            try:
+                err_detail = resp.json()
+            except Exception:
+                err_detail = resp.text
+            raise RuntimeError(
+                f"Model list error ({resp.status_code}): {err_detail}"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch model list from '{endpoint}': {exc}") from exc
 
     # -- 1. planning --------------------------------------------------
     def plan_task(

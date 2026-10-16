@@ -122,6 +122,7 @@ from .transaction import (
     TransactionVerifier,
     build_file_change_summaries,
     recover_incomplete_transaction,
+    validate_protected_target,
 )
 from .remote_work import (
     RemoteWorkContext,
@@ -234,6 +235,13 @@ from .task_classification import (
     TaskClassificationValidationError,
     classify_task,
 )
+from .command_policy import (
+    CommandPolicy,
+    CommandPolicyViolation,
+    CommandValidationResult,
+    DEFAULT_COMMAND_POLICY,
+    STRICT_PRODUCTION_POLICY,
+)
 from .process import (
     HardenedProcessResult,
     ProcessExitStatus,
@@ -248,6 +256,10 @@ from .process import (
 from .workspace_lock import (
     WorkspaceLock,
     WorkspaceLockedError,
+    WorkspaceLockCapability,
+    WorkspaceLockRevokedError,
+    WorkspaceLockUnsupportedPlatformError,
+    get_active_workspace_capability,
 )
 from .workflow import (
     TaskPlan,
@@ -326,6 +338,11 @@ __all__ = [
     "sample_git_state",
     "compute_proof_verdict",
     "render_proof_markdown",
+    "CommandPolicy",
+    "CommandPolicyViolation",
+    "CommandValidationResult",
+    "DEFAULT_COMMAND_POLICY",
+    "STRICT_PRODUCTION_POLICY",
     "HardenedProcessResult",
     "ProcessExitStatus",
     "TaskActiveError",
@@ -342,6 +359,10 @@ __all__ = [
     "_CURRENT_CANCEL_EVENT",
     "WorkspaceLock",
     "WorkspaceLockedError",
+    "WorkspaceLockCapability",
+    "WorkspaceLockRevokedError",
+    "WorkspaceLockUnsupportedPlatformError",
+    "get_active_workspace_capability",
     "AgentEvent",
     "IncomingMessage",
     "OutgoingMessage",
@@ -450,6 +471,7 @@ __all__ = [
     "TransactionVerifier",
     "build_file_change_summaries",
     "recover_incomplete_transaction",
+    "validate_protected_target",
     "RemoteWorkContext",
     "RemoteWorkCoordinator",
     "RemoteWorkRequest",

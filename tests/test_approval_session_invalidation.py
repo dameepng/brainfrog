@@ -583,6 +583,7 @@ class TestApprovalSessionInvalidation(unittest.TestCase):
             nonce="0123456789abcdef",
             status=ApprovalStatus.APPROVED,
             session_incarnation_id=None,  # Legacy
+            workspace_root=str(self.repo_dir),
         )
         self.approval_store.save(legacy_req)
 

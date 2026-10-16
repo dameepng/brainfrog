@@ -23,6 +23,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Union
 
+from core.runtime.command_policy import (
+    CommandPolicy,
+    CommandPolicyViolation,
+    CommandValidationResult,
+    DEFAULT_COMMAND_POLICY,
+    STRICT_PRODUCTION_POLICY,
+    _build_safe_system_path,
+)
+
 try:
     import psutil
     _HAS_PSUTIL = True
@@ -138,6 +147,33 @@ class HardenedProcessResult(subprocess.CompletedProcess):
     @property
     def is_error(self) -> bool:
         return self.error is not None
+
+    @property
+    def sanitized_stdout(self) -> str:
+        """Redacted stdout safe for logging, diagnostic, and model consumption."""
+        from core.runtime.secret_scrubbing import safe_scrub
+        return safe_scrub(self.stdout)
+
+    @property
+    def sanitized_stderr(self) -> str:
+        """Redacted stderr safe for logging, diagnostic, and model consumption."""
+        from core.runtime.secret_scrubbing import safe_scrub
+        return safe_scrub(self.stderr)
+
+    @property
+    def sanitized_error(self) -> Optional[str]:
+        """Redacted error message."""
+        if not self.error:
+            return None
+        from core.runtime.secret_scrubbing import safe_scrub
+        return safe_scrub(self.error)
+
+    @property
+    def sanitized_output(self) -> str:
+        """Combined, redacted stdout and stderr."""
+        combined = (self.stdout or "") + ("\n" + self.stderr if self.stderr else "")
+        from core.runtime.secret_scrubbing import safe_scrub
+        return safe_scrub(combined)
 
     def __repr__(self) -> str:
         flags = [self.status.value.upper()]
@@ -302,14 +338,16 @@ def run_hardened_subprocess(
     timeout: float = DEFAULT_SUBPROCESS_TIMEOUT,
     env: Optional[Dict[str, str]] = None,
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
-    allow_shell: Optional[bool] = None,
+    allow_shell: bool = False,
     cancel_event: Optional[threading.Event] = None,
     task_id: Optional[str] = None,
+    command_policy: Optional[CommandPolicy] = None,
 ) -> HardenedProcessResult:
     """Run a subprocess with bounded timeouts, tree termination, and output limits.
 
     Fails-closed on timeouts, interactive prompts, and excessive output.
     Rejects timeout=None to enforce bounded autonomous execution.
+    Defaults to shell=False across all platforms to prevent command injection.
     """
     if timeout is None or timeout <= 0:
         raise ValueError(
@@ -328,21 +366,88 @@ def run_hardened_subprocess(
     if env:
         merged_env.update(env)
 
-    # Shell resolution: Default to shell=True on Windows if binary is a .cmd/.bat or list invocation
-    use_shell = allow_shell if allow_shell is not None else (sys.platform == "win32")
+    # 1. Clean merged_env of any caller-supplied PATH variants to prevent PATH hijacking
+    for k in list(merged_env.keys()):
+        if k.upper() == "PATH":
+            merged_env.pop(k, None)
 
-    # Command array normalization
-    effective_cmd = list(cmd) if isinstance(cmd, (list, tuple)) else cmd
+    # 2. Build the safe, trusted system search path and assign consistently
+    safe_system_path = _build_safe_system_path(cwd_path)
+    merged_env["PATH"] = safe_system_path
+
+    # Strict environment sanitization: remove all dangerous variables
+    # (Must run AFTER merged_env.update(env) to prevent caller overrides from reintroducing them)
+    _DANGEROUS_ENV_VARS = {
+        # Git control variables
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_DIFF_OPTS",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_EXEC_PATH",
+        "GIT_PROXY_COMMAND",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        # Pytest control variables
+        "PYTEST_ADDOPTS",
+        "PYTEST_PLUGINS",
+        # Python execution injection and search path redirection
+        "PYTHONSTARTUP",
+        "PYTHONINSPECT",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONUSERBASE",
+        "PYTHONCASEOK",
+        # Dynamic linker redirection
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+    }
+    keys_to_remove = [
+        k for k in merged_env.keys()
+        if k.upper() in _DANGEROUS_ENV_VARS
+        or k.upper().startswith("GIT_CONFIG_KEY_")
+        or k.upper().startswith("GIT_CONFIG_VALUE_")
+    ]
+    for k in keys_to_remove:
+        merged_env.pop(k, None)
+
+    # Windows PATHEXT protection: restore system PATHEXT if caller attempted to override it
+    if sys.platform == "win32":
+        merged_env["PATHEXT"] = os.environ.get(
+            "PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"
+        )
+
+    # Pytest plugin autoload isolation
+    merged_env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+
+    # Git hook execution boundary: Prevent untrusted repository hooks from executing
+    # during autonomous operations by setting core.hooksPath to /dev/null across all platforms
+    merged_env["GIT_CONFIG_PARAMETERS"] = "'core.hooksPath=/dev/null'"
+
+    # Shell resolution: Shell execution requires explicit opt-in (allow_shell=True).
+    # Implicit shell enablement based solely on sys.platform == "win32" is strictly forbidden.
+    use_shell = bool(allow_shell)
 
     started_at = time.time()
 
-    # Pre-execution validation
+    # Pre-execution validation for empty command
     is_empty_cmd = False
-    if effective_cmd is None:
+    if cmd is None:
         is_empty_cmd = True
-    elif isinstance(effective_cmd, (list, tuple)) and not effective_cmd:
+    elif isinstance(cmd, (list, tuple, Sequence)) and not isinstance(cmd, (str, bytes)) and len(cmd) == 0:
         is_empty_cmd = True
-    elif isinstance(effective_cmd, str) and not effective_cmd.strip():
+    elif isinstance(cmd, str) and not cmd.strip():
         is_empty_cmd = True
 
     if is_empty_cmd:
@@ -357,6 +462,85 @@ def run_hardened_subprocess(
             completed_at=completed_at,
             duration_ms=int((completed_at - started_at) * 1000),
         )
+
+    # Shell policy and representation enforcement
+    if use_shell:
+        if isinstance(cmd, (list, tuple)):
+            raise ValueError(
+                "Explicit shell execution (allow_shell=True) requires a command string, not a list or sequence. "
+                "Rejecting ambiguous command representation."
+            )
+        if not isinstance(cmd, str):
+            raise ValueError(
+                f"Explicit shell execution requires a command string, got {type(cmd).__name__}"
+            )
+        if "\0" in cmd:
+            raise ValueError("Shell command string cannot contain null bytes")
+        effective_cmd: Union[str, List[str]] = cmd
+    else:
+        if isinstance(cmd, str):
+            raise ValueError(
+                "Autonomous subprocess execution rejects flat string commands when allow_shell=False. "
+                "Provide discrete arguments as a list or sequence to prevent command injection."
+            )
+        if not isinstance(cmd, (list, tuple, Sequence)) or isinstance(cmd, (str, bytes)):
+            raise ValueError(
+                f"Command must be a sequence of arguments, got {type(cmd).__name__}"
+            )
+        normalized_cmd: List[str] = []
+        for i, arg in enumerate(cmd):
+            if arg is None:
+                raise ValueError(f"Command argument at index {i} cannot be None")
+            if isinstance(arg, os.PathLike):
+                normalized_cmd.append(str(arg))
+            elif isinstance(arg, str):
+                normalized_cmd.append(arg)
+            else:
+                raise ValueError(
+                    f"Command argument at index {i} must be str or PathLike, got {type(arg).__name__}: {arg!r}"
+                )
+        effective_cmd = normalized_cmd
+
+        # Command authorization and allowlist policy enforcement
+        effective_policy = command_policy or DEFAULT_COMMAND_POLICY
+        validation_res = effective_policy.validate(effective_cmd, cwd=cwd_path, env=merged_env)
+        if not validation_res.is_allowed:
+            completed_at = time.time()
+            denial_err = (
+                f"Subprocess Spawn Error: Command denied by allowlist policy: {validation_res.reason}"
+            )
+            return HardenedProcessResult(
+                args=cmd,
+                returncode=1,
+                stdout="",
+                stderr=denial_err,
+                error=denial_err,
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=int((completed_at - started_at) * 1000),
+            )
+
+        # Binding validated executable to actual execution
+        resolved_exe = validation_res.resolved_executable
+        if not resolved_exe:
+            completed_at = time.time()
+            denial_err = "Subprocess Spawn Error: Security policy did not return a resolved executable path"
+            return HardenedProcessResult(
+                args=cmd,
+                returncode=1,
+                stdout="",
+                stderr=denial_err,
+                error=denial_err,
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=int((completed_at - started_at) * 1000),
+            )
+
+        # Replace executable token with the canonical resolved path
+        effective_cmd = [resolved_exe] + list(effective_cmd[1:])
+
+        # Ensure child process uses the exact verified safe system PATH
+        merged_env["PATH"] = safe_system_path
 
     popen_kwargs: Dict[str, Any] = {
         "cwd": str(cwd_path),

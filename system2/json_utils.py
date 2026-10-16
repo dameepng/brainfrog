@@ -91,6 +91,11 @@ def extract_json(text: str) -> Dict[str, Any]:
     decoder = json.JSONDecoder(strict=False)
     text = text.strip()
 
+    # Strip reasoning/chain-of-thought blocks if present (e.g. DeepSeek R1, Kimi, GLM reasoning models)
+    cleaned_no_think = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.DOTALL).strip()
+    if cleaned_no_think:
+        text = cleaned_no_think
+
     # Pass 1: Try markdown fenced json blocks (```json { ... } ``` or ``` { ... } ```)
     fence_pattern = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.DOTALL)
     for match in fence_pattern.finditer(text):

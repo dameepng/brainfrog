@@ -178,6 +178,7 @@ class PlanDocument:
     file_hashes: Dict[str, str] = field(default_factory=dict)
     created_at: str = ""
     content: str = ""
+    verification_commands: List[str] = field(default_factory=list)
 
 
 def get_plans_dir(repo_dir: Path) -> Path:
@@ -307,26 +308,33 @@ def get_latest_plan(repo_dir: Path) -> Optional[PlanDocument]:
         file_hashes=metadata.get("file_hashes", {}),
         created_at=metadata.get("created_at", ""),
         content=content,
+        verification_commands=(
+            metadata.get("verification_commands", [])
+            if isinstance(metadata.get("verification_commands"), list)
+            else ([metadata["verification_commands"]] if metadata.get("verification_commands") else [])
+        ),
     )
 
 
 def check_plan_staleness(repo_dir: Path, plan: PlanDocument) -> Tuple[bool, List[str]]:
     """Determine whether the repository has changed since the plan was created."""
+    from core.runtime.process import run_hardened_subprocess
+
     reasons: List[str] = []
 
     # 1. Check Git HEAD commit hash
     try:
-        head_proc = subprocess.run(
+        head_proc = run_hardened_subprocess(
             ["git", "rev-parse", "HEAD"],
             cwd=repo_dir,
-            capture_output=True,
-            text=True,
+            timeout=10.0,
         )
-        current_commit = head_proc.stdout.strip()
-        if plan.commit_hash and current_commit and plan.commit_hash != current_commit:
-            reasons.append(
-                f"Commit Git telah berubah dari {plan.commit_hash[:7]} menjadi {current_commit[:7]}"
-            )
+        if head_proc.returncode == 0:
+            current_commit = head_proc.stdout.strip()
+            if plan.commit_hash and current_commit and plan.commit_hash != current_commit:
+                reasons.append(
+                    f"Commit Git telah berubah dari {plan.commit_hash[:7]} menjadi {current_commit[:7]}"
+                )
     except Exception:
         pass
 
@@ -344,18 +352,18 @@ def check_plan_staleness(repo_dir: Path, plan: PlanDocument) -> Tuple[bool, List
 
     # 3. Check uncommitted changes touching relevant files
     try:
-        status_proc = subprocess.run(
+        status_proc = run_hardened_subprocess(
             ["git", "status", "--porcelain"],
             cwd=repo_dir,
-            capture_output=True,
-            text=True,
+            timeout=10.0,
         )
-        for line in status_proc.stdout.splitlines():
-            parts = line.strip().split(maxsplit=1)
-            if len(parts) == 2:
-                dirty_file = parts[1].strip()
-                if any(dirty_file == rf or dirty_file.startswith(rf.rstrip("/") + "/") for rf in plan.relevant_files):
-                    reasons.append(f"Perubahan uncommitted terdeteksi pada '{dirty_file}'.")
+        if status_proc.returncode == 0:
+            for line in status_proc.stdout.splitlines():
+                parts = line.strip().split(maxsplit=1)
+                if len(parts) == 2:
+                    dirty_file = parts[1].strip()
+                    if any(dirty_file == rf or dirty_file.startswith(rf.rstrip("/") + "/") for rf in plan.relevant_files):
+                        reasons.append(f"Perubahan uncommitted terdeteksi pada '{dirty_file}'.")
     except Exception:
         pass
 
@@ -404,6 +412,9 @@ def format_plan_handoff(plan: PlanDocument, repo_dir: Path) -> str:
                 lines.append(f"{s_id}. {s_desc}{files_note}")
             else:
                 lines.append(f"- {s}")
+
+    if getattr(plan, "verification_commands", None):
+        lines.append(f"\n**Perintah Verifikasi (Verification Command):** {', '.join(plan.verification_commands)}")
 
     if is_stale:
         lines.append("\n⚠️ **PERINGATAN PERUBAHAN CODEBASE (STALE PLAN):**")

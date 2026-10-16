@@ -64,6 +64,7 @@ from core.runtime.workflow import (
     TaskResult,
     TaskStep,
 )
+from core.runtime.workspace_lock import WorkspaceLock
 from orchestrator import PlanStep
 from system1.base import Answer
 
@@ -922,27 +923,32 @@ def test_scenario_19_crlf_and_byte_level_rollback_integrity(tmp_path: Path):
     crlf_file.write_bytes(original_crlf_bytes)
     original_sha = hashlib.sha256(original_crlf_bytes).hexdigest()
 
-    # Real TransactionCoordinator execution and rollback
-    tx = TransactionCoordinator(workspace=workspace)
-    tx.begin()
-    tx.stage_modify("windows_lines.txt", "Modified content with linux newlines\n")
-    tx.execute()
+    # Real TransactionCoordinator execution and rollback under WorkspaceLock
+    lock = WorkspaceLock(workspace)
+    lock.acquire()
+    try:
+        tx = TransactionCoordinator(workspace=workspace)
+        tx.begin()
+        tx.stage_modify("windows_lines.txt", "Modified content with linux newlines\n")
+        tx.execute()
 
-    assert crlf_file.read_bytes() != original_crlf_bytes
+        assert crlf_file.read_bytes() != original_crlf_bytes
 
-    # Roll back
-    tx_res = tx.rollback(reason="Test rollback")
-    assert tx_res.rolled_back is True
+        # Roll back
+        tx_res = tx.rollback(reason="Test rollback")
+        assert tx_res.rolled_back is True
 
-    # Assert byte-for-byte exact equality after rollback
-    restored_bytes = crlf_file.read_bytes()
-    assert restored_bytes == original_crlf_bytes
+        # Assert byte-for-byte exact equality after rollback
+        restored_bytes = crlf_file.read_bytes()
+        assert restored_bytes == original_crlf_bytes
 
-    summaries = tx_res.to_change_summaries(workspace)
-    s = summaries[0]
-    assert s.status == FileMutationStatus.ROLLED_BACK
-    assert s.before_sha256 == original_sha
-    assert s.final_sha256 == original_sha
+        summaries = tx_res.to_change_summaries(workspace)
+        s = summaries[0]
+        assert s.status == FileMutationStatus.ROLLED_BACK
+        assert s.before_sha256 == original_sha
+        assert s.final_sha256 == original_sha
+    finally:
+        lock.release()
 
 
 # =============================================================================
@@ -1120,42 +1126,47 @@ def test_scenario_22_rename_rollback_integrity(tmp_path: Path):
     dest_file = workspace / "renamed.py"
     assert not dest_file.exists()
 
-    tx = TransactionCoordinator(workspace=workspace)
-    tx.begin()
-    tx.stage_rename("origin.py", "renamed.py")
-    assert tx.execute() is True
+    lock = WorkspaceLock(workspace)
+    lock.acquire()
+    try:
+        tx = TransactionCoordinator(workspace=workspace)
+        tx.begin()
+        tx.stage_rename("origin.py", "renamed.py")
+        assert tx.execute() is True
 
-    # After execute: source moved to destination
-    assert not src_file.exists()
-    assert dest_file.exists()
-    assert dest_file.read_bytes() == src_bytes
+        # After execute: source moved to destination
+        assert not src_file.exists()
+        assert dest_file.exists()
+        assert dest_file.read_bytes() == src_bytes
 
-    # Roll back
-    tx_res = tx.rollback(reason="Test rollback rename")
-    assert tx_res.rolled_back is True
+        # Roll back
+        tx_res = tx.rollback(reason="Test rollback rename")
+        assert tx_res.rolled_back is True
 
-    # After rollback: destination absent, source restored with exact bytes
-    assert not dest_file.exists()
-    assert src_file.exists()
-    assert src_file.read_bytes() == src_bytes
+        # After rollback: destination absent, source restored with exact bytes
+        assert not dest_file.exists()
+        assert src_file.exists()
+        assert src_file.read_bytes() == src_bytes
 
-    summaries = tx_res.to_change_summaries(workspace)
-    assert len(summaries) == 1
-    s = summaries[0]
-    assert s.path == "origin.py"
-    assert s.operation == "RENAME"
-    assert s.status == FileMutationStatus.ROLLED_BACK
-    assert s.before_sha256 == orig_sha
-    assert s.staged_sha256 == orig_sha
-    assert s.final_sha256 == orig_sha
-    assert s.byte_count_delta == 0
-    assert s.error is None
+        summaries = tx_res.to_change_summaries(workspace)
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s.path == "origin.py"
+        assert s.operation == "RENAME"
+        assert s.status == FileMutationStatus.ROLLED_BACK
+        assert s.before_sha256 == orig_sha
+        assert s.staged_sha256 == orig_sha
+        assert s.final_sha256 == orig_sha
+        assert s.byte_count_delta == 0
+        assert s.error is None
 
-    # Negative case: if destination remains present post-rollback (incomplete restoration / external conflict)
-    dest_file.write_bytes(b"lingering conflict")
-    summaries_drift = tx_res.to_change_summaries(workspace)
-    assert summaries_drift[0].status == FileMutationStatus.UNKNOWN
-    assert "destination file still observed on disk" in summaries_drift[0].error
+        # Negative case: if destination remains present post-rollback (incomplete restoration / external conflict)
+        dest_file.write_bytes(b"lingering conflict")
+        summaries_drift = tx_res.to_change_summaries(workspace)
+        assert summaries_drift[0].status == FileMutationStatus.UNKNOWN
+        assert "destination file still observed on disk" in summaries_drift[0].error
+    finally:
+        lock.release()
 
 
 # =============================================================================
@@ -1170,45 +1181,50 @@ def test_scenario_23_delete_rollback_integrity(tmp_path: Path):
     target_file.write_bytes(known_bytes)
     orig_sha = hashlib.sha256(known_bytes).hexdigest()
 
-    tx = TransactionCoordinator(workspace=workspace)
-    tx.begin()
-    tx.stage_delete("doomed_resource.txt")
-    assert tx.execute() is True
+    lock = WorkspaceLock(workspace)
+    lock.acquire()
+    try:
+        tx = TransactionCoordinator(workspace=workspace)
+        tx.begin()
+        tx.stage_delete("doomed_resource.txt")
+        assert tx.execute() is True
 
-    # After execute: file deleted
-    assert not target_file.exists()
+        # After execute: file deleted
+        assert not target_file.exists()
 
-    # Roll back
-    tx_res = tx.rollback(reason="Test rollback delete")
-    assert tx_res.rolled_back is True
+        # Roll back
+        tx_res = tx.rollback(reason="Test rollback delete")
+        assert tx_res.rolled_back is True
 
-    # After rollback: file restored with exact bytes
-    assert target_file.exists()
-    assert target_file.read_bytes() == known_bytes
+        # After rollback: file restored with exact bytes
+        assert target_file.exists()
+        assert target_file.read_bytes() == known_bytes
 
-    summaries = tx_res.to_change_summaries(workspace)
-    assert len(summaries) == 1
-    s = summaries[0]
-    assert s.path == "doomed_resource.txt"
-    assert s.operation == "DELETE"
-    assert s.status == FileMutationStatus.ROLLED_BACK
-    assert s.before_sha256 == orig_sha
-    assert s.staged_sha256 is None
-    assert s.final_sha256 == orig_sha
-    assert s.byte_count_delta == 0
-    assert s.error is None
+        summaries = tx_res.to_change_summaries(workspace)
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s.path == "doomed_resource.txt"
+        assert s.operation == "DELETE"
+        assert s.status == FileMutationStatus.ROLLED_BACK
+        assert s.before_sha256 == orig_sha
+        assert s.staged_sha256 is None
+        assert s.final_sha256 == orig_sha
+        assert s.byte_count_delta == 0
+        assert s.error is None
 
-    # Negative case 1: if restored file bytes differ from baseline hash post-rollback
-    target_file.write_bytes(b"tampered post-rollback content")
-    summaries_mismatch = tx_res.to_change_summaries(workspace)
-    assert summaries_mismatch[0].status == FileMutationStatus.UNKNOWN
-    assert "restored file content differs from baseline hash" in summaries_mismatch[0].error
+        # Negative case 1: if restored file bytes differ from baseline hash post-rollback
+        target_file.write_bytes(b"tampered post-rollback content")
+        summaries_mismatch = tx_res.to_change_summaries(workspace)
+        assert summaries_mismatch[0].status == FileMutationStatus.UNKNOWN
+        assert "restored file content differs from baseline hash" in summaries_mismatch[0].error
 
-    # Negative case 2: if file was removed post-rollback
-    target_file.unlink()
-    summaries_absent = tx_res.to_change_summaries(workspace)
-    assert summaries_absent[0].status == FileMutationStatus.UNKNOWN
-    assert "restored file not found on disk after rollback" in summaries_absent[0].error
+        # Negative case 2: if file was removed post-rollback
+        target_file.unlink()
+        summaries_absent = tx_res.to_change_summaries(workspace)
+        assert summaries_absent[0].status == FileMutationStatus.UNKNOWN
+        assert "restored file not found on disk after rollback" in summaries_absent[0].error
+    finally:
+        lock.release()
 
 
 # =============================================================================
@@ -1226,37 +1242,42 @@ def test_scenario_24_non_utf8_binary_rollback_integrity(tmp_path: Path):
 
     mutated_bytes = bytes([0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0x00])
 
-    tx = TransactionCoordinator(workspace=workspace)
-    tx.begin()
-    tx.stage_modify("payload.bin", mutated_bytes)
-    assert tx.execute() is True
+    lock = WorkspaceLock(workspace)
+    lock.acquire()
+    try:
+        tx = TransactionCoordinator(workspace=workspace)
+        tx.begin()
+        tx.stage_modify("payload.bin", mutated_bytes)
+        assert tx.execute() is True
 
-    # After execute: disk contains mutated bytes
-    assert bin_file.read_bytes() == mutated_bytes
+        # After execute: disk contains mutated bytes
+        assert bin_file.read_bytes() == mutated_bytes
 
-    # Roll back
-    tx_res = tx.rollback(reason="Test rollback binary payload")
-    assert tx_res.rolled_back is True
+        # Roll back
+        tx_res = tx.rollback(reason="Test rollback binary payload")
+        assert tx_res.rolled_back is True
 
-    # After rollback: exact byte equality
-    restored_bytes = bin_file.read_bytes()
-    assert restored_bytes == non_utf8_bytes
-    assert hashlib.sha256(restored_bytes).hexdigest() == orig_sha
+        # After rollback: exact byte equality
+        restored_bytes = bin_file.read_bytes()
+        assert restored_bytes == non_utf8_bytes
+        assert hashlib.sha256(restored_bytes).hexdigest() == orig_sha
 
-    summaries = tx_res.to_change_summaries(workspace)
-    assert len(summaries) == 1
-    s = summaries[0]
-    assert s.path == "payload.bin"
-    assert s.operation == "MODIFY"
-    assert s.status == FileMutationStatus.ROLLED_BACK
-    assert s.before_sha256 == orig_sha
-    assert s.staged_sha256 == hashlib.sha256(mutated_bytes).hexdigest()
-    assert s.final_sha256 == orig_sha
-    assert s.byte_count_delta == 0
-    assert s.error is None
+        summaries = tx_res.to_change_summaries(workspace)
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s.path == "payload.bin"
+        assert s.operation == "MODIFY"
+        assert s.status == FileMutationStatus.ROLLED_BACK
+        assert s.before_sha256 == orig_sha
+        assert s.staged_sha256 == hashlib.sha256(mutated_bytes).hexdigest()
+        assert s.final_sha256 == orig_sha
+        assert s.byte_count_delta == 0
+        assert s.error is None
 
-    # Negative case: if disk bytes differ post-rollback
-    bin_file.write_bytes(b"tampered binary")
-    summaries_drift = tx_res.to_change_summaries(workspace)
-    assert summaries_drift[0].status == FileMutationStatus.UNKNOWN
-    assert "observed content differs from baseline hash" in summaries_drift[0].error
+        # Negative case: if disk bytes differ post-rollback
+        bin_file.write_bytes(b"tampered binary")
+        summaries_drift = tx_res.to_change_summaries(workspace)
+        assert summaries_drift[0].status == FileMutationStatus.UNKNOWN
+        assert "observed content differs from baseline hash" in summaries_drift[0].error
+    finally:
+        lock.release()

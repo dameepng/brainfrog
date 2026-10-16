@@ -105,12 +105,13 @@ def run_doctor_diagnostics(repo_dir: Optional[Path] = None) -> List[DiagnosticCh
             status="OK" if c_key else "FAIL",
             detail=f"Key: {redact_secret(c_key)}",
         ))
-    elif active_prov in ("openai", "openrouter", "openai-compatible"):
-        o_key = (
-            os.environ.get("OPENROUTER_API_KEY")
-            if active_prov == "openrouter"
-            else os.environ.get("OPENAI_API_KEY") or os.environ.get("BRAINFROG_MODEL_API_KEY")
-        )
+    elif active_prov in ("openai", "openrouter", "openai-compatible", "sumopod"):
+        if active_prov == "sumopod":
+            o_key = os.environ.get("SUMOPOD_API_KEY")
+        elif active_prov == "openrouter":
+            o_key = os.environ.get("OPENROUTER_API_KEY")
+        else:
+            o_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("BRAINFROG_MODEL_API_KEY")
         checks.append(DiagnosticCheck(
             category="System 2",
             name=f"{active_prov.capitalize()} Authentication",
@@ -118,7 +119,13 @@ def run_doctor_diagnostics(repo_dir: Optional[Path] = None) -> List[DiagnosticCh
             detail=f"Key: {redact_secret(o_key)}",
         ))
 
-    model_name = os.environ.get("ANTIGRAVITY_MODEL") or os.environ.get("ANTHROPIC_MODEL") or os.environ.get("OPENAI_MODEL") or "default"
+    model_name = (
+        os.environ.get("ANTIGRAVITY_MODEL")
+        or os.environ.get("ANTHROPIC_MODEL")
+        or os.environ.get("SUMOPOD_MODEL")
+        or os.environ.get("OPENAI_MODEL")
+        or "default"
+    )
     limit = get_model_context_limit(model_name)
     checks.append(DiagnosticCheck(
         category="System 2",

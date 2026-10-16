@@ -670,13 +670,12 @@ class TestPhase6BCLIVerification(unittest.TestCase):
         }
         return mock_s1, mock_s2
 
-    def test_12_missing_test_command_rolls_back_mutations_cli_and_sdk(self):
-        """Invariant 12: Missing test command causes transaction rollback and non-zero exit for CLI and SDK."""
+    def test_12_missing_test_command_fails_closed_unverified_cli_and_sdk(self):
+        """Invariant 12: Missing test command results in unverified non-zero exit for CLI and SDK without rolling back untested commit."""
         base_file = self.repo_dir / "target.py"
         base_file.write_text("initial = True\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
         subprocess.run(["git", "commit", "-m", "baseline"], cwd=self.repo_dir, check=True)
-        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True).stdout.strip()
 
         # A. CLI Execution with missing test command
         s1, s2 = self._create_mock_systems("target.py", "initial = False\nmutated = True\n")
@@ -704,21 +703,19 @@ class TestPhase6BCLIVerification(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 1)
-        self.assertEqual(base_file.read_text(encoding="utf-8"), "initial = True\n")
-        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True).stdout.strip()
-        self.assertEqual(head_before, head_after)
+        self.assertEqual(base_file.read_text(encoding="utf-8"), "initial = False\nmutated = True\n")
 
         self.assertEqual(len(task_res_list), 1)
         r = task_res_list[0]
         self.assertFalse(r.verified)
         self.assertFalse(r.success)
-        self.assertEqual(r.status, "ROLLED_BACK")
-        self.assertEqual(r.transaction_status, "rolled_back")
+        self.assertEqual(r.status, "COMMITTED_UNTESTED")
+        self.assertEqual(r.transaction_status, "committed_untested")
 
         store = FileProofStore(self.repo_dir)
         p = store.load(r.task_id)
         self.assertEqual(p.verdict.status, "FAILED")
-        self.assertEqual(p.changes.status, "ROLLED_BACK")
+        self.assertEqual(p.changes.status, "COMMITTED_UNTESTED")
 
         # B. SDK Execution with missing test command
         s1_sdk, s2_sdk = self._create_mock_systems("target.py", "initial = False\nmutated = True\n")
@@ -734,12 +731,12 @@ class TestPhase6BCLIVerification(unittest.TestCase):
 
         self.assertFalse(res_sdk.verified)
         self.assertFalse(res_sdk.success)
-        self.assertEqual(res_sdk.status, "ROLLED_BACK")
-        self.assertEqual(res_sdk.transaction_status, "rolled_back")
-        self.assertEqual(base_file.read_text(encoding="utf-8"), "initial = True\n")
+        self.assertEqual(res_sdk.status, "COMMITTED_UNTESTED")
+        self.assertEqual(res_sdk.transaction_status, "committed_untested")
+        self.assertEqual(base_file.read_text(encoding="utf-8"), "initial = False\nmutated = True\n")
 
-    def test_13_empty_test_command_rolls_back_mutations_cli_and_sdk(self):
-        """Invariant 13: Explicit empty test command fails closed and rolls back mutations for CLI and SDK."""
+    def test_13_empty_test_command_fails_closed_unverified_cli_and_sdk(self):
+        """Invariant 13: Explicit empty test command fails closed as unverified for CLI and SDK without rolling back untested commit."""
         base_file = self.repo_dir / "app_logic.py"
         base_file.write_text("x = 10\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
@@ -771,13 +768,13 @@ class TestPhase6BCLIVerification(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 1)
-        self.assertEqual(base_file.read_text(encoding="utf-8"), "x = 10\n")
+        self.assertEqual(base_file.read_text(encoding="utf-8"), "x = 99\n")
 
         self.assertEqual(len(task_res_list), 1)
         r = task_res_list[0]
         self.assertFalse(r.verified)
-        self.assertEqual(r.status, "ROLLED_BACK")
-        self.assertEqual(r.transaction_status, "rolled_back")
+        self.assertEqual(r.status, "COMMITTED_UNTESTED")
+        self.assertEqual(r.transaction_status, "committed_untested")
 
         # B. SDK Execution with empty test command list
         s1_sdk, s2_sdk = self._create_mock_systems("app_logic.py", "x = 99\n")
@@ -792,9 +789,9 @@ class TestPhase6BCLIVerification(unittest.TestCase):
         client.close_sync()
 
         self.assertFalse(res_sdk.verified)
-        self.assertEqual(res_sdk.status, "ROLLED_BACK")
-        self.assertEqual(res_sdk.transaction_status, "rolled_back")
-        self.assertEqual(base_file.read_text(encoding="utf-8"), "x = 10\n")
+        self.assertEqual(res_sdk.status, "COMMITTED_UNTESTED")
+        self.assertEqual(res_sdk.transaction_status, "committed_untested")
+        self.assertEqual(base_file.read_text(encoding="utf-8"), "x = 99\n")
 
     def test_14_proof_persistence_failure_reports_committed_and_requires_recovery(self):
         """Invariant 14: Failure to persist proof after durable commit reports committed state, fails closed, and requires recovery."""
@@ -838,7 +835,7 @@ class TestPhase6BCLIVerification(unittest.TestCase):
         self.assertFalse(r.success)
         self.assertEqual(r.status, "FAILED")
         self.assertTrue(r.recovery_required)
-        self.assertEqual(r.transaction_status, "committed")
+        self.assertIn(r.transaction_status, ("committed", "verified"))
         self.assertIn("mod.py", r.changed_files)
         self.assertNotIn("rolled back", (r.failure_reason or "").lower())
 

@@ -228,30 +228,11 @@ def _get_cross_process_session_lock(lock_path: Path, timeout: float = 10.0) -> _
 
 
 def scrub_secrets(text: str) -> str:
-    """Scrub sensitive keys, tokens, and credentials from text."""
+    """Scrub sensitive keys, tokens, and credentials from text (delegates to canonical secret_scrubbing)."""
     if not text:
         return text
-    secret_env_vars = [
-        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN",
-        "TYPESAFE_API_KEY", "WHATSAPP_API_TOKEN", "CUSTOM_API_KEY",
-        "OPENROUTER_API_KEY", "GH_TOKEN", "GITHUB_TOKEN",
-    ]
-    scrubbed = text
-    for var in secret_env_vars:
-        val = os.environ.get(var)
-        if val and len(val) >= 6:
-            scrubbed = scrubbed.replace(val, f"[{var}_REDACTED]")
-
-    scrubbed = re.sub(r"sk-(?:proj-)?[a-zA-Z0-9_\-]{20,}", "[REDACTED_API_KEY]", scrubbed)
-    scrubbed = re.sub(r"\b\d{8,11}:[A-Za-z0-9_-]{30,40}\b", "[REDACTED_BOT_TOKEN]", scrubbed)
-    scrubbed = re.sub(r"(?i)(?<![A-Za-z0-9])Bearer\s+[a-zA-Z0-9_\-\.]{8,}\b", "Bearer [REDACTED_TOKEN]", scrubbed)
-    scrubbed = re.sub(
-        r"(?i)\b(password|api[_-]?key|access[_-]?token|secret|cookie|authorization)\s*[:=]\s*[^\s,;]+",
-        lambda match: f"{match.group(1)}=[REDACTED]",
-        scrubbed,
-    )
-    scrubbed = re.sub(r"(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{30,}", "[REDACTED_TOKEN]", scrubbed)
-    return scrubbed
+    from .secret_scrubbing import scrub_secrets as _canonical_scrub
+    return _canonical_scrub(text)
 
 
 @dataclass
@@ -270,6 +251,7 @@ class SessionState:
     active_skill: Optional[str] = None
     active_model: Optional[str] = None
     active_provider: Optional[str] = None
+    active_workspace: Optional[str] = None
     plan_context: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     history: List[Dict[str, Any]] = field(default_factory=list)
@@ -382,6 +364,7 @@ class SessionState:
             "active_skill": self.active_skill,
             "active_model": self.active_model,
             "active_provider": self.active_provider,
+            "active_workspace": self.active_workspace,
             "plan_context": self.plan_context,
             "metadata": dict(self.metadata),
             "history": list(self.history),
@@ -446,6 +429,7 @@ class SessionState:
             active_skill=data.get("active_skill"),
             active_model=data.get("active_model"),
             active_provider=data.get("active_provider"),
+            active_workspace=data.get("active_workspace"),
             plan_context=data.get("plan_context"),
             metadata=dict(data.get("metadata", {})),
             history=normalized_history,

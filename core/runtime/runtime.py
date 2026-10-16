@@ -7,6 +7,7 @@ from enum import Enum
 import hashlib
 import os
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union, TYPE_CHECKING
@@ -68,6 +69,7 @@ from .transaction import (
     FileTransactionStore,
     RecoveryResult,
     TransactionRecoveryManager,
+    TransactionStatus,
     TransactionStore,
     TransactionVerifier,
 )
@@ -111,6 +113,13 @@ from .work_authorization import (
 from .work_continuation import cancel_work, resume_work
 from .work_presentation import format_work_detail, format_works_list
 from .workspace_lock import WorkspaceLock, WorkspaceLockedError
+from .workspace_registry import (
+    WorkspaceEntry,
+    WorkspaceNotFoundError,
+    WorkspaceRegistry,
+    WorkspaceValidationError,
+    validate_workspace_alias,
+)
 
 
 class BrainFrogRuntime:
@@ -152,8 +161,13 @@ class BrainFrogRuntime:
         work_store: Optional[WorkStore] = None,
         planner: Optional[Planner] = None,
         transaction_verifier: Optional[TransactionVerifier] = None,
+        workspace_registry: Optional[WorkspaceRegistry] = None,
     ) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
+        if workspace_registry is not None:
+            self.workspace_registry = workspace_registry
+        else:
+            self.workspace_registry = WorkspaceRegistry.create_default(repo_dir=self.repo_dir)
         self.default_backend = default_backend
         self.default_provider = default_provider
         self.default_model = default_model
@@ -230,8 +244,33 @@ class BrainFrogRuntime:
 
     def recover_startup_transactions(self) -> List[RecoveryResult]:
         """Discover and recover incomplete transactions during runtime initialization."""
-        mgr = TransactionRecoveryManager(workspace=self.repo_dir, store=self.transaction_store)
-        return mgr.recover_incomplete(limit=50)
+        incomplete = self.transaction_store.list_incomplete()
+        results: List[RecoveryResult] = []
+        for tx in incomplete[:50]:
+            if not tx.workspace or not str(tx.workspace).strip():
+                results.append(RecoveryResult(
+                    transaction_id=tx.id,
+                    previous_status=tx.status,
+                    final_status=TransactionStatus.FAILED,
+                    recovered=False,
+                    rolled_back=False,
+                    error=f"Transaction '{tx.id}' has no recorded workspace. Recovery cannot proceed safely.",
+                ))
+                continue
+            recorded_ws = Path(tx.workspace).resolve()
+            if not recorded_ws.exists() or not recorded_ws.is_dir():
+                results.append(RecoveryResult(
+                    transaction_id=tx.id,
+                    previous_status=tx.status,
+                    final_status=TransactionStatus.FAILED,
+                    recovered=False,
+                    rolled_back=False,
+                    error=f"Recorded workspace directory '{tx.workspace}' for transaction '{tx.id}' does not exist on disk.",
+                ))
+                continue
+            mgr = TransactionRecoveryManager(workspace=recorded_ws, store=self.transaction_store)
+            results.append(mgr.recover(tx.id))
+        return results
 
     def _reconcile_recovered_work(self) -> None:
         """Map deterministic transaction recovery outcomes back to persisted Work state."""
@@ -250,12 +289,20 @@ class BrainFrogRuntime:
                         from core.runtime.proof import FileProofStore
                         from core.runtime.proof_verifier import DeterministicProofVerifier, ProofVerificationStatus
 
-                        # Resolve canonical workspace
+                        # Resolve canonical workspace from trusted metadata
                         meta_ws = (work.resume_metadata or {}).get("workspace")
-                        if meta_ws and Path(meta_ws).exists():
-                            ws_dir = Path(meta_ws).resolve()
-                        else:
-                            ws_dir = Path(self.repo_dir).resolve()
+                        if not meta_ws and tx and tx.workspace:
+                            meta_ws = tx.workspace
+                        if not meta_ws and work.approval_request_id:
+                            appr = self.approval_service.store.get(work.approval_request_id)
+                            if appr and appr.workspace_root:
+                                meta_ws = appr.workspace_root
+                        if not meta_ws or not Path(meta_ws).exists() or not Path(meta_ws).is_dir():
+                            logger.warning(
+                                f"Skipping proof verification for work '{work.id}': cannot establish canonical workspace."
+                            )
+                            continue
+                        ws_dir = Path(meta_ws).resolve()
 
                         canonical_task_id = (work.resume_metadata or {}).get("task_id") or work.id
                         proof_store = FileProofStore(ws_dir)
@@ -381,12 +428,20 @@ class BrainFrogRuntime:
                                 from core.runtime.proof import FileProofStore
                                 from core.runtime.proof_verifier import DeterministicProofVerifier, ProofVerificationStatus
 
-                                # Resolve canonical workspace
+                                # Resolve canonical workspace from trusted metadata
                                 meta_ws = (work.resume_metadata or {}).get("workspace")
-                                if meta_ws and Path(meta_ws).exists():
-                                    ws_dir = Path(meta_ws).resolve()
-                                else:
-                                    ws_dir = Path(self.repo_dir).resolve()
+                                if not meta_ws and tx and tx.workspace:
+                                    meta_ws = tx.workspace
+                                if not meta_ws and work.approval_request_id:
+                                    appr = self.approval_service.store.get(work.approval_request_id)
+                                    if appr and appr.workspace_root:
+                                        meta_ws = appr.workspace_root
+                                if not meta_ws or not Path(meta_ws).exists() or not Path(meta_ws).is_dir():
+                                    logger.warning(
+                                        f"Skipping proof verification for active work '{work.id}': cannot establish canonical workspace."
+                                    )
+                                    continue
+                                ws_dir = Path(meta_ws).resolve()
 
                                 canonical_task_id = (work.resume_metadata or {}).get("task_id") or work.id
                                 proof_store = FileProofStore(ws_dir)
@@ -518,7 +573,11 @@ class BrainFrogRuntime:
         except Exception:
             pass
 
-    def _resolve_test_cmd(self, custom_cmd: Optional[Union[str, List[str]]]) -> List[str]:
+    def _resolve_test_cmd(
+        self,
+        custom_cmd: Optional[Union[str, List[str]]],
+        workspace_dir: Optional[Path] = None,
+    ) -> List[str]:
         if custom_cmd:
             if isinstance(custom_cmd, list):
                 return list(custom_cmd)
@@ -529,10 +588,38 @@ class BrainFrogRuntime:
             return self.default_test_cmd.split()
         # Default fallback test detection
         from cli import detect_default_test_cmd
-        res = detect_default_test_cmd(self.repo_dir)
+        res = detect_default_test_cmd(workspace_dir or self.repo_dir)
         if isinstance(res, list):
             return list(res)
         return res.split()
+
+    def get_session_workspace(
+        self,
+        session: SessionState,
+        message: Optional[IncomingMessage] = None,
+    ) -> Path:
+        """Resolve effective target workspace for a session deterministically and fail-closed.
+
+        Precedence:
+        1. Explicit repo_dir in message metadata from trusted local CLI channel.
+        2. Session active_workspace resolved via workspace_registry (fails closed if missing/invalid).
+        3. Registry default workspace or fallback to self.repo_dir.
+        """
+        if message is not None and message.metadata.get("repo_dir"):
+            if message.channel in ("cli", "local", "terminal"):
+                return Path(message.metadata["repo_dir"]).resolve()
+
+        if session.active_workspace:
+            return self.workspace_registry.resolve(session.active_workspace)
+
+        default_entry = self.workspace_registry.get(self.workspace_registry.default_alias)
+        if default_entry:
+            if not default_entry.path.exists() or not default_entry.path.is_dir():
+                raise WorkspaceNotFoundError(f"Default workspace path does not exist on disk: {default_entry.path}")
+            return default_entry.path
+        if not self.repo_dir.exists() or not self.repo_dir.is_dir():
+            raise WorkspaceNotFoundError(f"Installation repository directory does not exist on disk: {self.repo_dir}")
+        return self.repo_dir
 
     def handle_message(
         self,
@@ -686,6 +773,8 @@ class BrainFrogRuntime:
                     "• `/help` — Show available commands and instructions\n"
                     "• `/status` — View active session and runtime diagnostics\n"
                     "• `/doctor` — Run comprehensive system & configuration check\n"
+                    "• `/workspaces` — List registered project workspaces\n"
+                    "• `/workspace <alias>` — Select active workspace for current session\n"
                     "• `/works` — View recent work requests (e.g. `/works active`, `/works failed`)\n"
                     "• `/work <id>` — Inspect detailed status for a specific work unit\n"
                     "• `/resume <id>` — Deterministically resume incomplete work\n"
@@ -700,10 +789,14 @@ class BrainFrogRuntime:
                 return OutgoingMessage(text=help_text, events=events, success=True, status="completed")
 
             if cmd in ("/status", "/info"):
+                current_ws = session.active_workspace or self.workspace_registry.default_alias
+                ws_entry = self.workspace_registry.get(current_ws)
+                ws_path = str(ws_entry.path) if ws_entry else str(self.repo_dir)
                 status_text = (
                     f"🐸 **BrainFrog Status**\n"
                     f"• Channel: `{effective_channel}`\n"
                     f"• Session ID: `{session.session_id}`\n"
+                    f"• Workspace: `{current_ws}` (`{ws_path}`)\n"
                     f"• Active Mode: `{session.active_mode}`\n"
                     f"• History Turns: `{len(session.history)}`\n"
                     f"• Trust Level: `{policy.trust_level}`"
@@ -712,12 +805,242 @@ class BrainFrogRuntime:
 
             if cmd in ("/doctor", "/diagnose"):
                 from .doctor import run_doctor_diagnostics
-                checks = run_doctor_diagnostics(self.repo_dir)
-                lines = ["🐸 **BrainFrog Doctor Diagnostics:**\n"]
+                try:
+                    target_ws = self.get_session_workspace(session, message)
+                except WorkspaceNotFoundError as ws_err:
+                    return OutgoingMessage(
+                        text=f"❌ Workspace Error: {ws_err}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=str(ws_err),
+                    )
+                checks = run_doctor_diagnostics(target_ws)
+                ws_name = session.active_workspace or self.workspace_registry.default_alias
+                lines = [f"🐸 **BrainFrog Doctor Diagnostics (`{ws_name}`):**\n"]
                 for c in checks:
                     icon = "✅" if c.status == "OK" else ("⚠️" if c.status == "WARN" else ("❌" if c.status == "FAIL" else "ℹ️"))
                     lines.append(f"{icon} **[{c.category}]** {c.name}: {c.detail}")
                 return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
+
+            if cmd == "/workspaces":
+                workspaces = self.workspace_registry.list_workspaces()
+                if not workspaces:
+                    return OutgoingMessage(
+                        text="ℹ️ No workspaces registered in configuration.",
+                        events=events, success=True, status="completed",
+                    )
+                current_alias = session.active_workspace or self.workspace_registry.default_alias
+                lines = ["📂 **Registered Workspaces:**\n"]
+                for ws in workspaces:
+                    active_marker = " *(active)*" if ws.alias == current_alias else ""
+                    lines.append(f"• `{ws.alias}` — `{ws.path}`{active_marker}")
+                lines.append("\nUse `/workspace <alias>` to select a workspace for this session.")
+                return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
+
+            if cmd == "/workspace":
+                sub_parts = parts[1].split() if len(parts) > 1 else []
+                subcmd = sub_parts[0].lower() if sub_parts else ""
+
+                if not subcmd or subcmd == "current":
+                    current_alias = session.active_workspace or self.workspace_registry.default_alias
+                    entry = self.workspace_registry.get(current_alias)
+                    path_str = str(entry.path) if entry else str(self.repo_dir)
+                    status_text = (
+                        f"📂 **Active Workspace:** `{current_alias}`\n"
+                        f"• Path: `{path_str}`\n\n"
+                        "Use `/workspace <alias>` to switch workspace, `/workspaces` to list available,\n"
+                        "or `/workspace add <alias> <path>` to register a new workspace (CLI only)."
+                    )
+                    return OutgoingMessage(text=status_text, events=events, success=True, status="completed")
+
+                if subcmd == "add":
+                    # Gate registration to local CLI administrators
+                    if effective_channel not in ("cli", "local", "terminal"):
+                        err_msg = "Workspace registration is restricted to local CLI administrators."
+                        return OutgoingMessage(
+                            text=f"❌ {err_msg}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=err_msg,
+                        )
+                    raw_args = parts[1].split(maxsplit=2)
+                    if len(raw_args) < 3 or not raw_args[1].strip() or not raw_args[2].strip():
+                        return OutgoingMessage(
+                            text="⚠️ Usage: `/workspace add <alias> <absolute-path>`",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="Invalid usage",
+                        )
+                    raw_alias = raw_args[1].strip()
+                    raw_path = raw_args[2].strip()
+                    try:
+                        target_alias = validate_workspace_alias(raw_alias)
+                        p_val = Path(raw_path)
+                        if not p_val.is_absolute():
+                            return OutgoingMessage(
+                                text="❌ Workspace path must be an absolute path.",
+                                events=events,
+                                success=False,
+                                status="rejected",
+                                error="Path not absolute",
+                            )
+                        res_p = p_val.resolve()
+                        if not res_p.exists() or not res_p.is_dir():
+                            return OutgoingMessage(
+                                text=f"❌ Workspace target directory does not exist: {res_p}",
+                                events=events,
+                                success=False,
+                                status="rejected",
+                                error="Directory does not exist",
+                            )
+                        self.workspace_registry._validate_not_control_plane(res_p)
+                        self.workspace_registry.register(target_alias, res_p, persist=True)
+                    except (WorkspaceValidationError, WorkspaceNotFoundError) as ws_err:
+                        return OutgoingMessage(
+                            text=f"❌ Registration failed: {ws_err}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=str(ws_err),
+                        )
+                    emit("agent.workspace.registered", {
+                        "alias": target_alias,
+                        "path": str(res_p),
+                        "actor": message.user_id,
+                    })
+                    return OutgoingMessage(
+                        text=f"✅ Workspace `{target_alias}` registered at `{res_p}`.",
+                        events=events,
+                        success=True,
+                        status="completed",
+                    )
+
+                if subcmd == "remove":
+                    # Gate removal to local CLI administrators
+                    if effective_channel not in ("cli", "local", "terminal"):
+                        err_msg = "Workspace removal is restricted to local CLI administrators."
+                        return OutgoingMessage(
+                            text=f"❌ {err_msg}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=err_msg,
+                        )
+                    if len(sub_parts) < 2 or not sub_parts[1].strip():
+                        return OutgoingMessage(
+                            text="⚠️ Usage: `/workspace remove <alias>`",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="Invalid usage",
+                        )
+                    raw_alias = sub_parts[1].strip()
+                    try:
+                        target_alias = validate_workspace_alias(raw_alias)
+                        self.workspace_registry.unregister(target_alias, persist=True)
+                    except (WorkspaceValidationError, WorkspaceNotFoundError) as ws_err:
+                        return OutgoingMessage(
+                            text=f"❌ Removal failed: {ws_err}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=str(ws_err),
+                        )
+                    if session.active_workspace == target_alias:
+                        session.active_workspace = None
+                        self.sessions.save(session)
+                    emit("agent.workspace.removed", {
+                        "alias": target_alias,
+                        "actor": message.user_id,
+                    })
+                    return OutgoingMessage(
+                        text=f"✅ Workspace registration `{target_alias}` removed. Project files on disk were not deleted.",
+                        events=events,
+                        success=True,
+                        status="completed",
+                    )
+
+                raw_alias = subcmd
+                try:
+                    target_alias = validate_workspace_alias(raw_alias)
+                except WorkspaceValidationError as val_err:
+                    emit("agent.workspace.rejected", {
+                        "session_id": session.session_id,
+                        "alias": raw_alias,
+                        "reason": str(val_err),
+                    })
+                    return OutgoingMessage(
+                        text=f"❌ {val_err}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=str(val_err),
+                    )
+
+                entry = self.workspace_registry.get(target_alias)
+                if not entry:
+                    err_msg = f"Workspace alias '{target_alias}' is not registered. Use `/workspaces` to view available workspaces."
+                    emit("agent.workspace.rejected", {
+                        "session_id": session.session_id,
+                        "alias": target_alias,
+                        "reason": "unregistered_alias",
+                    })
+                    return OutgoingMessage(
+                        text=f"❌ {err_msg}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=err_msg,
+                    )
+
+                if not entry.path.exists() or not entry.path.is_dir():
+                    err_msg = f"Registered workspace directory for '{target_alias}' does not exist on disk."
+                    emit("agent.workspace.rejected", {
+                        "session_id": session.session_id,
+                        "alias": target_alias,
+                        "reason": "directory_missing",
+                    })
+                    return OutgoingMessage(
+                        text=f"❌ {err_msg}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=err_msg,
+                    )
+
+                # Invalidate incompatible pending approvals for this session if switching to a different canonical path
+                old_alias = session.active_workspace or self.workspace_registry.default_alias
+                old_entry = self.workspace_registry.get(old_alias)
+                if old_entry and old_entry.path.resolve() != entry.path.resolve():
+                    for req in self.approval_service.store.list_requests(session_id=session.session_id, active_only=True):
+                        if req.status == ApprovalStatus.PENDING and req.workspace_root:
+                            if Path(req.workspace_root).resolve() != entry.path.resolve():
+                                lock_ctx = (
+                                    self.approval_service.store._get_request_lock(req.request_id)
+                                    if hasattr(self.approval_service.store, "_get_request_lock")
+                                    else nullcontext()
+                                )
+                                with lock_ctx:
+                                    cur = self.approval_service.store.get(req.request_id)
+                                    if cur and cur.status == ApprovalStatus.PENDING:
+                                        cur.status = ApprovalStatus.CANCELLED
+                                        cur.rejection_reason = f"Cancelled due to workspace switch to '{entry.alias}'"
+                                        self.approval_service.store.save(cur)
+
+                session.active_workspace = entry.alias
+                self.sessions.save(session)
+
+                emit("agent.workspace.selected", {
+                    "session_id": session.session_id,
+                    "workspace": entry.alias,
+                    "path": str(entry.path),
+                    "actor": message.user_id,
+                })
+                resp_text = f"✅ Workspace switched to `{entry.alias}` (`{entry.path}`)."
+                return OutgoingMessage(text=resp_text, events=events, success=True, status="completed")
 
             if cmd in ("/reset", "/new"):
                 old_incarnation = session.session_incarnation_id
@@ -851,7 +1174,40 @@ class BrainFrogRuntime:
                 if len(parts) < 2 or not parts[1].strip():
                     return OutgoingMessage(text="⚠️ Usage: `/resume <work_id>`", events=events, success=False, status="rejected")
                 target_work_id = parts[1].strip()
-                recovery_mgr = TransactionRecoveryManager(workspace=self.repo_dir, store=self.transaction_store)
+                work = self.work_store.get(target_work_id)
+                if not work:
+                    return OutgoingMessage(text=f"❌ Work '{target_work_id}' not found.", events=events, success=False, status="rejected")
+
+                # Establish trusted recorded workspace from work/tx metadata
+                recorded_ws_str = (work.resume_metadata or {}).get("workspace")
+                if not recorded_ws_str and work.transaction_id:
+                    tx_obj = self.transaction_store.get(work.transaction_id)
+                    if tx_obj and tx_obj.workspace:
+                        recorded_ws_str = tx_obj.workspace
+                if not recorded_ws_str and work.approval_request_id:
+                    appr_obj = self.approval_service.store.get(work.approval_request_id)
+                    if appr_obj and appr_obj.workspace_root:
+                        recorded_ws_str = appr_obj.workspace_root
+
+                # For active executing/verifying states, fail closed if workspace is missing or invalid
+                recovery_mgr = None
+                if work.status not in (WorkStatus.DONE, WorkStatus.CANCELLED, WorkStatus.APPROVAL_REQUIRED):
+                    if not recorded_ws_str or not str(recorded_ws_str).strip():
+                        err_msg = f"Work '{target_work_id}' has no recorded workspace. Resume cannot establish canonical workspace."
+                        emit("agent.work.resume_failed", {"work_id": target_work_id, "reason": err_msg})
+                        return OutgoingMessage(text=f"❌ Resume failed: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
+
+                    recorded_ws = Path(recorded_ws_str).resolve()
+                    if not recorded_ws.exists() or not recorded_ws.is_dir():
+                        err_msg = f"Recorded workspace '{recorded_ws_str}' for work '{target_work_id}' does not exist on disk."
+                        emit("agent.work.resume_failed", {"work_id": target_work_id, "reason": err_msg})
+                        return OutgoingMessage(text=f"❌ Resume failed: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
+
+                    recovery_mgr = TransactionRecoveryManager(workspace=recorded_ws, store=self.transaction_store)
+                elif recorded_ws_str and str(recorded_ws_str).strip():
+                    recorded_ws = Path(recorded_ws_str).resolve()
+                    if recorded_ws.exists() and recorded_ws.is_dir():
+                        recovery_mgr = TransactionRecoveryManager(workspace=recorded_ws, store=self.transaction_store)
                 ok, resp_msg, work_obj = resume_work(
                     work_id=target_work_id,
                     actor_id=message.user_id,
@@ -976,7 +1332,22 @@ class BrainFrogRuntime:
                 if len(parts) < 2 or not parts[1].strip():
                     return OutgoingMessage(text="⚠️ Usage: `/recover <transaction_id>`", events=events, success=False, status="rejected")
                 tx_id = parts[1].strip()
-                mgr = TransactionRecoveryManager(workspace=self.repo_dir, store=self.transaction_store)
+                tx = self.transaction_store.get(tx_id)
+                if not tx:
+                    return OutgoingMessage(text=f"❌ Transaction '{tx_id}' not found.", events=events, success=False, status="rejected")
+
+                if not tx.workspace or not str(tx.workspace).strip():
+                    err_msg = f"Transaction '{tx_id}' has no recorded workspace. Recovery cannot proceed safely."
+                    emit("agent.transaction.recovery_failed", {"transaction_id": tx_id, "error": err_msg})
+                    return OutgoingMessage(text=f"❌ Recovery failed: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
+
+                recorded_ws = Path(tx.workspace).resolve()
+                if not recorded_ws.exists() or not recorded_ws.is_dir():
+                    err_msg = f"Recorded workspace directory '{tx.workspace}' for transaction '{tx_id}' does not exist on disk."
+                    emit("agent.transaction.recovery_failed", {"transaction_id": tx_id, "error": err_msg})
+                    return OutgoingMessage(text=f"❌ Recovery failed: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
+
+                mgr = TransactionRecoveryManager(workspace=recorded_ws, store=self.transaction_store)
                 res = mgr.recover(tx_id)
                 if res.recovered:
                     action_desc = "rolled back" if res.rolled_back else res.final_status.value
@@ -1006,16 +1377,34 @@ class BrainFrogRuntime:
                 target_req = self.approval_service.store.get(exec_req_id)
                 if not target_req:
                     return OutgoingMessage(text=f"❌ Request '{exec_req_id}' not found.", events=events, success=False, status="rejected")
+
+                # Validate workspace alignment: active session workspace must match approved workspace root
+                try:
+                    active_session_ws = self.get_session_workspace(session, message)
+                except WorkspaceNotFoundError as ws_err:
+                    return OutgoingMessage(text=f"❌ Workspace Error: {ws_err}", events=events, success=False, status="rejected", error=str(ws_err))
+
+                approved_ws = Path(target_req.workspace_root).resolve()
+                if active_session_ws.resolve() != approved_ws:
+                    err_msg = (
+                        f"Approval Workspace Mismatch: Request '{exec_req_id}' was approved for workspace "
+                        f"'{approved_ws}', but active session workspace is '{active_session_ws}'. "
+                        "Execution cannot cross workspace boundaries."
+                    )
+                    emit("agent.approval.invalid", {"request_id": exec_req_id, "reason": err_msg})
+                    return OutgoingMessage(text=f"⚠️ {err_msg}", events=events, success=False, status="rejected", error=err_msg)
+
                 raw_text = f"{target_req.canonical_operation.action_type} {target_req.canonical_operation.target}"
 
                 # Sanitize metadata: discard untrusted incoming payload, use only approved canonical parameters
                 trusted_meta = {}
-                if "repo_dir" in message.metadata:
+                if "repo_dir" in message.metadata and message.channel in ("cli", "local", "terminal"):
                     trusted_meta["repo_dir"] = message.metadata["repo_dir"]
                 trusted_meta["approval_id"] = exec_req_id
                 trusted_meta["expected_digest"] = target_req.operation_digest
                 trusted_meta["action_type"] = target_req.canonical_operation.action_type
                 trusted_meta["target"] = target_req.canonical_operation.target
+                trusted_meta["workspace_root"] = str(approved_ws)
                 for k, v in target_req.canonical_operation.parameters.items():
                     trusted_meta[k] = v
                 message.metadata.clear()
@@ -1058,9 +1447,29 @@ class BrainFrogRuntime:
         remote_context = None
 
         if approval_id:
+            target_req = self.approval_service.store.get(str(approval_id))
+            if not target_req:
+                return OutgoingMessage(text=f"❌ Request '{approval_id}' not found.", events=events, success=False, status="rejected")
+            appr_ws = Path(target_req.workspace_root).resolve()
+
+            # Validate active session workspace matches approved workspace root
+            try:
+                active_session_ws = self.get_session_workspace(session, message)
+            except WorkspaceNotFoundError as ws_err:
+                return OutgoingMessage(text=f"❌ Workspace Error: {ws_err}", events=events, success=False, status="rejected", error=str(ws_err))
+
+            if active_session_ws.resolve() != appr_ws:
+                err_msg = (
+                    f"Approval Workspace Mismatch: Request '{approval_id}' was approved for workspace "
+                    f"'{appr_ws}', but active session workspace is '{active_session_ws}'. "
+                    "Execution cannot cross workspace boundaries."
+                )
+                emit("agent.approval.invalid", {"request_id": approval_id, "reason": err_msg})
+                return OutgoingMessage(text=f"⚠️ {err_msg}", events=events, success=False, status="rejected", error=err_msg)
+
             digest = message.metadata.get("expected_digest")
             if not digest:
-                canonical_op = extract_canonical_operation(raw_text, action, message.metadata, repo_dir=Path(self.repo_dir))
+                canonical_op = extract_canonical_operation(raw_text, action, message.metadata, repo_dir=appr_ws)
                 digest = canonical_op.compute_digest()
             is_valid, app_req, consume_reason = self.approval_service.verify_and_consume(
                 request_id=approval_id,
@@ -1083,13 +1492,13 @@ class BrainFrogRuntime:
             if app_req is not None:
                 try:
                     execution_contract = ApprovedExecutionContract.from_approval_request(
-                        app_req, repo_dir=Path(self.repo_dir).resolve(),
+                        app_req, repo_dir=appr_ws,
                     )
                     execution_contract.validate(
                         actor=message.user_id, channel=effective_channel,
                         session_id=session.session_id,
                         session_incarnation_id=session.session_incarnation_id,
-                        repo_dir=Path(self.repo_dir).resolve(),
+                        repo_dir=active_session_ws.resolve(),
                     )
                     execution_contract.capabilities.require("network.access")
                 except (ValueError, PermissionError) as exc:
@@ -1116,7 +1525,19 @@ class BrainFrogRuntime:
                 or message.metadata.get("require_approval")
             )
             if should_request_approval:
-                canonical_op = extract_canonical_operation(raw_text, action, message.metadata, repo_dir=Path(self.repo_dir))
+                try:
+                    target_ws = self.get_session_workspace(session, message)
+                except WorkspaceNotFoundError as ws_err:
+                    emit("agent.rejected", {"action": action.value if hasattr(action, "value") else str(action), "reason": str(ws_err)})
+                    return OutgoingMessage(
+                        text=f"❌ Workspace Error: {ws_err}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=str(ws_err),
+                    )
+
+                canonical_op = extract_canonical_operation(raw_text, action, message.metadata, repo_dir=target_ws)
 
                 # M-02 Remediation: Fail-closed on invalid or ambiguous filesystem targets
                 is_fs_action = action in (
@@ -1166,7 +1587,7 @@ class BrainFrogRuntime:
                             message_id=message.id, actor=message.user_id,
                             channel=effective_channel, session_id=session.session_id,
                             session_incarnation_id=session.session_incarnation_id,
-                            intent=raw_text, workspace=self.repo_dir, targets=targets,
+                            intent=raw_text, workspace=target_ws, targets=targets,
                         )
                         normalized_request = norm
                         pending_remote_work, pending_remote_plan = self.remote_work.submit(
@@ -1189,7 +1610,7 @@ class BrainFrogRuntime:
                         risk_class=risk,
                         session_incarnation_id=session.session_incarnation_id,
                         capabilities=capabilities,
-                        workspace_root=str(Path(self.repo_dir).resolve()),
+                        workspace_root=str(target_ws.resolve()),
                     )
                 except ApprovalQuotaExceededError as qe:
                     if pending_remote_work is not None:
@@ -1285,7 +1706,17 @@ class BrainFrogRuntime:
                 emit("agent.mode.fallback", {"from": "build", "to": "plan", "reason": "remote_channel_read_only"})
 
         # 3. Resolve Workspace & Providers
-        workspace_dir = Path(message.metadata.get("repo_dir") or self.repo_dir).resolve()
+        try:
+            workspace_dir = self.get_session_workspace(session, message)
+        except WorkspaceNotFoundError as ws_err:
+            emit("agent.error", {"error": str(ws_err)})
+            return OutgoingMessage(
+                text=f"❌ Workspace Error: {ws_err}",
+                events=events,
+                success=False,
+                status="rejected",
+                error=str(ws_err),
+            )
         backend = message.metadata.get("backend") or self.default_backend
         provider = message.metadata.get("provider") or session.active_provider or self.default_provider
         model = message.metadata.get("model") or session.active_model or self.default_model
@@ -1301,7 +1732,7 @@ class BrainFrogRuntime:
         if skill:
             session.active_skill = skill
 
-        test_cmd_list = self._resolve_test_cmd(message.metadata.get("test_cmd"))
+        test_cmd_list = self._resolve_test_cmd(message.metadata.get("test_cmd"), workspace_dir=workspace_dir)
 
         # Plan context resolution
         if approved_execution:
@@ -1326,6 +1757,8 @@ class BrainFrogRuntime:
             return OutgoingMessage(text=f"❌ {err_msg}", events=events, success=False, error=err_msg)
 
         try:
+            from system2 import validate_system2_provider_preflight
+            validate_system2_provider_preflight(provider)
             s2 = self.system2_factory(model=model, provider=provider)
         except Exception as e:
             err_msg = f"System 2 Initialization Error: {e}"
@@ -1418,12 +1851,13 @@ class BrainFrogRuntime:
                 except Exception:
                     pass
 
-        # 6. Execute via existing Orchestrator under WorkspaceLock
+        task_id_for_lock = remote_context.work_id if remote_context else (message.metadata.get("task_id") if message.metadata else None)
         ws_lock = WorkspaceLock(
             workspace=workspace_dir,
             session_id=session.session_id,
             actor=message.user_id,
-            timeout=float(message.metadata.get("lock_timeout", 10.0)),
+            task_id=task_id_for_lock,
+            timeout=float(message.metadata.get("lock_timeout", 10.0)) if message.metadata else 10.0,
         )
         try:
             ws_lock.acquire()
@@ -1560,263 +1994,194 @@ class BrainFrogRuntime:
                         **({"remote_work": remote_result.to_dict()} if remote_result else {}),
                     },
                 )
-        finally:
-            ws_lock.release()
 
-        emit("agent.completed", {"steps_count": len(results)})
+            emit("agent.completed", {"steps_count": len(results)})
 
-        remote_result = None
-        if remote_context is not None:
-            tx_res = cfg.last_transaction_result
-            test_proc = getattr(cfg, "last_test_result", None)
-            work_id = remote_context.work_id
+            remote_result = None
+            if remote_context is not None:
+                tx_res = cfg.last_transaction_result
+                test_proc = getattr(cfg, "last_test_result", None)
+                work_id = remote_context.work_id
 
-            if tx_res is None or not tx_res.success:
-                fail_summary = f"Work {work_id} failed and was rolled back."
-                if tx_res and getattr(tx_res, "error", None):
-                    fail_summary += f" {tx_res.error}"
-                self.remote_work.transition_for_approval(
-                    str(approval_id),
-                    WorkStatus.FAILED,
-                    failure=WorkFailure(
-                        code="VERIFICATION_FAILED" if (tx_res and tx_res.rolled_back) else "EXECUTION_FAILED",
-                        stage="execution",
-                        summary=fail_summary,
-                        retryable=False,
-                    ),
-                )
-                remote_result = self.remote_work.result(
-                    str(approval_id),
-                    "failed",
-                    fail_summary,
-                    error_code="verification_failed",
-                    verification_passed=False,
-                )
-            else:
-                self.remote_work.bind_transaction(str(approval_id), tx_res.transaction_id)
-                resume_meta = {
-                    "workspace": str(workspace_dir),
-                    "task_id": work_id,
-                    "transaction_id": tx_res.transaction_id,
-                }
-                self.remote_work.transition_for_approval(
-                    str(approval_id),
-                    WorkStatus.VERIFYING,
-                    resume_metadata=resume_meta,
-                )
-
-                tx_ops = getattr(tx_res, "operations", []) or []
-                changed_files = [op.target for op in tx_ops]
-                expected_files = list(execution_contract.approved_targets) if execution_contract else changed_files
-
-                gate_passed, v_details, gate_errors = VerificationGate.verify(
-                    workspace=workspace_dir,
-                    expected_files=expected_files,
-                    actual_files=changed_files,
-                    test_proc=test_proc,
-                    tx_res=tx_res,
-                    tracked_pids=None,
-                    channel=effective_channel,
-                    contract=execution_contract,
-                )
-
-                tests_passed = bool(test_proc and test_proc.returncode == 0 and not getattr(test_proc, "is_timeout", False))
-                proc_stat = getattr(test_proc, "status", "success") if test_proc else "failed"
-                proof_verdict = compute_proof_verdict(
-                    tx_status="committed",
-                    tests_passed=tests_passed,
-                    gate_passed=gate_passed,
-                    process_status=proc_stat,
-                    rollback_error=None,
-                    is_recovery_required=False,
-                    gate_details=v_details,
-                )
-
-                change_records = build_change_records(tx_ops, workspace_dir)
-                if not change_records and changed_files:
-                    for cf in changed_files:
-                        try:
-                            cf_rel = normalize_workspace_relative_path(cf, workspace_dir)
-                            cf_disk = workspace_dir / cf_rel
-                            cf_hash = hashlib.sha256(cf_disk.read_bytes()).hexdigest() if cf_disk.exists() else None
-                            change_records.append(
-                                ChangeRecord(
-                                    path=cf_rel,
-                                    operation="MODIFY",
-                                    before_sha256=None,
-                                    after_sha256=cf_hash,
-                                    byte_count_delta=0,
-                                )
-                            )
-                        except Exception:
-                            pass
-
-                now_iso = datetime.now(timezone.utc).isoformat()
-                task_evidence = TaskEvidence(
-                    task_id=work_id,
-                    session_id=session.session_id,
-                    description=redact_secrets(remote_context.request.intent),
-                    created_at=now_iso,
-                    completed_at=now_iso,
-                    duration_ms=0,
-                )
-
-                raw_stdout = getattr(test_proc, "stdout", "") or ""
-                raw_stderr = getattr(test_proc, "stderr", "") or ""
-                stdout_bounded, stdout_trunc = capture_bounded_output(raw_stdout)
-                stderr_bounded, stderr_trunc = capture_bounded_output(raw_stderr)
-                test_cmd_str = " ".join(cfg.test_command) if isinstance(cfg.test_command, (list, tuple)) else str(cfg.test_command or "")
-
-                proc_evidence = None
-                if test_proc is not None:
-                    p_start_raw = getattr(test_proc, "started_at", None)
-                    p_comp_raw = getattr(test_proc, "completed_at", None)
-                    p_start_iso = datetime.fromtimestamp(p_start_raw, tz=timezone.utc).isoformat() if isinstance(p_start_raw, (int, float)) else ""
-                    p_comp_iso = datetime.fromtimestamp(p_comp_raw, tz=timezone.utc).isoformat() if isinstance(p_comp_raw, (int, float)) else ""
-                    p_stat_val = getattr(test_proc.status, "value", str(test_proc.status))
-                    proc_evidence = ProcessEvidence(
-                        task_id=work_id,
-                        transaction_id=tx_res.transaction_id,
-                        command=test_cmd_str,
-                        started_at=p_start_iso,
-                        completed_at=p_comp_iso,
-                        duration_ms=getattr(test_proc, "duration_ms", 0) or 0,
-                        returncode=test_proc.returncode,
-                        status=str(p_stat_val),
-                        timed_out=getattr(test_proc, "is_timeout", False),
-                        cancelled=getattr(test_proc, "is_cancelled", False),
-                        truncated=getattr(test_proc, "is_truncated", False) or stdout_trunc or stderr_trunc,
-                    )
-
-                v_evidence = VerificationEvidence(
-                    test_command=test_cmd_str,
-                    exit_code=test_proc.returncode if test_proc else None,
-                    stdout_summary=stdout_bounded,
-                    stderr_summary=stderr_bounded,
-                    stdout_truncated=stdout_trunc,
-                    stderr_truncated=stderr_trunc,
-                    gate_checks=v_details,
-                    process_evidence=proc_evidence,
-                )
-
-                changes_evidence = ChangesEvidence(
-                    transaction_id=tx_res.transaction_id,
-                    status="COMMITTED",
-                    files=change_records,
-                )
-
-                reproducibility = ReproducibilityEvidence(
-                    command=test_cmd_str,
-                    expected_exit_code=0,
-                    expected_file_hashes={r.path: r.after_sha256 for r in change_records if r.after_sha256},
-                )
-
-                from core.runtime.task_finalization import TaskFinalizationCoordinator
-                intent_record = TaskFinalizationCoordinator(workspace_dir).get_intent(work_id)
-                commit_sha = intent_record.commit_sha if intent_record else None
-
-                proof_artifact = ProofArtifact(
-                    version="1.0.0",
-                    task=task_evidence,
-                    verdict=proof_verdict,
-                    provenance=capture_git_provenance(
-                        workspace_dir,
-                        commit_sha=commit_sha,
-                    ),
-                    verification=v_evidence,
-                    changes=changes_evidence,
-                    reproducibility=reproducibility,
-                )
-
-                proof_store = FileProofStore(workspace_dir)
-                proof_path_str: Optional[str] = None
-                store_failed = False
-                store_err_msg = ""
-                try:
-                    md_text = render_proof_markdown(proof_artifact)
-                    pj, pm = proof_store.save(proof_artifact, md_text)
-                    proof_path_str = str(pj)
-                    TaskFinalizationCoordinator(workspace_dir).finalize_proof(work_id)
-                except Exception as store_exc:
-                    store_failed = True
-                    store_err_msg = str(store_exc)
-
-                if store_failed or proof_path_str is None:
-                    fail_summary = f"Task execution succeeded and committed, but proof persistence failed: {store_err_msg}. Recovery required."
+                if tx_res is None or not tx_res.success:
+                    fail_summary = f"Work {work_id} failed and was rolled back."
+                    if tx_res and getattr(tx_res, "error", None):
+                        fail_summary += f" {tx_res.error}"
                     self.remote_work.transition_for_approval(
                         str(approval_id),
                         WorkStatus.FAILED,
                         failure=WorkFailure(
-                            code="PROOF_PERSISTENCE_FAILED",
-                            stage="proof",
+                            code="VERIFICATION_FAILED" if (tx_res and tx_res.rolled_back) else "EXECUTION_FAILED",
+                            stage="execution",
                             summary=fail_summary,
                             retryable=False,
                         ),
-                        resume_metadata=resume_meta,
                     )
                     remote_result = self.remote_work.result(
                         str(approval_id),
                         "failed",
                         fail_summary,
-                        error_code="proof_persistence_failed",
+                        error_code="verification_failed",
                         verification_passed=False,
                     )
                 else:
-                    verifier = DeterministicProofVerifier(workspace_dir, verify_disk_integrity=True)
-                    rep = verifier.verify(work_id)
-                    proof_obj = None
-                    try:
-                        proof_obj = proof_store.load(work_id)
-                    except Exception:
-                        pass
-
-                    is_proof_valid = (
-                        rep.overall_status == ProofVerificationStatus.VALID
-                        and rep.verdict_status == "VERIFIED"
-                        and proof_verdict.status == "VERIFIED"
-                        and proof_obj is not None
-                        and proof_obj.verdict.status == "VERIFIED"
-                        and proof_obj.changes.status == "COMMITTED"
-                        and proof_obj.task.task_id == work_id
-                        and proof_obj.changes.transaction_id == tx_res.transaction_id
+                    self.remote_work.bind_transaction(str(approval_id), tx_res.transaction_id)
+                    resume_meta = {
+                        "workspace": str(workspace_dir),
+                        "task_id": work_id,
+                        "transaction_id": tx_res.transaction_id,
+                    }
+                    self.remote_work.transition_for_approval(
+                        str(approval_id),
+                        WorkStatus.VERIFYING,
+                        resume_metadata=resume_meta,
                     )
 
-                    if is_proof_valid:
-                        passed_c = len([c for c in rep.checks if c.status == ProofVerificationStatus.VALID])
-                        v_res = VerificationResult(
-                            status=VerificationStatus.PASS,
-                            passed=passed_c,
-                            failed=0,
-                            summary=f"Authoritative proof verified ({work_id})",
+                    tx_ops = getattr(tx_res, "operations", []) or []
+                    changed_files = [op.target for op in tx_ops]
+                    expected_files = list(execution_contract.approved_targets) if execution_contract else changed_files
+
+                    gate_passed, v_details, gate_errors = VerificationGate.verify(
+                        workspace=workspace_dir,
+                        expected_files=expected_files,
+                        actual_files=changed_files,
+                        test_proc=test_proc,
+                        tx_res=tx_res,
+                        tracked_pids=None,
+                        channel=effective_channel,
+                        contract=execution_contract,
+                    )
+
+                    tests_passed = bool(test_proc and test_proc.returncode == 0 and not getattr(test_proc, "is_timeout", False))
+                    proc_stat = getattr(test_proc, "status", "success") if test_proc else "failed"
+                    proof_verdict = compute_proof_verdict(
+                        tx_status="committed",
+                        tests_passed=tests_passed,
+                        gate_passed=gate_passed,
+                        process_status=proc_stat,
+                        rollback_error=None,
+                        is_recovery_required=False,
+                        gate_details=v_details,
+                    )
+
+                    change_records = build_change_records(tx_ops, workspace_dir)
+                    if not change_records and changed_files:
+                        for cf in changed_files:
+                            try:
+                                cf_rel = normalize_workspace_relative_path(cf, workspace_dir)
+                                cf_disk = workspace_dir / cf_rel
+                                cf_hash = hashlib.sha256(cf_disk.read_bytes()).hexdigest() if cf_disk.exists() else None
+                                change_records.append(
+                                    ChangeRecord(
+                                        path=cf_rel,
+                                        operation="MODIFY",
+                                        before_sha256=None,
+                                        after_sha256=cf_hash,
+                                        byte_count_delta=0,
+                                    )
+                                )
+                            except Exception:
+                                pass
+
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    task_evidence = TaskEvidence(
+                        task_id=work_id,
+                        session_id=session.session_id,
+                        description=redact_secrets(remote_context.request.intent),
+                        created_at=now_iso,
+                        completed_at=now_iso,
+                        duration_ms=0,
+                    )
+
+                    raw_stdout = getattr(test_proc, "stdout", "") or ""
+                    raw_stderr = getattr(test_proc, "stderr", "") or ""
+                    stdout_bounded, stdout_trunc = capture_bounded_output(raw_stdout)
+                    stderr_bounded, stderr_trunc = capture_bounded_output(raw_stderr)
+                    test_cmd_str = " ".join(cfg.test_command) if isinstance(cfg.test_command, (list, tuple)) else str(cfg.test_command or "")
+
+                    proc_evidence = None
+                    if test_proc is not None:
+                        p_start_raw = getattr(test_proc, "started_at", None)
+                        p_comp_raw = getattr(test_proc, "completed_at", None)
+                        p_start_iso = datetime.fromtimestamp(p_start_raw, tz=timezone.utc).isoformat() if isinstance(p_start_raw, (int, float)) else ""
+                        p_comp_iso = datetime.fromtimestamp(p_comp_raw, tz=timezone.utc).isoformat() if isinstance(p_comp_raw, (int, float)) else ""
+                        p_stat_val = getattr(test_proc.status, "value", str(test_proc.status))
+                        proc_evidence = ProcessEvidence(
+                            task_id=work_id,
+                            transaction_id=tx_res.transaction_id,
+                            command=test_cmd_str,
+                            cwd=str(workspace_dir),
+                            started_at=p_start_iso,
+                            completed_at=p_comp_iso,
+                            duration_ms=getattr(test_proc, "duration_ms", 0) or 0,
+                            returncode=test_proc.returncode,
+                            status=str(p_stat_val),
+                            timed_out=getattr(test_proc, "is_timeout", False),
+                            cancelled=getattr(test_proc, "is_cancelled", False),
+                            truncated=getattr(test_proc, "is_truncated", False) or stdout_trunc or stderr_trunc,
                         )
-                        self.remote_work.transition_for_approval(
-                            str(approval_id),
-                            WorkStatus.DONE,
-                            verification_result=v_res,
-                            resume_metadata=resume_meta,
-                        )
-                        remote_result = self.remote_work.result(
-                            str(approval_id),
-                            "completed",
-                            f"Work {work_id} completed successfully.",
-                            proof_path=proof_path_str,
-                            verification_passed=True,
-                        )
-                    else:
-                        fail_reasons = []
-                        if rep.overall_status != ProofVerificationStatus.VALID:
-                            fail_reasons.append(f"verifier status: {rep.overall_status.value}")
-                        if proof_verdict.status != "VERIFIED":
-                            fail_reasons.append(f"verdict status: {proof_verdict.status}")
-                        if gate_errors:
-                            fail_reasons.extend(gate_errors)
-                        fail_summary = f"Verification failed for work {work_id}: {'; '.join(fail_reasons) or 'Evidence mismatch'}."
+
+                    v_evidence = VerificationEvidence(
+                        test_command=test_cmd_str,
+                        exit_code=test_proc.returncode if test_proc else None,
+                        stdout_summary=stdout_bounded,
+                        stderr_summary=stderr_bounded,
+                        stdout_truncated=stdout_trunc,
+                        stderr_truncated=stderr_trunc,
+                        gate_checks=v_details,
+                        process_evidence=proc_evidence,
+                    )
+
+                    changes_evidence = ChangesEvidence(
+                        transaction_id=tx_res.transaction_id,
+                        status="COMMITTED",
+                        files=change_records,
+                    )
+
+                    reproducibility = ReproducibilityEvidence(
+                        command=test_cmd_str,
+                        expected_exit_code=0,
+                        expected_file_hashes={r.path: r.after_sha256 for r in change_records if r.after_sha256},
+                    )
+
+                    from core.runtime.task_finalization import TaskFinalizationCoordinator
+                    intent_record = TaskFinalizationCoordinator(workspace_dir).get_intent(work_id)
+                    commit_sha = intent_record.commit_sha if intent_record else None
+
+                    proof_artifact = ProofArtifact(
+                        version="1.0.0",
+                        task=task_evidence,
+                        verdict=proof_verdict,
+                        provenance=capture_git_provenance(
+                            workspace_dir,
+                            commit_sha=commit_sha,
+                        ),
+                        verification=v_evidence,
+                        changes=changes_evidence,
+                        reproducibility=reproducibility,
+                    )
+
+                    proof_store = FileProofStore(workspace_dir)
+                    proof_path_str: Optional[str] = None
+                    store_failed = False
+                    store_err_msg = ""
+                    try:
+                        md_text = render_proof_markdown(proof_artifact)
+                        pj, pm = proof_store.save(proof_artifact, md_text)
+                        proof_path_str = str(pj)
+                        TaskFinalizationCoordinator(workspace_dir).finalize_proof(work_id)
+                    except Exception as store_exc:
+                        store_failed = True
+                        store_err_msg = str(store_exc)
+
+                    if store_failed or proof_path_str is None:
+                        fail_summary = f"Task execution succeeded and committed, but proof persistence failed: {store_err_msg}. Recovery required."
                         self.remote_work.transition_for_approval(
                             str(approval_id),
                             WorkStatus.FAILED,
                             failure=WorkFailure(
-                                code="VERIFICATION_FAILED",
-                                stage="verifying",
+                                code="PROOF_PERSISTENCE_FAILED",
+                                stage="proof",
                                 summary=fail_summary,
                                 retryable=False,
                             ),
@@ -1826,10 +2191,81 @@ class BrainFrogRuntime:
                             str(approval_id),
                             "failed",
                             fail_summary,
-                            error_code="verification_failed",
-                            proof_path=proof_path_str,
+                            error_code="proof_persistence_failed",
                             verification_passed=False,
                         )
+                    else:
+                        verifier = DeterministicProofVerifier(workspace_dir, verify_disk_integrity=True)
+                        rep = verifier.verify(work_id)
+                        proof_obj = None
+                        try:
+                            proof_obj = proof_store.load(work_id)
+                        except Exception:
+                            pass
+
+                        is_proof_valid = (
+                            rep.overall_status == ProofVerificationStatus.VALID
+                            and rep.verdict_status == "VERIFIED"
+                            and proof_verdict.status == "VERIFIED"
+                            and proof_obj is not None
+                            and proof_obj.verdict.status == "VERIFIED"
+                            and proof_obj.changes.status in ("COMMITTED", "VERIFIED")
+                            and proof_obj.task.task_id == work_id
+                            and proof_obj.changes.transaction_id == tx_res.transaction_id
+                        )
+
+                        if is_proof_valid:
+                            passed_c = len([c for c in rep.checks if c.status == ProofVerificationStatus.VALID])
+                            v_res = VerificationResult(
+                                status=VerificationStatus.PASS,
+                                passed=passed_c,
+                                failed=0,
+                                summary=f"Authoritative proof verified ({work_id})",
+                            )
+                            self.remote_work.transition_for_approval(
+                                str(approval_id),
+                                WorkStatus.DONE,
+                                verification_result=v_res,
+                                resume_metadata=resume_meta,
+                            )
+                            remote_result = self.remote_work.result(
+                                str(approval_id),
+                                "completed",
+                                f"Work {work_id} completed successfully.",
+                                proof_path=proof_path_str,
+                                verification_passed=True,
+                            )
+                        else:
+                            fail_reasons = []
+                            if rep.overall_status != ProofVerificationStatus.VALID:
+                                fail_reasons.append(f"verifier status: {rep.overall_status.value}")
+                            if proof_verdict.status != "VERIFIED":
+                                fail_reasons.append(f"verdict status: {proof_verdict.status}")
+                            if gate_errors:
+                                fail_reasons.extend(gate_errors)
+                            fail_summary = f"Verification failed for work {work_id}: {'; '.join(fail_reasons) or 'Evidence mismatch'}."
+                            self.remote_work.transition_for_approval(
+                                str(approval_id),
+                                WorkStatus.FAILED,
+                                failure=WorkFailure(
+                                    code="VERIFICATION_FAILED",
+                                    stage="verifying",
+                                    summary=fail_summary,
+                                    retryable=False,
+                                ),
+                                resume_metadata=resume_meta,
+                            )
+                            remote_result = self.remote_work.result(
+                                str(approval_id),
+                                "failed",
+                                fail_summary,
+                                error_code="verification_failed",
+                                proof_path=proof_path_str,
+                                verification_passed=False,
+                            )
+
+        finally:
+            ws_lock.release()
 
         # 7. Format Outgoing Response Text
         reply_texts: List[str] = []

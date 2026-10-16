@@ -485,7 +485,7 @@ class TestTrueEndToEndTargetExtraction(unittest.TestCase):
             require_approval=True,
             system1_factory=lambda _: MockSystem1(),
             system2_factory=lambda **_: MockSystem2({"src/safe.py": "# legitimate code\n"}),
-            default_test_cmd='python -c "pass"',
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
         # 1. Incoming Request with technical noise

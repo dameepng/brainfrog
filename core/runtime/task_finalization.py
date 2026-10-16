@@ -25,6 +25,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from core.runtime.process import run_hardened_subprocess
 from core.runtime.workspace_lock import is_pid_running
 
 logger = logging.getLogger(__name__)
@@ -170,12 +171,10 @@ class TaskFinalizationCoordinator:
         if not (self.workspace / ".git").exists():
             return None
         try:
-            res = subprocess.run(
+            res = run_hardened_subprocess(
                 ["git", "rev-parse", "HEAD"],
                 cwd=self.workspace,
-                capture_output=True,
-                text=True,
-                check=False,
+                timeout=5.0,
             )
             if res.returncode == 0:
                 sha = res.stdout.strip()

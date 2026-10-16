@@ -40,6 +40,7 @@ class TestRemoteVerificationAlignment(unittest.TestCase):
         self.approval_store = InMemoryApprovalStore()
         self.approval_service = ApprovalService(self.approval_store)
         self.session_mgr = SessionManager()
+        (self.repo / "test_noop.py").write_text("import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n", encoding="utf-8")
 
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -47,7 +48,7 @@ class TestRemoteVerificationAlignment(unittest.TestCase):
     def _make_runtime(
         self,
         output: dict[str, str] | None = None,
-        default_test_cmd: str | None = 'python -c "pass"',
+        default_test_cmd: str | None = 'python -m unittest test_noop.py',
         verifier=None,
     ) -> BrainFrogRuntime:
         out_files = output if output is not None else {"safe_mod.py": "def add(a, b): return a + b\n"}
@@ -276,7 +277,7 @@ class TestRemoteVerificationAlignment(unittest.TestCase):
     # 7. Test command failure rolls back transaction and fails work
     # -------------------------------------------------------------------------
     def test_07_test_command_failure_rolls_back_and_fails_work(self) -> None:
-        runtime = self._make_runtime(default_test_cmd='python -c "import sys; sys.exit(1)"')
+        runtime = self._make_runtime(default_test_cmd='python -m unittest non_existent_test')
         pending = self._submit(runtime, channel="telegram")
         req_id = pending.metadata["request_id"]
         work_id = pending.metadata["remote_work"]["work_id"]
@@ -438,7 +439,7 @@ class TestRemoteVerificationAlignment(unittest.TestCase):
     # 12. No false verified-success response before proof persistence
     # -------------------------------------------------------------------------
     def test_12_no_false_verified_success_response(self) -> None:
-        runtime = self._make_runtime(default_test_cmd='python -c "import sys; sys.exit(42)"')
+        runtime = self._make_runtime(default_test_cmd='python -m unittest non_existent_test')
         pending = self._submit(runtime, channel="telegram")
         req_id = pending.metadata["request_id"]
 

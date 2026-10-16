@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, cast
 
 # Ensure UTF-8 output on Windows consoles
 if sys.platform == "win32":
@@ -120,8 +120,10 @@ def print_banner_box(
     message: str,
     level: str = "info",
     title: Optional[str] = None,
+    console: Optional[Console] = None,
 ) -> None:
     """Print semantic notification as plain styled text (no box border, no padding) for clean copy-paste."""
+    c = console or globals().get("console") or Console(legacy_windows=False)
     styles = {
         "error":   {"color": COLOR_ERROR,   "sym": SYM_ERROR,   "default_title": "Error"},
         "warning": {"color": COLOR_WARNING, "sym": SYM_WARNING, "default_title": "Warning"},
@@ -131,18 +133,18 @@ def print_banner_box(
     cfg = styles.get(level, styles["info"])
     box_title = f"{cfg['sym']} {title or cfg['default_title']}"
 
-    console.print()
+    c.print()
     # Title line with color (flush left for clean copy-paste)
-    console.print(Text.from_markup(f"[{cfg['color']} bold]{box_title}[/{cfg['color']} bold]"))
+    c.print(Text.from_markup(f"[{cfg['color']} bold]{box_title}[/{cfg['color']} bold]"))
     # Simple separator line (no enclosing 4-sided box border)
-    console.print(Text("─" * 40, style=cfg["color"]))
+    c.print(Text("─" * 40, style=cfg["color"]))
     # Message body flush left without box border or padding
     try:
         body = Text.from_markup(f"[{COLOR_FG_PRIMARY}]{message}[/{COLOR_FG_PRIMARY}]")
     except Exception:
         body = Text(message, style=COLOR_FG_PRIMARY)
-    console.print(body)
-    console.print()
+    c.print(body)
+    c.print()
 
 
 def _setup_multiline_key_detection() -> None:
@@ -207,7 +209,7 @@ LOCAL_PKG_ENV = Path(__file__).resolve().parent / ".env"
 def load_all_envs(repo_dir: Optional[Path] = None) -> None:
     """Load env vars in priority order: repo .env > ~/.brainfrog/.env > package .env."""
     if LOCAL_PKG_ENV.exists():
-        load_dotenv(LOCAL_PKG_ENV)
+        load_dotenv(LOCAL_PKG_ENV, override=True)
     if GLOBAL_ENV_FILE.exists():
         load_dotenv(GLOBAL_ENV_FILE, override=True)
     if repo_dir and (repo_dir / ".env").exists():
@@ -219,6 +221,15 @@ def ensure_anthropic_key() -> str:
     key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if key and not key.startswith("sk-ant-..."):
         return key
+
+    if not sys.stdin.isatty():
+        print_banner_box(
+            "Anthropic API Key not configured in environment (ANTHROPIC_API_KEY).\n"
+            "Non-interactive session cannot prompt for API key.",
+            level="error",
+            title="Anthropic Key Missing",
+        )
+        sys.exit(1)
 
     print_banner_box(
         "Anthropic API Key not configured.\n"
@@ -361,6 +372,119 @@ def detect_default_test_cmd(repo_dir: Path) -> str:
     if (repo_dir / "pytest.ini").exists() or (repo_dir / "tests").exists():
         return "pytest -q"
     return ""
+
+
+def resolve_verification_command(
+    repo_dir: Path,
+    configured_cmd: Optional[str] = None,
+    *,
+    task_description: str = "",
+    interactive: bool = True,
+    input_fn: Optional[Callable[[str], str]] = None,
+    console: Optional[Console] = None,
+) -> Tuple[Optional[str], bool]:
+    """Resolve the domain test command for verifying autonomous coding changes.
+
+    Workflow:
+    1. If a command is explicitly configured or detected, use it.
+    2. When undetected, prompt the user for an explicit test command.
+    3. Allow explicit user command, user cancellation, or skipping verification.
+    4. For non-interactive execution: fail closed (never block, never invent a command).
+    5. When declined or skipped, clearly explain resulting unverified status (COMMITTED_UNTESTED).
+
+    Returns:
+        Tuple of (resolved_command, was_cancelled):
+        - (cmd_string, False): A valid command was detected or supplied by the user.
+        - (None, False): Verification was declined/skipped or non-interactive execution with
+          no command. Invariants dictate fail-closed/unverified status (COMMITTED_UNTESTED).
+        - (None, True): User explicitly cancelled execution.
+    """
+    c = console or globals().get("console") or Console(legacy_windows=False)
+
+    # 1. Explicitly configured command takes precedence
+    if configured_cmd and str(configured_cmd).strip():
+        return str(configured_cmd).strip(), False
+
+    # 2. Workspace auto-detection
+    detected = detect_default_test_cmd(repo_dir)
+    if detected:
+        return detected, False
+
+    # 3. Non-interactive execution boundary
+    # Invariant: Never block waiting for input, never invent a test command.
+    is_non_interactive = (not interactive and not input_fn) or (input_fn is None and not sys.stdin.isatty())
+    if is_non_interactive:
+        print_banner_box(
+            "BrainFrog could not identify an automated verification command for this workspace.\n"
+            "Non-interactive execution cannot prompt for a command and will NOT invent one.\n\n"
+            "• Domain test verification: SKIPPED (non-interactive)\n"
+            "• Resulting Task Status: UNVERIFIED (COMMITTED_UNTESTED)\n"
+            "• The task will NOT be marked VERIFIED in the proof artifact.",
+            level="warning",
+            title="Verification Command Undetected",
+            console=c,
+        )
+        return None, False
+
+    # 4. Interactive user prompt: Inform user, offer explicit input, skip, or cancel
+    cols, rows, box_w, margin, pad = get_layout_dims()
+    prompt_banner = (
+        "BrainFrog could not automatically identify a verification command (e.g. pytest, npm test, gradle) "
+        "for this workspace.\n\n"
+        "To satisfy the verification gate ('Don't just trust the agent. Verify it.'):\n"
+        "• Enter a domain test command to execute and verify changes (e.g. 'pytest tests/' or 'npm test')\n"
+        "• Press [bold]Enter[/bold] or type '[bold]skip[/bold]' to decline verification\n"
+        "  (Changes will be applied transactionally but remain UNVERIFIED / COMMITTED_UNTESTED)\n"
+        "• Type '[bold]cancel[/bold]' to abort execution without modifying files"
+    )
+    print_banner_box(prompt_banner, level="warning", title="Verification Command Required", console=c)
+
+    prompt_str = (
+        f"{pad}[bold {COLOR_ACCENT}]▸[/bold {COLOR_ACCENT}] "
+        f"[{COLOR_FG_PRIMARY}]Verification Command [dim]('<cmd>' / 'skip' / 'cancel')[/dim]:[/{COLOR_FG_PRIMARY}] "
+    )
+
+    raw_input = ""
+    try:
+        if input_fn:
+            raw_input = input_fn(prompt_str)
+        else:
+            raw_input = c.input(prompt_str)
+    except (KeyboardInterrupt, EOFError):
+        c.print()
+        return None, True
+
+    cleaned = (raw_input or "").strip()
+
+    # User cancellation
+    if cleaned.lower() in ("c", "cancel", "abort", "quit", "q"):
+        print_banner_box("Eksekusi tugas dibatalkan oleh pengguna.", level="info", title="Task Cancelled", console=c)
+        return None, True
+
+    # User declined / skipped verification
+    if not cleaned or cleaned.lower() in ("s", "skip", "n", "no", "none"):
+        print_banner_box(
+            "Verifikasi domain dilewati oleh pengguna.\n\n"
+            "• Perubahan kode akan diterapkan secara transaksional di disk.\n"
+            "• Karena pengujian domain tidak dijalankan, status transaksi adalah COMMITTED_UNTESTED.\n"
+            "• Status tugas akhir akan menjadi UNVERIFIED dan TIDAK akan ditandai VERIFIED.",
+            level="warning",
+            title="Verification Declined",
+            console=c,
+        )
+        return None, False
+
+    # User supplied a command explicitly -> Show selected command before execution
+    print_banner_box(
+        f"Perintah verifikasi yang dipilih:\n"
+        f"[bold {COLOR_ACCENT}]{cleaned}[/bold {COLOR_ACCENT}]\n\n"
+        f"• Working Directory: [dim]{repo_dir}[/dim]\n"
+        f"• Hardened Boundary: Process isolation, timeout, bounded output, scrubbed secrets",
+        level="success",
+        title="Verification Command Selected",
+        console=c,
+    )
+    return cleaned, False
 
 
 def _resolve_relative_proof_path(path_str: Optional[str], repo_dir: Path, task_id: str) -> Optional[str]:
@@ -844,7 +968,7 @@ def verify_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = Fal
     return report.exit_code
 
 
-def show_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = False) -> int:
+def show_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = False, console: Optional[Console] = None) -> int:
     """CLI handler for proof inspection UX.
 
     Loads the authoritative proof artifact, displays full task evidence,
@@ -858,8 +982,9 @@ def show_proof_cli(repo_dir: Path, target: str, *, check_workspace: bool = False
     """
     from core.runtime.proof_inspection import inspect_proof, print_proof_inspection
 
+    c = console or globals().get("console") or Console(legacy_windows=False)
     result = inspect_proof(repo_dir, target, check_workspace=check_workspace)
-    print_proof_inspection(result, console=console)
+    print_proof_inspection(result, console=c)
     return result.exit_code
 
 
@@ -988,6 +1113,287 @@ def _print_turn_footer(chosen_model: str, provider_tag: str, box_w: int, right_m
         console.print()
 
 
+def review_and_confirm_plan(
+    plan: Any,
+    repo_dir: Path,
+    *,
+    active_test_cmd: Optional[str] = None,
+    console: Optional[Console] = None,
+    input_fn: Optional[Callable[[str], str]] = None,
+    interactive: bool = True,
+) -> str:
+    """Show concise pre-execution review of an active plan and collect user choice:
+      'execute' | 'refine' | 'cancel'
+
+    Contains:
+    - Plan title or task description.
+    - Available target files (or '(unspecified)').
+    - Explicit verification command(s), if present and validated (or '(unspecified)').
+    - Whether the plan is stale according to check_plan_staleness.
+    - Clear Execute / Refine / Cancel choice.
+
+    Safe non-interactive behavior: If confirmation cannot be collected (e.g. non-interactive stream,
+    EOFError, or interactive=False without explicit input_fn returning 'e'), returns 'cancel'
+    without silently approving execution.
+    """
+    c = console or globals().get("console") or Console(legacy_windows=False)
+    cols, rows, box_w, margin, pad = get_layout_dims()
+
+    plan_title = getattr(plan, "title", None) or getattr(plan, "goal", None) or getattr(plan, "filename", "Active Plan")
+    plan_file = f".brainfrog/plans/{getattr(plan, 'filename', '')}" if getattr(plan, "filename", None) else "(in-memory)"
+
+    # Target files (no fabrication)
+    target_files = list(getattr(plan, "relevant_files", None) or [])
+    if not target_files and hasattr(plan, "steps") and plan.steps:
+        for s in plan.steps:
+            if isinstance(s, dict) and s.get("files"):
+                target_files.extend(s["files"])
+    target_display = ", ".join(dict.fromkeys(target_files)) if target_files else "(unspecified)"
+
+    # Explicit verification command(s) (no fabrication)
+    v_cmds = getattr(plan, "verification_commands", None)
+    if v_cmds and isinstance(v_cmds, list) and len(v_cmds) > 0:
+        test_cmd_display = ", ".join(str(cmd) for cmd in v_cmds if str(cmd).strip()) or "(unspecified)"
+    elif v_cmds and isinstance(v_cmds, str) and v_cmds.strip():
+        test_cmd_display = v_cmds.strip()
+    else:
+        test_cmd_display = "(unspecified)"
+
+    # Check staleness
+    from core.plans import check_plan_staleness
+    is_stale = False
+    stale_reasons: List[str] = []
+    try:
+        is_stale, stale_reasons = check_plan_staleness(repo_dir, plan)
+    except Exception:
+        pass
+
+    stale_badge = f"[bold {COLOR_WARNING}]⚠️ STALE[/bold {COLOR_WARNING}]" if is_stale else f"[bold {COLOR_SUCCESS}]✓ FRESH[/bold {COLOR_SUCCESS}]"
+
+    table = Table(
+        title=" 📋 Pre-Execution Plan Review ",
+        box=box.ROUNDED,
+        border_style=COLOR_WARNING if is_stale else COLOR_ACCENT,
+        header_style=f"bold {COLOR_ACCENT}",
+        show_header=False,
+        padding=(0, 1),
+        width=box_w,
+    )
+    table.add_column("Property", style=f"bold {COLOR_FG_PRIMARY}", width=22)
+    table.add_column("Value", style=COLOR_FG_SECONDARY)
+    table.add_row("Plan Title", escape(sanitize_surrogates(str(plan_title))))
+    table.add_row("Plan Document", escape(sanitize_surrogates(plan_file)))
+    table.add_row("Target Scope", escape(sanitize_surrogates(target_display)))
+    table.add_row("Verification Spec", escape(sanitize_surrogates(test_cmd_display)))
+    table.add_row("Plan Status", stale_badge)
+
+    if is_stale and stale_reasons:
+        for r in stale_reasons:
+            table.add_row("Stale Reason", f"[bold {COLOR_WARNING}]• {escape(sanitize_surrogates(r))}[/bold {COLOR_WARNING}]")
+
+    c.print()
+    c.print(Align.center(table) if cols > 100 else table)
+    c.print()
+
+    # Clear choice prompt
+    prompt_str = (
+        f"{pad}[bold {COLOR_ACCENT}]▸[/bold {COLOR_ACCENT}] "
+        f"[{COLOR_FG_PRIMARY}]Tindakan:[/{COLOR_FG_PRIMARY}] "
+        f"[{COLOR_ACCENT} bold]e[/{COLOR_ACCENT} bold] Execute  ·  "
+        f"[{COLOR_INFO} bold]r[/{COLOR_INFO} bold] Refine  ·  "
+        f"[{COLOR_ERROR} bold]c[/{COLOR_ERROR} bold] Cancel "
+        f"[{COLOR_FG_MUTED}](e/r/c)[/{COLOR_FG_MUTED}]: "
+    )
+
+    # Safe non-interactive behavior
+    if not interactive and not input_fn:
+        print_banner_box("Eksekusi rencana memerlukan konfirmasi eksplisit (non-interactive rejection).", level="warning", title="Plan Review", console=c)
+        return "cancel"
+
+    raw_choice = ""
+    try:
+        if input_fn:
+            raw_choice = input_fn(prompt_str).strip().lower()
+        else:
+            if not sys.stdin.isatty():
+                print_banner_box("Eksekusi rencana memerlukan konfirmasi interaktif.", level="warning", title="Plan Review", console=c)
+                return "cancel"
+            raw_choice = c.input(prompt_str).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        c.print()
+        return "cancel"
+
+    if raw_choice in ("e", "execute", "yes", "y"):
+        if is_stale:
+            # Stale plan requires explicit revalidation confirmation
+            stale_prompt = f"{pad}[bold {COLOR_WARNING}]⚠️ Rencana stale karena perubahan codebase. Lanjutkan eksekusi? (y/N): [/bold {COLOR_WARNING}]"
+            stale_ans = ""
+            try:
+                if input_fn:
+                    stale_ans = input_fn(stale_prompt).strip().lower()
+                else:
+                    if not sys.stdin.isatty():
+                        return "cancel"
+                    stale_ans = c.input(stale_prompt).strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                c.print()
+                return "cancel"
+
+            if stale_ans not in ("y", "yes"):
+                print_banner_box("Eksekusi dibatalkan karena rencana berstatus stale.", level="info", title="Plan Cancelled", console=c)
+                return "cancel"
+
+        return "execute"
+    elif raw_choice in ("r", "refine"):
+        return "refine"
+    else:
+        return "cancel"
+
+
+def offer_post_task_actions(
+    task_res: Any,
+    repo_dir: Path,
+    *,
+    console: Optional[Console] = None,
+    input_fn: Optional[Callable[[str], str]] = None,
+    interactive: bool = True,
+) -> None:
+    """Present post-task evidence inspection actions:
+      'd': inspect task diff
+      'p': inspect proof artifact
+      'Enter': return to normal CLI prompt
+
+    Only shows an action when its underlying data is available.
+    Handles missing proof, missing diff, failed verification, cancellation,
+    and interrupted input without crashing.
+    """
+    c = console or globals().get("console") or Console(legacy_windows=False)
+    cols, rows, box_w, margin, pad = get_layout_dims()
+
+    # 1. Determine proof availability
+    proof_target: Optional[str] = None
+    task_id = getattr(task_res, "task_id", None)
+    if task_id:
+        from core.runtime.proof import FileProofStore
+        try:
+            store = FileProofStore(repo_dir)
+            if store.exists(task_id):
+                proof_target = task_id
+        except Exception:
+            pass
+    if not proof_target and getattr(task_res, "proof_path", None):
+        try:
+            p_cand = Path(task_res.proof_path)
+            if not p_cand.is_absolute():
+                p_cand = (repo_dir / p_cand).resolve()
+            if p_cand.is_file():
+                proof_target = str(p_cand)
+        except Exception:
+            pass
+    proof_available = (proof_target is not None)
+
+    # 2. Determine diff availability
+    diff_available = False
+    diff_text = ""
+    proof_art = getattr(task_res, "proof_artifact", None)
+    prov = getattr(proof_art, "provenance", None) if proof_art else None
+    commit_sha = getattr(prov, "commit_sha", None) if prov else None
+
+    if commit_sha:
+        try:
+            res = subprocess.run(
+                ["git", "diff", f"{commit_sha}~1", commit_sha],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                diff_text = res.stdout.strip()
+                diff_available = True
+            elif res.returncode != 0:
+                # Fallback for initial/root commit without parent
+                res_root = subprocess.run(
+                    ["git", "show", "--format=", commit_sha],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if res_root.returncode == 0 and res_root.stdout.strip():
+                    diff_text = res_root.stdout.strip()
+                    diff_available = True
+        except Exception:
+            pass
+
+    if not diff_available:
+        try:
+            res = subprocess.run(
+                ["git", "diff", "HEAD"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                diff_text = res.stdout.strip()
+                diff_available = True
+        except Exception:
+            pass
+
+    # Only show action when underlying data is available
+    if not proof_available and not diff_available:
+        return
+
+    # Non-interactive without custom input_fn must exit cleanly
+    if not interactive and not input_fn:
+        return
+
+    actions = []
+    if diff_available:
+        actions.append(f"[{COLOR_ACCENT} bold]d[/{COLOR_ACCENT} bold] View Diff")
+    if proof_available:
+        actions.append(f"[{COLOR_ACCENT} bold]p[/{COLOR_ACCENT} bold] Inspect Proof")
+    actions.append(f"[{COLOR_FG_MUTED}]Enter Continue[/{COLOR_FG_MUTED}]")
+
+    bar_str = "  ·  ".join(actions)
+    prompt_str = f"{pad}[bold {COLOR_ACCENT}]▸[/bold {COLOR_ACCENT}] [{COLOR_FG_PRIMARY}]Aksi ({bar_str}): [/{COLOR_FG_PRIMARY}]"
+
+    while True:
+        try:
+            if input_fn:
+                user_choice = input_fn(prompt_str).strip().lower()
+            else:
+                if not sys.stdin.isatty():
+                    break
+                user_choice = c.input(prompt_str).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            c.print()
+            break
+
+        if not user_choice or user_choice in ("enter", "c", "q", "continue", "exit", "n"):
+            break
+        elif user_choice == "d" and diff_available:
+            try:
+                c.print()
+                diff_title = Text.from_markup(f"[{COLOR_ACCENT} bold]▸ Task Git Diff[/{COLOR_ACCENT} bold]")
+                c.print(diff_title)
+                c.print(Text("─" * 40, style=COLOR_ACCENT))
+                c.print(Syntax(diff_text, "diff", theme="monokai", line_numbers=True))
+                c.print()
+            except Exception:
+                c.print(diff_text)
+        elif user_choice == "p" and proof_available and proof_target:
+            try:
+                show_proof_cli(repo_dir, proof_target, console=c)
+            except Exception as e:
+                c.print(f"[{COLOR_ERROR}]Gagal memuat proof: {escape(str(e))}[/{COLOR_ERROR}]")
+        else:
+            break
+
+
+
+
 def is_autonomous_coding_task(task: str, mode: str = "build", test_cmd: Optional[str] = None) -> bool:
     """Determine whether a task invocation represents an autonomous coding task.
 
@@ -1046,6 +1452,9 @@ def execute_task(
     runtime: Optional[Any] = None,
     user_id: str = "local",
     conversation_id: str = "default",
+    is_interactive: bool = False,
+    post_task_input_fn: Optional[Callable[[str], str]] = None,
+    verification_input_fn: Optional[Callable[[str], str]] = None,
 ) -> int:
     """Run a single task through the unified BrainFrogRuntime pipeline."""
     from core.runtime import (
@@ -1057,7 +1466,20 @@ def execute_task(
         TaskActiveError,
         TaskRecoveryRequiredError,
     )
-    from system2 import usage_tracker
+    from system2 import usage_tracker, get_system2_provider, validate_system2_provider_preflight
+
+    # Upfront provider preflight check before workspace locking or task reservation
+    eff_provider = get_system2_provider(provider)
+    if eff_provider == "antigravity":
+        try:
+            validate_system2_provider_preflight(eff_provider)
+        except Exception as e:
+            print_banner_box(
+                str(e),
+                level="error",
+                title="Antigravity Provider Preflight Blocked",
+            )
+            return 1
 
     if not (repo_dir / ".git").exists():
         ensure_git_remote(repo_dir)
@@ -1074,7 +1496,27 @@ def execute_task(
         except Exception:
             pass
 
-    active_test_cmd = test_cmd or detect_default_test_cmd(repo_dir)
+    if test_cmd is not None:
+        active_test_cmd = test_cmd
+    else:
+        detected_cmd = detect_default_test_cmd(repo_dir)
+        if detected_cmd:
+            active_test_cmd = detected_cmd
+        elif mode == "build" and is_autonomous_coding_task(task, mode=mode):
+            resolved_cmd, was_cancelled = resolve_verification_command(
+                repo_dir=repo_dir,
+                configured_cmd=None,
+                task_description=task,
+                interactive=is_interactive,
+                input_fn=verification_input_fn,
+                console=console,
+            )
+            if was_cancelled:
+                print_banner_box("Eksekusi tugas dibatalkan karena verifikasi dibatalkan oleh pengguna.", level="warning", title="Task Cancelled")
+                return 130
+            active_test_cmd = resolved_cmd or ""
+        else:
+            active_test_cmd = ""
     chosen_model = model or claude_model
 
     if runtime is None:
@@ -1137,7 +1579,7 @@ def execute_task(
 
         parsed_test_cmd = shlex.split(active_test_cmd) if active_test_cmd and active_test_cmd.strip() else None
 
-        req_meta = {
+        req_meta: Dict[str, Any] = {
             "repo_dir": str(repo_dir),
             "backend": backend,
             "provider": provider,
@@ -1185,6 +1627,9 @@ def execute_task(
 
         print_task_verification_report(task_res, repo_dir)
         _print_turn_footer(chosen_model or "claude", provider_tag, box_w, right_margin, margin)
+
+        if is_interactive or post_task_input_fn is not None:
+            offer_post_task_actions(task_res, repo_dir, interactive=is_interactive, input_fn=post_task_input_fn)
 
         # Return non-zero CLI exit code for failed verification or execution
         return 0 if (task_res.verified and task_res.success) else 1
@@ -1335,9 +1780,11 @@ SLASH_COMMAND_COMPLETIONS = [
     ("/forget", "Remove a learned rule by ID (e.g. /forget L-1234567890)"),
     ("/init", "Auto-generate modules.json for stack"),
     ("/status", "Show current workspace & agent status"),
+    ("/workspaces", "List registered workspaces in the installation registry"),
+    ("/workspace", "Select, register, or remove project workspaces"),
     ("/provider", "Switch AI provider (antigravity: Google Login, claude: Anthropic API)"),
     ("/models", "List available models for active provider"),
-    ("/model", "Switch model (e.g. gemini-3.8-flash-high, claude-sonnet-5)"),
+    ("/model", "OpenCode-style interactive model selector (/model, /model search, /model <prov>/<id>)"),
     ("/repo", "Switch target workspace repository"),
     ("/remote", "View or configure Git remote origin repository"),
     ("/test-cmd", "Change test command"),
@@ -1404,6 +1851,26 @@ class BrainFrogCompleter(Completer):
                     )
             return
 
+        # 1a. Model name autocomplete after "/model "
+        if text.lower().startswith("/model "):
+            prefix = text[len("/model "):]
+            from core.model_catalog import get_curated_provider_models, SUMOPOD_PRIORITY_MODELS
+            suggestions = ["search "]
+            for prov, models in get_curated_provider_models().items():
+                for mid, _, _ in models:
+                    suggestions.append(f"{prov}/{mid}")
+            for pmid in SUMOPOD_PRIORITY_MODELS:
+                suggestions.append(f"sumopod/{pmid}")
+            for opt in sorted(set(suggestions)):
+                if not prefix or opt.lower().startswith(prefix.lower()):
+                    yield Completion(
+                        opt,
+                        start_position=-len(prefix),
+                        display=opt,
+                        display_meta="AI Model",
+                    )
+            return
+
         # 1b. Slash commands autocomplete
         if text.startswith("/"):
             for cmd, desc in SLASH_COMMAND_COMPLETIONS:
@@ -1465,6 +1932,18 @@ PROVIDER_MODELS = {
         ("openai/gpt-4o", "GPT-4o", "OpenAI flagship via OpenRouter"),
         ("deepseek/deepseek-r1", "DeepSeek R1", "Open weights reasoning model"),
         ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B", "Fast open-weight model"),
+    ],
+    "sumopod": [
+        ("deepseek-chat", "DeepSeek Chat (V3)", "High performance coding & reasoning (Default)"),
+        ("deepseek-reasoner", "DeepSeek Reasoner (R1)", "DeepSeek R1 reasoning & logic thinking"),
+        ("kimi-latest", "Kimi Latest", "Long context & high speed coding (Moonshot)"),
+        ("moonshot-v1-8k", "Moonshot v1 8K", "Moonshot base 8K model"),
+        ("moonshot-v1-32k", "Moonshot v1 32K", "Moonshot medium 32K context model"),
+        ("moonshot-v1-128k", "Moonshot v1 128K", "Moonshot 128K long context model"),
+        ("glm-4", "GLM-4", "Zhipu flagship general coding & reasoning"),
+        ("glm-4-flash", "GLM-4 Flash", "Ultra-fast low-latency GLM model"),
+        ("glm-4-plus", "GLM-4 Plus", "Enhanced reasoning GLM-4 variant"),
+        ("glm-4-long", "GLM-4 Long", "1M long context GLM model"),
     ],
     "openai-compatible": [
         ("custom-model", "Custom Model", "Generic OpenAI-compatible model from .env"),
@@ -1592,6 +2071,7 @@ def select_provider_interactive(current_provider: str) -> Optional[str]:
         ("claude",      "claude",      "Anthropic API Key — pay per token"),
         ("openai",      "openai",      "OpenAI API Key (gpt-4o, o1, o3-mini)"),
         ("openrouter",  "openrouter",  "OpenRouter API Key (any model)"),
+        ("sumopod",     "sumopod",     "Sumopod AI API (DeepSeek, Kimi, GLM) — OpenAI-compatible"),
         ("openai-compatible", "openai-compatible", "Generic OpenAI-compatible endpoint"),
     ]
     return _picker("Providers", items, current_provider, id_col="Provider")
@@ -1643,6 +2123,51 @@ def show_doctor(repo_dir: Path) -> int:
         else:
             badge = f"[{COLOR_INFO}]ℹ INFO[/{COLOR_INFO}]"
         table.add_row(c.category, c.name, badge, c.detail)
+
+    console.print()
+    console.print(Align.center(table) if cols > 100 else table)
+    console.print()
+    return 0
+
+
+def show_models(provider: Optional[str] = None) -> int:
+    """Display available models for the active or requested provider."""
+    from system2 import get_system2_provider
+    from core.model_catalog import get_unified_model_catalog
+
+    active_provider = get_system2_provider(provider)
+    cols, rows, box_w, margin, pad = get_layout_dims()
+
+    table = Table(
+        title=f" 🤖 BrainFrog Models — {active_provider.capitalize()} ",
+        box=box.ROUNDED,
+        border_style=COLOR_FG_MUTED,
+        header_style=f"bold {COLOR_ACCENT}",
+        show_header=True,
+        padding=(0, 1),
+        width=box_w,
+    )
+    table.add_column("Model ID", style=f"bold {COLOR_FG_PRIMARY}", width=34)
+    table.add_column("Name", style=f"bold {COLOR_FG_SECONDARY}", width=25)
+    table.add_column("Source / Context Limit", style=COLOR_FG_SECONDARY)
+
+    catalog = get_unified_model_catalog(active_provider=active_provider, include_live=True)
+    has_live = any(e.is_live for e in catalog if e.provider == active_provider)
+    if has_live:
+        table.caption = f"[{COLOR_INFO}]● Source: Live API ({active_provider})[/{COLOR_INFO}]"
+    else:
+        table.caption = f"[{COLOR_FG_MUTED}]○ Source: Curated offline catalog[/{COLOR_FG_MUTED}]"
+
+    for entry in catalog:
+        if entry.provider != active_provider:
+            continue
+        if entry.status in ("unverified", "unavailable") or not entry.is_verified:
+            src_tag = f"[bold yellow]{entry.status.capitalize()}[/bold yellow]"
+        elif entry.is_live:
+            src_tag = "Live API ★" if entry.is_priority else "Live API"
+        else:
+            src_tag = "Catalog"
+        table.add_row(entry.model_id, entry.display_name, f"{src_tag} · {entry.context_limit:,} tokens")
 
     console.print()
     console.print(Align.center(table) if cols > 100 else table)
@@ -2239,6 +2764,8 @@ def run_interactive(
             ("/resume <id>", "Lanjutkan eksekusi work yang tertunda/crash", "Work"),
             ("/cancel <id>", "Batalkan work unit yang sedang aktif", "Work"),
             ("/status", "Tampilkan status workspace, branch git, dan agen saat ini", "System"),
+            ("/workspaces", "Lihat daftar workspace yang terdaftar di registry", "Workspace"),
+            ("/workspace", "Pilih, daftarkan, atau hapus workspace", "Workspace"),
             ("/repo <path>", "Pindah direktori repositori target workspace", "Workspace"),
             ("/remote [url]", "Lihat atau atur Git remote repository GitHub", "Workspace"),
             ("/test-cmd <cmd>", "Ganti perintah test runner (mis. pytest, npm test)", "Config"),
@@ -2270,6 +2797,45 @@ def run_interactive(
         default_model=active_model,
         default_test_cmd=active_test_cmd,
     )
+
+    def _apply_provider_model_switch(new_prov: str, new_mod: str) -> bool:
+        nonlocal active_provider, active_model
+        if new_prov == "antigravity":
+            try:
+                from system2 import validate_system2_provider_preflight
+                validate_system2_provider_preflight(new_prov)
+            except Exception as e:
+                print_banner_box(
+                    str(e),
+                    level="error",
+                    title="Antigravity Provider Preflight Blocked",
+                )
+                return False
+
+        active_provider = new_prov
+        active_model = new_mod
+        runtime.default_provider = new_prov
+        runtime.default_model = new_mod
+        try:
+            sess = runtime.sessions.get_or_create(channel="cli", user_id="local", conversation_id="default")
+            sess.active_provider = new_prov
+            sess.active_model = new_mod
+            runtime.sessions.save(sess)
+        except Exception:
+            pass
+
+        from system2.claude_client import get_model_context_limit
+        limit = get_model_context_limit(active_model)
+        print_banner_box(
+            f"Model AI aktif berhasil diganti ke:\n"
+            f"[bold {COLOR_ACCENT}]{active_provider}/{active_model}[/bold {COLOR_ACCENT}]\n\n"
+            f"• Provider: [bold]{active_provider}[/bold]\n"
+            f"• Context Limit: [bold]{limit:,}[/bold] tokens\n"
+            f"• Perubahan langsung aktif untuk System 2 turn berikutnya.",
+            level="success",
+            title="Model Switched",
+        )
+        return True
 
     while True:
         cols, rows = shutil.get_terminal_size(fallback=(95, 35))
@@ -2547,7 +3113,58 @@ def run_interactive(
                         skill=active_skill,
                         mode="plan",
                         runtime=runtime,
+                        is_interactive=False,
                     )
+
+                from plans import get_latest_plan, format_plan_handoff
+                lp = get_latest_plan(repo_dir)
+                if lp:
+                    plan_choice = review_and_confirm_plan(lp, repo_dir, active_test_cmd=active_test_cmd, interactive=True)
+                    if plan_choice == "execute":
+                        if not active_test_cmd and lp:
+                            v_cmds = getattr(lp, "verification_commands", None)
+                            if isinstance(v_cmds, list) and v_cmds:
+                                active_test_cmd = " ".join(str(c) for c in v_cmds if str(c).strip())
+                            elif isinstance(v_cmds, str) and v_cmds.strip():
+                                active_test_cmd = v_cmds.strip()
+                        if not active_test_cmd:
+                            res_cmd, res_cancelled = resolve_verification_command(
+                                repo_dir=repo_dir,
+                                configured_cmd=None,
+                                task_description=f"execute plan: {lp.title}",
+                                interactive=True,
+                                console=console,
+                            )
+                            if res_cancelled:
+                                print_banner_box("Eksekusi rencana dibatalkan. Mode tetap PLAN.", level="info", title="Plan Cancelled")
+                                continue
+                            active_test_cmd = res_cmd or ""
+                        active_mode = "build"
+                        active_plan_context = format_plan_handoff(lp, repo_dir)
+                        spin_exec = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas (Build)...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
+                        with Live(Padding(spin_exec, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
+                            execute_task(
+                                task=f"execute plan: {lp.title}",
+                                repo_dir=repo_dir,
+                                backend=active_backend,
+                                model=active_model,
+                                provider=active_provider,
+                                test_cmd=active_test_cmd,
+                                module_map=module_map,
+                                min_domain_confidence=min_domain_confidence,
+                                auto_pr=auto_pr,
+                                pr_risk_ceiling=pr_risk_ceiling,
+                                max_retries=max_retries,
+                                skill=active_skill,
+                                mode="build",
+                                plan_context=active_plan_context,
+                                runtime=runtime,
+                                is_interactive=True,
+                            )
+                    elif plan_choice == "refine":
+                        print_banner_box("Mode tetap PLAN untuk perbaikan rencana. Masukkan catatan atau instruksi tambahan.", level="info", title="Plan Refinement")
+                    else:
+                        print_banner_box("Eksekusi rencana dibatalkan. Mode tetap PLAN.", level="info", title="Plan Cancelled")
             else:
                 print_banner_box(
                     "Mode sesi beralih ke: [bold #4EC9B0]PLAN[/bold #4EC9B0]\n\n"
@@ -2564,67 +3181,87 @@ def run_interactive(
             active_mode = "build"
             from plans import get_latest_plan, format_plan_handoff, check_plan_staleness
             lp = get_latest_plan(repo_dir)
-            is_stale = False
-            stale_reasons = []
             if lp:
                 active_plan_context = format_plan_handoff(lp, repo_dir)
-                is_stale, stale_reasons = check_plan_staleness(repo_dir, lp)
+                plan_choice = review_and_confirm_plan(lp, repo_dir, active_test_cmd=active_test_cmd, interactive=True)
+                if plan_choice == "execute":
+                    if not active_test_cmd and lp:
+                        v_cmds = getattr(lp, "verification_commands", None)
+                        if isinstance(v_cmds, list) and v_cmds:
+                            active_test_cmd = " ".join(str(c) for c in v_cmds if str(c).strip())
+                        elif isinstance(v_cmds, str) and v_cmds.strip():
+                            active_test_cmd = v_cmds.strip()
+                    sub_task = parts[1].strip() if len(parts) > 1 else f"execute plan: {lp.title}"
+                    if not active_test_cmd:
+                        res_cmd, res_cancelled = resolve_verification_command(
+                            repo_dir=repo_dir,
+                            configured_cmd=None,
+                            task_description=sub_task,
+                            interactive=True,
+                            console=console,
+                        )
+                        if res_cancelled:
+                            print_banner_box("Eksekusi tugas dibatalkan oleh pengguna.", level="info", title="Task Cancelled")
+                            continue
+                        active_test_cmd = res_cmd or ""
+                    cols, rows, box_w, margin, pad = get_layout_dims()
+                    right_margin = max(0, cols - box_w - margin)
+                    from rich.padding import Padding
+                    from rich.live import Live
+                    from rich.spinner import Spinner
+                    spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas (Build)...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
+                    with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
+                        execute_task(
+                            task=sub_task,
+                            repo_dir=repo_dir,
+                            backend=active_backend,
+                            model=active_model,
+                            provider=active_provider,
+                            test_cmd=active_test_cmd,
+                            module_map=module_map,
+                            min_domain_confidence=min_domain_confidence,
+                            auto_pr=auto_pr,
+                            pr_risk_ceiling=pr_risk_ceiling,
+                            max_retries=max_retries,
+                            skill=active_skill,
+                            mode="build",
+                            plan_context=active_plan_context,
+                            runtime=runtime,
+                            is_interactive=True,
+                        )
+                elif plan_choice == "refine":
+                    active_mode = "plan"
+                    print_banner_box("Mode beralih ke: PLAN untuk perbaikan rencana. Masukkan instruksi tambahan.", level="info", title="Plan Refinement")
+                else:
+                    print_banner_box("Eksekusi rencana dibatalkan. Mode tetap BUILD tanpa eksekusi.", level="info", title="Plan Cancelled")
             else:
                 active_plan_context = None
-
-            if len(parts) > 1:
-                sub_task = parts[1].strip()
-                if is_stale and lp:
-                    print_banner_box(
-                        f"Rencana terakhir dimuat ([bold]{lp.title}[/bold]), tetapi repository telah berubah sejak dibuat:\n" +
-                        "\n".join([f"  • {r}" for r in stale_reasons]) +
-                        "\n\nAgent akan memeriksa ulang file terkait sebelum mengeksekusi.",
-                        level="warning",
-                        title="Stale Plan Warning",
-                    )
-                cols, rows, box_w, margin, pad = get_layout_dims()
-                right_margin = max(0, cols - box_w - margin)
-                from rich.padding import Padding
-                from rich.live import Live
-                from rich.spinner import Spinner
-                spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas (Build)...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
-                with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
-                    execute_task(
-                        task=sub_task,
-                        repo_dir=repo_dir,
-                        backend=active_backend,
-                        model=active_model,
-                        provider=active_provider,
-                        test_cmd=active_test_cmd,
-                        module_map=module_map,
-                        min_domain_confidence=min_domain_confidence,
-                        auto_pr=auto_pr,
-                        pr_risk_ceiling=pr_risk_ceiling,
-                        max_retries=max_retries,
-                        skill=active_skill,
-                        mode="build",
-                        plan_context=active_plan_context,
-                        runtime=runtime,
-                    )
-            else:
-                if lp:
-                    if is_stale:
-                        print_banner_box(
-                            f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
-                            f"Rencana terakhir dimuat: [bold]{lp.title}[/bold] (.brainfrog/plans/{lp.filename})\n\n"
-                            f"[bold #F6D32D]⚠️ Peringatan Perubahan Codebase:[/bold #F6D32D]\n" +
-                            "\n".join([f"  • {r}" for r in stale_reasons]) +
-                            "\n\nAgent akan memeriksa ulang file terkait sebelum mengeksekusi langkah.",
-                            level="warning",
-                            title="Mode: BUILD (Stale Plan)",
-                        )
-                    else:
-                        print_banner_box(
-                            f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
-                            f"Rencana terakhir dimuat: [bold]{lp.title}[/bold] (.brainfrog/plans/{lp.filename})\n"
-                            "Konteks rencana akan digunakan saat Anda memberikan instruksi implementasi.",
-                            level="success",
-                            title="Mode: BUILD",
+                if len(parts) > 1:
+                    sub_task = parts[1].strip()
+                    cols, rows, box_w, margin, pad = get_layout_dims()
+                    right_margin = max(0, cols - box_w - margin)
+                    from rich.padding import Padding
+                    from rich.live import Live
+                    from rich.spinner import Spinner
+                    spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi tugas (Build)...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
+                    with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
+                        execute_task(
+                            task=sub_task,
+                            repo_dir=repo_dir,
+                            backend=active_backend,
+                            model=active_model,
+                            provider=active_provider,
+                            test_cmd=active_test_cmd,
+                            module_map=module_map,
+                            min_domain_confidence=min_domain_confidence,
+                            auto_pr=auto_pr,
+                            pr_risk_ceiling=pr_risk_ceiling,
+                            max_retries=max_retries,
+                            skill=active_skill,
+                            mode="build",
+                            plan_context=None,
+                            runtime=runtime,
+                            is_interactive=True,
                         )
                 else:
                     print_banner_box(
@@ -2655,6 +3292,27 @@ def run_interactive(
                 f"[{COLOR_FG_PRIMARY}]Test Command:[/{COLOR_FG_PRIMARY}] [{COLOR_FG_MUTED}]{active_test_cmd}[/{COLOR_FG_MUTED}]"
             )
             print_banner_box(status_text, level="info", title="System Status")
+            continue
+        elif lower == "/workspaces":
+            from core.runtime.messages import IncomingMessage
+            msg = IncomingMessage(text="/workspaces", channel="cli", user_id="local", conversation_id="default")
+            resp = runtime.handle_message(msg)
+            print_banner_box(resp.text, level="info" if resp.success else "error", title="Workspaces")
+            continue
+        elif lower.startswith("/workspace"):
+            from core.runtime.messages import IncomingMessage
+            msg = IncomingMessage(text=prompt, channel="cli", user_id="local", conversation_id="default")
+            resp = runtime.handle_message(msg)
+            if resp.success and "Workspace switched to" in resp.text:
+                try:
+                    active_sess = runtime.sessions.get_or_create(channel="cli", user_id="local", conversation_id="default")
+                    new_ws = runtime.get_session_workspace(active_sess, msg)
+                    repo_dir = new_ws
+                    active_test_cmd = detect_default_test_cmd(repo_dir)
+                    ensure_git_remote(repo_dir)
+                except Exception:
+                    pass
+            print_banner_box(resp.text, level="success" if resp.success else "error", title="Workspace")
             continue
         elif (
             lower in ("/show-proof", "/proof")
@@ -3288,56 +3946,107 @@ def run_interactive(
                     target_prov = "antigravity"
                 elif arg == "2" or arg in ("claude", "anthropic"):
                     target_prov = "claude"
+                elif arg == "3" or arg in ("openai", "gpt"):
+                    target_prov = "openai"
+                elif arg == "4" or arg in ("openrouter", "or"):
+                    target_prov = "openrouter"
+                elif arg == "5" or arg in ("sumopod", "sumo"):
+                    target_prov = "sumopod"
+                elif arg == "6" or arg in ("openai-compatible", "custom"):
+                    target_prov = "openai-compatible"
                 else:
-                    print_banner_box(f"Provider tidak dikenal: {parts[1]}.\nPilihan: 1 (antigravity), 2 (claude)", level="error", title="Provider Error")
+                    print_banner_box(f"Provider tidak dikenal: {parts[1]}.\nPilihan: 1 (antigravity), 2 (claude), 3 (openai), 4 (openrouter), 5 (sumopod)", level="error", title="Provider Error")
                     continue
             else:
                 target_prov = select_provider_interactive(active_provider)
 
             if target_prov:
                 if target_prov != active_provider:
-                    active_provider = target_prov
-                    if active_provider == "antigravity":
-                        active_model = "gemini-3.8-flash-high"
-                        print_banner_box("Provider AI diganti ke Google Antigravity (Google Auth Login)!\nModel default: gemini-3.8-flash-high", level="success", title="Provider Switched")
+                    if target_prov == "antigravity":
+                        def_mod = "gemini-3.8-flash-high"
+                    elif target_prov == "sumopod":
+                        def_mod = os.environ.get("SUMOPOD_MODEL") or "deepseek-chat"
+                    elif target_prov == "openai":
+                        def_mod = os.environ.get("OPENAI_MODEL") or "gpt-4o"
+                    elif target_prov == "openrouter":
+                        def_mod = os.environ.get("OPENROUTER_MODEL") or "openai/gpt-4o"
+                    elif target_prov == "openai-compatible":
+                        def_mod = os.environ.get("BRAINFROG_MODEL_NAME") or "custom-model"
                     else:
-                        active_model = "claude-sonnet-5"
-                        print_banner_box("Provider AI diganti ke Claude (Anthropic API Key)!\nModel default: claude-sonnet-5", level="success", title="Provider Switched")
+                        def_mod = "claude-sonnet-5"
+                    _apply_provider_model_switch(target_prov, def_mod)
                 else:
                     print_banner_box(f"Provider aktif tetap: [bold {COLOR_ACCENT}]{active_provider}[/bold {COLOR_ACCENT}]", level="info", title="Provider")
             continue
-        elif lower == "/models":
-            chosen = select_model_interactive(active_provider, active_model)
+        elif lower in ("/models", "/model"):
+            from core.model_catalog import select_model_opencode
+            chosen = select_model_opencode(active_provider, active_model)
             if chosen:
-                if chosen != active_model:
-                    active_model = chosen
-                    print_banner_box(f"Model AI aktif diganti ke:\n[bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}]", level="success", title="Model Switched")
+                new_prov, new_mod = chosen
+                if new_prov != active_provider or new_mod != active_model:
+                    _apply_provider_model_switch(new_prov, new_mod)
                 else:
-                    print_banner_box(f"Model aktif tetap:\n[bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}]", level="info", title="Model")
+                    print_banner_box(f"Model aktif tetap:\n[bold {COLOR_ACCENT}]{active_provider}/{active_model}[/bold {COLOR_ACCENT}]", level="info", title="Model")
             continue
-        elif lower.startswith("/model"):
-            parts = prompt.split(maxsplit=1)
-            if len(parts) > 1:
-                arg = parts[1].strip()
-                models = PROVIDER_MODELS.get(active_provider, [])
-                if arg.isdigit():
-                    idx = int(arg)
-                    if 1 <= idx <= len(models):
-                        active_model = models[idx - 1][0]
-                        print_banner_box(f"Model AI aktif diganti ke:\n[bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}]", level="success", title="Model Switched")
-                    else:
-                        print_banner_box(f"Angka tidak valid: {arg}. Pilihan: 1–{len(models)}.", level="error", title="Model Error")
+        elif lower.startswith("/model "):
+            from core.model_catalog import (
+                get_unified_model_catalog,
+                search_model_catalog,
+                resolve_model_selection,
+                select_model_opencode,
+            )
+            arg = prompt.split(maxsplit=1)[1].strip()
+            if arg.lower().startswith("search ") or arg.lower() == "search":
+                q = arg[len("search"):].strip()
+                cat = get_unified_model_catalog(include_live=True)
+                results = search_model_catalog(cat, q)
+
+                if not sys.stdin.isatty():
+                    cols, rows, box_w, margin, pad = get_layout_dims()
+                    table = Table(
+                        title=f" 🔍 Model Search: '{q}' ({len(results)} matches) ",
+                        box=box.ROUNDED,
+                        border_style=COLOR_FG_MUTED,
+                        header_style=f"bold {COLOR_ACCENT}",
+                        width=box_w,
+                    )
+                    table.add_column("Provider / Model ID", style=f"bold {COLOR_FG_PRIMARY}", width=38)
+                    table.add_column("Source", style=COLOR_INFO, width=14)
+                    table.add_column("Context Limit", style=COLOR_FG_SECONDARY, width=18)
+                    table.add_column("Description", style=COLOR_FG_MUTED)
+                    for entry in results[:20]:
+                        if entry.status in ("unverified", "unavailable") or not entry.is_verified:
+                            src_tag = f"[bold yellow]{entry.status.capitalize()}[/bold yellow]"
+                        elif entry.is_live:
+                            src_tag = "[bold green]Live API ★[/bold green]" if getattr(entry, "is_priority", False) else "[bold cyan]Live API[/bold cyan]"
+                        else:
+                            src_tag = "[dim]Catalog[/dim]"
+                        table.add_row(entry.full_id, src_tag, f"{entry.context_limit:,} tokens", entry.description)
+                    if not results:
+                        table.add_row("", f"[yellow]Tidak ada model cocok dengan '{q}'[/yellow]", "", "")
+                    table.caption = f"[{COLOR_FG_MUTED}]Gunakan: /model <provider>/<model-id> untuk mengaktifkan[/{COLOR_FG_MUTED}]"
+                    console.print()
+                    console.print(Align.center(table) if cols > 100 else table)
+                    console.print()
                 else:
-                    active_model = arg
-                    print_banner_box(f"Model AI aktif diganti ke:\n[bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}]", level="success", title="Model Switched")
-            else:
-                chosen = select_model_interactive(active_provider, active_model)
-                if chosen:
-                    if chosen != active_model:
-                        active_model = chosen
-                        print_banner_box(f"Model AI aktif diganti ke:\n[bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}]", level="success", title="Model Switched")
-                    else:
-                        print_banner_box(f"Model aktif tetap:\n[bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}]", level="info", title="Model")
+                    chosen = select_model_opencode(active_provider, active_model, initial_query=q, catalog=cat)
+                    if chosen:
+                        new_prov, new_mod = chosen
+                        if new_prov != active_provider or new_mod != active_model:
+                            _apply_provider_model_switch(new_prov, new_mod)
+                        else:
+                            print_banner_box(f"Model aktif tetap:\n[bold {COLOR_ACCENT}]{active_provider}/{active_model}[/bold {COLOR_ACCENT}]", level="info", title="Model")
+                continue
+
+            cat = get_unified_model_catalog(include_live=True)
+            new_prov, new_mod, err = resolve_model_selection(arg, cat, active_provider)
+            if err:
+                print_banner_box(err, level="error", title="Model Selection Error")
+            elif new_prov and new_mod:
+                if new_prov != active_provider or new_mod != active_model:
+                    _apply_provider_model_switch(new_prov, new_mod)
+                else:
+                    print_banner_box(f"Model aktif tetap:\n[bold {COLOR_ACCENT}]{active_provider}/{active_model}[/bold {COLOR_ACCENT}]", level="info", title="Model")
             continue
         elif lower == "/domains":
             domains = load_module_map(repo_dir, Path(module_map) if module_map else None, auto_create=False)
@@ -3392,6 +4101,34 @@ def run_interactive(
             else:
                 continue
 
+        # Check if this prompt is an execution trigger for an active plan
+        if active_mode == "build":
+            from plans import get_latest_plan, format_plan_handoff
+            lp = get_latest_plan(repo_dir)
+            task_clean = task_text.strip().lower()
+            plan_triggers = {
+                "execute from plans.", "execute from plans", "execute from plan", "execute plan",
+                "eksekusi plan", "jalankan plan", "run the plan", "run plan", "implement plan",
+                "build from plan", "sesuai plan", "gass", "gas", "do it", "lanjutkan", "kerjakan plan",
+                "execute", "eksekusi", "jalankan",
+            }
+            is_direct_plan_exec = (
+                task_clean in plan_triggers
+                or any(kw in task_clean for kw in ("execute from plan", "execute plan", "jalankan plan", "eksekusi plan", "sesuai plan", "run the plan", "build from plan"))
+            )
+            if lp and is_direct_plan_exec:
+                choice = review_and_confirm_plan(lp, repo_dir, active_test_cmd=active_test_cmd, interactive=True)
+                if choice == "cancel":
+                    print_banner_box("Eksekusi rencana dibatalkan. Tidak ada berkas yang diubah.", level="info", title="Plan Cancelled")
+                    staged_images.clear()
+                    continue
+                elif choice == "refine":
+                    active_mode = "plan"
+                    print_banner_box("Mode beralih ke: PLAN untuk perbaikan rencana.", level="info", title="Plan Refinement")
+                    staged_images.clear()
+                    continue
+                active_plan_context = format_plan_handoff(lp, repo_dir)
+
         # Execute task with live braille spinner aligned with text box
         cols, rows, box_w, margin, pad = get_layout_dims()
         right_margin = max(0, cols - box_w - margin)
@@ -3411,6 +4148,20 @@ def run_interactive(
                 badge_lines.append(f"  [bold #4EC9B0]🖼️ [Image attached: {img.filename}][/bold #4EC9B0] [{COLOR_FG_MUTED}]({img.size_kb:.1f} KB, source: {img.source})[/{COLOR_FG_MUTED}]")
             console.print("\n".join(badge_lines))
             console.print()
+
+        if active_mode == "build" and not active_test_cmd and is_autonomous_coding_task(task_text, mode=active_mode):
+            res_cmd, res_cancelled = resolve_verification_command(
+                repo_dir=repo_dir,
+                configured_cmd=None,
+                task_description=task_text,
+                interactive=True,
+                console=console,
+            )
+            if res_cancelled:
+                print_banner_box("Eksekusi tugas dibatalkan oleh pengguna.", level="info", title="Task Cancelled")
+                staged_images.clear()
+                continue
+            active_test_cmd = res_cmd or ""
 
         app_state["status"] = "Processing..."
         app_state["icon"] = "◌"
@@ -3438,6 +4189,7 @@ def run_interactive(
                 plan_context=active_plan_context if active_mode == "build" else None,
                 attached_images=turn_images,
                 runtime=runtime,
+                is_interactive=True,
             )
 
         # Clear staged images once submitted
@@ -3465,7 +4217,7 @@ def main() -> int:
     p.add_argument("-t", "--test-cmd", default=None, help="Shell command for running test suite")
     p.add_argument("-b", "--backend", choices=["jev", "typesafe", "auto"], default="jev", help="System 1 decision backend (jev | typesafe)")
     p.add_argument("-m", "--model", "--claude-model", dest="model", default=None, help="Model name (e.g. gemini-3.8-flash-high, claude-sonnet-5)")
-    p.add_argument("--provider", default=None, help="System 2 AI provider (antigravity, claude, openai, openrouter, openai-compatible)")
+    p.add_argument("--provider", default=None, help="System 2 AI provider (antigravity, claude, openai, openrouter, sumopod, openai-compatible)")
     p.add_argument("--skill", default=None, help="Explicitly activate a modular skill (e.g. --skill audit-anti-slop)")
     p.add_argument("--mode", choices=["build", "plan"], default="build", help="Session mode: build (default) or plan")
     p.add_argument("--auto-pr", action="store_true", help="Push branch and open GitHub PR when approved")
@@ -3477,6 +4229,8 @@ def main() -> int:
     p.add_argument("--show-proof", default=None, help="Inspect detailed verification proof evidence for task ID or path")
     p.add_argument("--list-proofs", action="store_true", default=False, help="List all local verification proof artifacts")
     p.add_argument("--proofs", action="store_true", default=False, help="Alias for --list-proofs")
+    p.add_argument("--list-models", action="store_true", default=False, help="List available models for the configured provider")
+    p.add_argument("--models", action="store_true", default=False, help="Alias for --list-models")
     p.add_argument(
         "--check-workspace",
         action="store_true",
@@ -3501,6 +4255,13 @@ def main() -> int:
     chosen_task = (raw_task or "").strip()
     if chosen_task in ("doctor", "/doctor"):
         return show_doctor(repo_dir)
+
+    if (
+        chosen_task in ("models", "/models", "list-models", "/list-models")
+        or getattr(args, "list_models", False)
+        or getattr(args, "models", False)
+    ):
+        return show_models(provider=args.provider)
 
     if (
         chosen_task in ("list-proofs", "/list-proofs", "proofs", "/proofs")
@@ -3556,18 +4317,19 @@ def main() -> int:
         subaction = parts[1] if len(parts) > 1 else "start"
         return show_gateway(repo_dir, action=subaction)
 
-    from system2 import get_system2_provider, find_antigravity_bin
+    from system2 import get_system2_provider, find_antigravity_bin, validate_system2_provider_preflight
 
     active_provider = get_system2_provider(args.provider)
     if active_provider == "claude":
         ensure_anthropic_key()
     elif active_provider == "antigravity":
-        if not find_antigravity_bin():
+        try:
+            validate_system2_provider_preflight(active_provider)
+        except Exception as e:
             print_banner_box(
-                "Google Antigravity CLI ('agy.exe') not found.\n"
-                "Ensure Antigravity is installed in ~/.gemini/bin or set ANTIGRAVITY_BIN.",
+                str(e),
                 level="error",
-                title="Antigravity Not Found",
+                title="Antigravity Provider Preflight Blocked",
             )
             return 1
 

@@ -342,7 +342,7 @@ def run_skill_script(
 ) -> subprocess.CompletedProcess:
     """Run a validated skill script safely with discrete arguments (shell=False)."""
     is_safe, msg, cmd = validate_skill_script(script_name, args, skill, repo_dir)
-    if not is_safe:
+    if not is_safe or not cmd:
         return subprocess.CompletedProcess(
             args=cmd or [script_name],
             returncode=1,
@@ -350,21 +350,28 @@ def run_skill_script(
             stderr=f"Security Validation Error: {msg}",
         )
 
+    clean_name = Path(script_name).name
+    script_path = skill.scripts[clean_name].resolve()
+    from core.runtime.command_policy import CommandPolicy
+    from core.runtime.process import run_hardened_subprocess
+
+    skill_policy = CommandPolicy(allowed_script_paths=[script_path])
+
     try:
-        return subprocess.run(
+        res = run_hardened_subprocess(
             cmd,
             cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            timeout=float(timeout),
+            command_policy=skill_policy,
         )
-    except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
             args=cmd,
-            returncode=124,
-            stdout="",
-            stderr=f"Script execution timed out after {timeout} seconds.",
+            returncode=res.returncode,
+            stdout=res.stdout,
+            stderr=res.stderr,
         )
+    except KeyboardInterrupt:
+        raise
     except Exception as exc:
         return subprocess.CompletedProcess(
             args=cmd,

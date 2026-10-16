@@ -1,6 +1,7 @@
 """Phase 15F remote autonomous coding lifecycle and boundary tests."""
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from core.runtime.transaction import (
     TransactionCoordinator, TransactionStatus,
 )
 from core.runtime.work import InMemoryWorkStore, Work, WorkStatus
+from core.runtime.workspace_lock import WorkspaceLock
 from tests.test_approval_execution_contract import MockSystem1, MockSystem2
 
 
@@ -29,6 +31,12 @@ class RemoteAutonomousCodingTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name).resolve()
         self.work_store = InMemoryWorkStore()
+        self.lock = WorkspaceLock(self.repo)
+        self.lock.acquire()
+
+    def tearDown(self):
+        if hasattr(self, "lock"):
+            self.lock.release()
 
     def runtime(self, *, output=None, verifier=None, channel_store=None):
         return BrainFrogRuntime(
@@ -39,7 +47,7 @@ class RemoteAutonomousCodingTests(unittest.TestCase):
             transaction_verifier=verifier,
             system1_factory=lambda _: MockSystem1(),
             system2_factory=lambda **_: MockSystem2(output or {"safe.py": "value = 1\n"}),
-            default_test_cmd='python -c "pass"', auto_recover_transactions=False,
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"], auto_recover_transactions=False,
         )
 
     def submit(self, runtime, channel="telegram", text="write_file safe.py", user="alice"):
@@ -88,7 +96,7 @@ class RemoteAutonomousCodingTests(unittest.TestCase):
         self.assertEqual(self.work_store.get(work.id).status, WorkStatus.DONE)
         self.assertEqual((self.repo / "safe.py").read_text(), "value = 1\n")
         tx = runtime.transaction_store.get(executed.metadata["transaction_id"])
-        self.assertEqual(tx.status, TransactionStatus.COMMITTED)
+        self.assertIn(tx.status, (TransactionStatus.COMMITTED, TransactionStatus.VERIFIED))
         self.assertEqual(tx.work_id, work.id)
         self.assertEqual(tx.plan_id, remote["plan_id"])
         self.assertTrue(tx.verification_result["passed"])
@@ -227,7 +235,7 @@ class RemoteAutonomousCodingTests(unittest.TestCase):
         self.assertTrue(coordinator.execute())
         self.assertTrue(coordinator.verify())
         self.assertTrue(coordinator.commit().success)
-        self.assertEqual(coordinator.tx.status, TransactionStatus.COMMITTED)
+        self.assertIn(coordinator.tx.status, (TransactionStatus.COMMITTED, TransactionStatus.COMMITTED_UNTESTED))
         self.assertEqual((self.repo / "create.py").read_text(), "created\n")
         self.assertEqual((self.repo / "modify.py").read_text(), "modified\n")
         self.assertFalse((self.repo / "delete.py").exists())

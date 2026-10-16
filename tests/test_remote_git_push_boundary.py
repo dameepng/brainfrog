@@ -76,7 +76,8 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
 
         # Initial commit in working repo
         (self.work_dir / "README.md").write_text("# Project Root\n", encoding="utf-8")
-        subprocess.run(["git", "add", "README.md"], cwd=self.work_dir, check=True)
+        (self.work_dir / "test_noop.py").write_text("import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md", "test_noop.py"], cwd=self.work_dir, check=True)
         subprocess.run(["git", "commit", "-m", "chore: initial commit"], cwd=self.work_dir, check=True, capture_output=True)
 
         # Link bare remote as 'origin' and push initial commit
@@ -555,7 +556,7 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
             task="create safe.py",
             repo_dir=self.work_dir,
             auto_pr=True,  # Even with auto_pr True
-            test_command=["python", "-c", "import sys; sys.exit(0)"],
+            test_command=["python", "-m", "unittest", "test_noop.py"],
             execution_contract=contract,
             origin_channel="telegram",
             allow_remote_git_push=False,
@@ -599,7 +600,7 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
             system1_factory=lambda b: mock_s1,
             system2_factory=lambda **kw: mock_s2,
             require_approval=True,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd='python -m unittest test_noop.py',
         )
 
         user_id = "tg_dev_1001"
@@ -684,7 +685,7 @@ class TestRemoteGitPushBoundary(unittest.TestCase):
             system1_factory=lambda b: mock_s1,
             system2_factory=lambda **kw: mock_s2,
             require_approval=True,
-            default_test_cmd='python -c "pass"',
+            default_test_cmd='python -m unittest test_noop.py',
         )
 
         user_id = "wa_dev_888"

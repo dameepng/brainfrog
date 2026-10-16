@@ -15,6 +15,7 @@ import concurrent.futures
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -726,7 +727,7 @@ class TestEndToEndRuntimeIntegration(unittest.TestCase):
             approval_service=self.service,
             require_approval=True,
             two_man_rule_enabled=True,
-            default_test_cmd=['python', '-c', 'pass'],
+            default_test_cmd=[sys.executable, "-m", "unittest", "--help"],
         )
 
     def tearDown(self) -> None:
