@@ -80,6 +80,23 @@ Incoming Channel (CLI / Telegram / WhatsApp)
 
 ---
 
+## Engineering Skills
+
+BrainFrog includes focused engineering workflows that guide agents through understanding a codebase, making a scoped change, preserving behavior during refactoring, and reviewing concrete defects. They complement the existing diagnosis, behavioral testing, result verification, and UI audit skills.
+
+| Skill | Engineering workflow |
+| :--- | :--- |
+| `understand-codebase` | Trace relevant execution paths, state ownership, and change boundaries using supplied code. |
+| `implement-code-change` | Define observable acceptance criteria, reuse existing extension points, and distinguish generated changes from verified results. |
+| `refactor-code-safely` | Preserve public contracts and behavioral invariants while restructuring code in small, coherent steps. |
+| `review-code-change` | Report actionable defects with a location, triggering condition, consequence, and targeted correction. |
+
+Normal Orchestrator runs select one skill from the task's primary intent, including supported English and Indonesian prompts. In the interactive CLI, use `/skills` to list available skills. Enter `/skill implement-code-change` as its own message, then enter the task in the next message; `/skill auto` restores automatic selection.
+
+The skill text guides the model within the current method's response format and execution scope. The runtime continues to own permissions, file application, and test execution. See [Engineering skills](docs/engineering-skills.md) for examples, selection behavior, installation limits, and review scenarios.
+
+---
+
 ## Quickstart: Verify Agent Work in 60 Seconds (Public Beta)
 
 > **"Don't just trust the agent. Verify it."**
