@@ -1348,8 +1348,14 @@ class Orchestrator:
             if existing_plan is not None:
                 plan_filename = existing_plan.filename
             else:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                plan_filename = f"{timestamp}_{slug}.md"
+                plans_dir = Path(self.cfg.repo_dir) / ".brainfrog" / "plans"
+                base_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                candidate = f"{base_ts}_{slug}.md"
+                counter = 1
+                while (plans_dir / candidate).exists() or (plans_dir / f"{Path(candidate).stem}.meta.json").exists():
+                    candidate = f"{base_ts}_{slug}_{counter}.md"
+                    counter += 1
+                plan_filename = candidate
 
             commit_hash = ""
             git_status = ""
