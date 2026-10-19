@@ -91,6 +91,10 @@ class RunConfig:
     last_transaction_result: Optional[Any] = None
     last_test_result: Optional[Any] = None
     allowed_scope: Optional[Sequence[str]] = None
+    step_timeout: float = 60.0
+    progress_tracker: Optional[Any] = None
+    last_step_runner: Optional[Any] = None
+    active_plan: Optional[Any] = None
 
 
 @dataclass
@@ -449,6 +453,7 @@ def validate_and_stage_files(
     repo_dir: Path,
     files: Dict[str, str],
     contract: Optional[ApprovedExecutionContract] = None,
+    plan_id: Optional[str] = None,
 ) -> List[Tuple[Path, str]]:
     """Validate all files against path traversal and execution contract before any write.
 
@@ -468,6 +473,9 @@ def validate_and_stage_files(
 
     repo_res = repo_dir.resolve()
     staged: List[Tuple[Path, str]] = []
+
+    if contract is not None:
+        contract.validate_plan_binding(repo_res, expected_plan_id=plan_id)
 
     for raw_rel, content in files.items():
         if contract is not None:
@@ -513,9 +521,17 @@ def _write_files(
         raise PermissionError(
             "Modifikasi berkas source code dilarang dalam mode Plan. Gunakan mode Build untuk melakukan perubahan."
         )
+    if mode == "chat":
+        raise PermissionError(
+            "Modifikasi berkas source code dilarang dalam mode Chat. Gunakan mode Build untuk melakukan perubahan."
+        )
+
+    # Validate plan binding if contract is present
+    if contract is not None:
+        contract.validate_plan_binding(repo_dir, expected_plan_id=plan_id)
 
     # Validate all files before writing the first file (Fail-closed, zero partial writes)
-    staged = validate_and_stage_files(repo_dir, files, contract=contract)
+    staged = validate_and_stage_files(repo_dir, files, contract=contract, plan_id=plan_id)
 
     from core.runtime.workspace_lock import WorkspaceLock
     with WorkspaceLock(repo_dir, session_id=session_id, task_id=task_id):
@@ -774,11 +790,61 @@ SAFE_TO_PROCEED_QUESTION = NoulQuestion(
 RISK_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
+def _primary_task_text(task: str) -> str:
+    """Extract the primary user prompt, stripping appended conversation history."""
+    if not task:
+        return ""
+    return task.split("\n[Previous Conversation Context]")[0].strip()
+
+
+def extract_literal_output(task: str) -> Optional[str]:
+    """Extract unambiguous requested literal output string from explicit directives.
+
+    Returns the literal string to emit if the prompt is an unambiguous literal-output directive,
+    or None if it should be handled through normal conversational/planning paths.
+    """
+    primary = _primary_task_text(task)
+    if not primary:
+        return None
+
+    patterns = [
+        # Indonesian: "balas hanya dengan teks: PONG", "jawab hanya dengan: PONG", "balas hanya PONG"
+        r"^(?:tolong\s+)?balas\s+hanya(?:\s*:\s*|\s+(?:(?:dengan\s+teks|dengan|teks)\s*[:\s]\s*|:\s*)?)?(.+)$",
+        r"^(?:tolong\s+)?jawab\s+hanya(?:\s*:\s*|\s+(?:(?:dengan\s+teks|dengan|teks)\s*[:\s]\s*|:\s*)?)?(.+)$",
+        r"^(?:tolong\s+)?balas\s+dengan\s+teks\s*[:\s]\s*(.+)$",
+        r"^(?:tolong\s+)?jawab\s+dengan\s+teks\s*[:\s]\s*(.+)$",
+        # English: "reply with only PONG", "reply only with text: PONG", "say only PONG", "output only text: PONG"
+        r"^reply\s+(?:with\s+only|only\s+with)\s+(?:text\s*[:\s]\s*|:\s*)?(.+)$",
+        r"^reply\s+only\s+(?:with\s+)?(?:text\s*[:\s]\s*|:\s*)?(.+)$",
+        r"^reply\s+only\s*[:\s]\s*(.+)$",
+        r"^reply\s+with\s+only\s+(.+)$",
+        r"^respond\s+(?:with\s+only|only\s+with)\s+(?:text\s*[:\s]\s*|:\s*)?(.+)$",
+        r"^respond\s+only\s+(?:with\s+)?(?:text\s*[:\s]\s*|:\s*)?(.+)$",
+        r"^say\s+only\s*[:\s]\s*(.+)$",
+        r"^output\s+only\s+(?:text\s*[:\s]\s*|:\s*)?(.+)$",
+    ]
+
+    for pat in patterns:
+        m = re.match(pat, primary, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'", "`"):
+                val = val[1:-1].strip()
+            val_lower = val.lower()
+            plan_words = ("a plan", "plan ", "a prd", "prd ", "rencana", "the plan", "implementation plan")
+            if not val or any(val_lower.startswith(pw) for pw in plan_words):
+                return None
+            return val
+
+    return None
+
+
 def is_question_task(task: str, change_type: str = "") -> bool:
-    """Return True if the task is an inquiry/explanation/question rather than a code change request."""
+    """Return True if the task is an inquiry/explanation/conversational request rather than a code change request."""
     if change_type == "question_only":
         return True
-    clean = task.strip().lower()
+    primary = _primary_task_text(task)
+    clean = primary.strip().lower()
     if clean.endswith("?"):
         return True
     question_keywords = (
@@ -787,8 +853,24 @@ def is_question_task(task: str, change_type: str = "") -> bool:
         "ceritakan", "apa isi", "ada file apa", "review",
         "what", "why", "how", "explain", "describe", "overview", "list", "show me", "tell me",
         "is there", "are there", "who", "which",
+        # Conversational keywords
+        "echo ", "echo", "say ", "ping", "hello", "hi", "halo", "hai",
+        "balas ", "jawab ", "reply ", "respond ",
     )
-    return any(clean.startswith(kw) or f" {kw} " in f" {clean} " for kw in question_keywords)
+    return any(clean == kw or clean.startswith(kw) or f" {kw} " in f" {clean} " for kw in question_keywords)
+
+
+def is_explicit_planning_request(task: str) -> bool:
+    """Check if task contains an explicit request to create, draft, or generate an implementation plan/PRD."""
+    primary = _primary_task_text(task).lower()
+    planning_patterns = [
+        r"\b(?:buat|buatkan|susun|rancang|tulis|bikin)\s+(?:sebuah\s+|suatu\s+)?(?:rencana|plan|prd|arsitektur|desain)\b",
+        r"\b(?:create|draft|generate|make|write|design)\s+(?:a\s+|an\s+)?(?:plan|prd|implementation\s+plan|architecture\s+plan)\b",
+        r"\b(?:rencana|plan)\s+(?:implementasi|migrasi|fitur|perubahan)\b",
+        r"\bimplementation\s+plan\b",
+        r"\bplan\s+(?:to\s+|for\s+)",
+    ]
+    return any(re.search(pat, primary) for pat in planning_patterns)
 
 
 def _safe_s2_call(method: Any, *args: Any, **kwargs: Any) -> Any:
@@ -820,6 +902,13 @@ class Orchestrator:
         self.config = config
         self.log_fn = log_fn
         self._in_production_step: bool = False
+        from core.plans import normalize_mode
+        norm_mode = normalize_mode(self.cfg.mode)
+        if norm_mode is not None:
+            self.cfg.mode = norm_mode
+        else:
+            self.cfg.mode = "chat" if self.cfg.origin_channel in ("telegram", "whatsapp") else "build"
+
         if self.cfg.execution_contract is not None:
             from system2.antigravity_client import AntigravitySystem2Client
             if isinstance(self.s2, AntigravitySystem2Client):
@@ -943,7 +1032,12 @@ class Orchestrator:
             raise PermissionError(
                 "Modifikasi berkas source code dilarang dalam mode Plan. Gunakan mode Build untuk melakukan perubahan."
             )
-        staged = validate_and_stage_files(self.cfg.repo_dir, files, contract=self.cfg.execution_contract)
+        staged = validate_and_stage_files(
+            self.cfg.repo_dir,
+            files,
+            contract=self.cfg.execution_contract,
+            plan_id=self.cfg.plan_id,
+        )
         repo_res = self.cfg.repo_dir.resolve()
         if self.cfg.allowed_scope is not None:
             allowed_norm = {
@@ -1062,9 +1156,12 @@ class Orchestrator:
             contract.validate(actor=self.cfg.actor, channel=self.cfg.origin_channel,
                               session_id=self.cfg.session_id,
                               session_incarnation_id=self.cfg.session_incarnation_id,
-                              repo_dir=self.cfg.repo_dir)
+                              repo_dir=self.cfg.repo_dir,
+                              expected_plan_id=self.cfg.plan_id)
             contract.capabilities.require("network.access")
-        if self.cfg.mode == "plan":
+        if self.cfg.mode == "chat":
+            self._log("[brainfrog] 💬 Mode: [bold #4EA8DE]CHAT[/bold #4EA8DE] (Percakapan & bantuan informasi)")
+        elif self.cfg.mode == "plan":
             self._log("[brainfrog] 🧭 Mode: [bold #4EC9B0]PLAN[/bold #4EC9B0] (Eksplorasi codebase & penyusunan rencana)")
         else:
             self._log("[brainfrog] 🔨 Mode: [bold #33D17A]BUILD[/bold #33D17A] (Eksekusi perubahan & pengujian)")
@@ -1080,13 +1177,23 @@ class Orchestrator:
             names = ", ".join(f"{img.filename} ({img.size_kb:.1f} KB)" for img in self.attached_images)
             self._log(f"[brainfrog] 🖼️ Attached {len(self.attached_images)} image(s): [bold #33D17A]{names}[/bold #33D17A]")
 
+        # 0. Deterministic literal output fast path (e.g. "balas hanya dengan teks: PONG", "reply with only PONG")
+        literal_output = extract_literal_output(self.cfg.task)
+        if literal_output is not None:
+            self._log(f"[brainfrog] 💬 Literal output fast path: '{literal_output}'")
+            return [StepResult(PlanStep("0", "conversational", []), "diagnosed", 0, literal_output)]
+
         scope = self._scope_gate()
 
+        is_question = (
+            scope.change_type == "question_only"
+            or is_question_task(self.cfg.task, scope.change_type)
+        )
+
         if scope.clarify_message:
-            if self.cfg.mode == "build":
-                # BUILD mode: never block the user with scope clarification.
-                # The REPL user knows their project — use full repo tree and proceed.
-                self._log("[system1/jev] scope gate: low confidence in build mode — using full repo tree")
+            if self.cfg.mode in ("chat", "build") or is_question:
+                # Chat mode, Build mode, and conversational/question tasks bypass domain clarification.
+                self._log(f"[system1/jev] scope gate: bypassing domain clarification in {self.cfg.mode} mode")
                 scope = ScopeDecision(
                     domain=None,
                     change_type=scope.change_type,
@@ -1100,14 +1207,16 @@ class Orchestrator:
         domain_label = scope.domain.key if scope.domain else "unscoped"
         self._log(f"[system1/jev:{self.s1.name}] scope gate: domain='{domain_label}' change_type='{scope.change_type}'")
 
+        primary_task = _primary_task_text(self.cfg.task).lower()
         _is_exec_trigger = (
             self.cfg.execution_contract is not None
             or any(
-                kw in self.cfg.task.lower()
+                re.search(rf"\b{re.escape(kw)}\b", primary_task)
                 for kw in ("execute", "jalankan", "eksekusi", "implement", "build", "bangun", "kerjakan", "gass", "gas")
             )
         )
-        if scope.change_type == "question_only" and not _is_exec_trigger:
+
+        def _get_diagnosis_context():
             tree = scope.focus_tree or _repo_tree(self.cfg.repo_dir)
             max_f = 10 if not scope.domain else 30
             focus_files = _read_files_from_tree(self.cfg.repo_dir, tree, max_files=max_f)
@@ -1116,7 +1225,6 @@ class Orchestrator:
                     focus_files[k] = focus_files[k][:4000] + "\n... (truncated)"
             if self.pinned_files:
                 focus_files.update(self.pinned_files)
-            # Include overview files if available
             for key_file in (
                 "README.md", "readme.md", "modules.json", "package.json",
                 "pyproject.toml", "index.html", "main.py"
@@ -1127,7 +1235,29 @@ class Orchestrator:
                         focus_files[key_file] = kf.read_text(encoding="utf-8", errors="replace")[:3000]
                     except Exception:
                         pass
+            return focus_files
 
+        # CHAT MODE CONTRACT:
+        # Route conversational requests and informational questions through System 2 diagnosis path.
+        # Never generate or persist implementation plans or execute mutations.
+        if self.cfg.mode == "chat":
+            focus_files = _get_diagnosis_context()
+            repo_files = _repo_tree(self.cfg.repo_dir)
+            self._log(f"[system2/{self.s2_tag}] answering in Chat mode ...")
+            answer = _safe_s2_call(
+                self.s2.diagnose,
+                self.cfg.task,
+                focus_files,
+                domain_label,
+                repo_tree=repo_files,
+                images=self.attached_images,
+            )
+            return [StepResult(PlanStep("0", "chat", []), "diagnosed", 0, answer)]
+
+        # Informational question / discussion path:
+        # In Plan mode, questions that are not explicit planning requests route to diagnosis so plans aren't accidentally generated.
+        if is_question and not _is_exec_trigger and not is_explicit_planning_request(self.cfg.task):
+            focus_files = _get_diagnosis_context()
             repo_files = _repo_tree(self.cfg.repo_dir)
             self._log(f"[system2/{self.s2_tag}] answering question / diagnosing ...")
             answer = _safe_s2_call(
@@ -1173,13 +1303,49 @@ class Orchestrator:
             )
 
             # Generate filename & save plan doc into .brainfrog/plans/
-            from core.plans import save_plan_document, compute_file_hash
+            from core.plans import save_plan_document, compute_file_hash, PlanRegistry, PlanStatus
             from datetime import datetime
 
             title = plan_data.get("title", "Rencana Implementasi")
             slug = re.sub(r"[^a-zA-Z0-9_\-]+", "_", title.lower()).strip("_") or "plan"
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            plan_filename = f"{timestamp}_{slug}.md"
+
+            existing_plan = None
+            if self.cfg.plan_id:
+                from core.plans import InvalidPlanTransitionError, PlanNotFoundError
+                p_reg = PlanRegistry(self.cfg.repo_dir)
+                cand_plan = p_reg.get_plan(self.cfg.plan_id)
+                if cand_plan is None:
+                    raise PlanNotFoundError(f"Selected plan '{self.cfg.plan_id}' not found in workspace for refinement.")
+
+                # Invariant: Terminal or blocked plans cannot be refined
+                if cand_plan.status in (PlanStatus.IMPLEMENTED, PlanStatus.VERIFIED, PlanStatus.SUPERSEDED, PlanStatus.BLOCKED):
+                    raise InvalidPlanTransitionError(
+                        f"Cannot refine plan '{cand_plan.id}': plan is in status '{cand_plan.status.value}'. "
+                        f"Completed, superseded, or blocked plans cannot be modified."
+                    )
+
+                # Invariant: Session ownership — unbound legacy plans fail closed; cross-session isolation
+                from core.plans import is_valid_session_id
+                owning_session = cand_plan.session_id or (cand_plan.to_metadata_dict().get("session_id") if hasattr(cand_plan, "to_metadata_dict") else "")
+                if not is_valid_session_id(owning_session):
+                    raise PermissionError(
+                        f"Plan '{cand_plan.id}' is an unbound legacy plan without valid session ownership. "
+                        f"Refinement rejected to prevent unauthorized ownership assignment."
+                    )
+                cfg_session = self.cfg.session_id or ""
+                if not is_valid_session_id(cfg_session) or (owning_session or "").strip() != cfg_session.strip():
+                    raise PermissionError(
+                        f"Plan '{cand_plan.id}' belongs to session '{owning_session}' "
+                        f"and cannot be refined by session '{self.cfg.session_id}'."
+                    )
+
+                existing_plan = cand_plan
+
+            if existing_plan is not None:
+                plan_filename = existing_plan.filename
+            else:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                plan_filename = f"{timestamp}_{slug}.md"
 
             commit_hash = ""
             git_status = ""
@@ -1201,8 +1367,40 @@ class Orchestrator:
                 if rf_path.exists() and rf_path.is_file():
                     file_hashes[rf_norm] = compute_file_hash(rf_path)
 
+            raw_blocking = plan_data.get("blocking_unknowns")
+            raw_clarifying = plan_data.get("clarifying_questions", [])
+            normalized_blocking: List[Any] = []
+
+            if raw_blocking is not None:
+                # Provider explicitly supplied blocking_unknowns field
+                if isinstance(raw_blocking, list):
+                    # Explicit list: can be empty [] (meaning no blocking unknowns) or populated
+                    normalized_blocking = list(raw_blocking)
+                elif isinstance(raw_blocking, dict):
+                    normalized_blocking = [raw_blocking]
+                else:
+                    # Malformed scalar/bool: preserve raw value so loader marks metadata_malformed
+                    normalized_blocking = raw_blocking
+            else:
+                # Provider omitted blocking_unknowns (missing field / legacy schema)
+                # Fail-closed boundary: if provider omitted blocking_unknowns but returned
+                # clarifying questions, normalize unresolved questions to blocking unknowns.
+                if raw_clarifying and isinstance(raw_clarifying, list):
+                    for idx, q in enumerate(raw_clarifying, 1):
+                        q_str = str(q).strip()
+                        if q_str:
+                            normalized_blocking.append({
+                                "id": f"unk_{idx}",
+                                "decision": q_str,
+                                "resolved": False,
+                                "affected_steps": [],
+                                "affected_files": [],
+                            })
+
             metadata = {
+                "id": existing_plan.id if existing_plan is not None else None,
                 "title": title,
+                "status": PlanStatus.DRAFT.value,
                 "goal": plan_data.get("goals", [self.cfg.task])[0] if plan_data.get("goals") else self.cfg.task,
                 "is_small_task": plan_data.get("is_small_task", False),
                 "acceptance_criteria": plan_data.get("acceptance_criteria", []),
@@ -1217,18 +1415,84 @@ class Orchestrator:
                 "commit_hash": commit_hash,
                 "git_status_snapshot": git_status,
                 "file_hashes": file_hashes,
-                "created_at": datetime.now().isoformat(),
+                "created_at": existing_plan.created_at if existing_plan is not None else datetime.now().isoformat(),
+                "session_id": (
+                    existing_plan.session_id if (existing_plan is not None and existing_plan.session_id)
+                    else (existing_plan.to_metadata_dict().get("session_id") if (existing_plan is not None and hasattr(existing_plan, "to_metadata_dict")) else self.cfg.session_id)
+                ),
+                "actor": self.cfg.actor,
+                "expected_revision": existing_plan.revision if existing_plan is not None else None,
+                "revision": (existing_plan.revision + 1) if existing_plan is not None else 1,
+                "target_context": plan_data.get("target_context"),
+                "architecture_strategy": plan_data.get("architecture_strategy"),
+                "scope": plan_data.get("scope", []),
+                "non_scope": plan_data.get("non_scope", []),
+                "clarifying_questions": plan_data.get("clarifying_questions", []),
+                "blocking_unknowns": normalized_blocking,
+                "architectural_constraints": plan_data.get("architectural_constraints", []),
+                "compatibility_contracts": plan_data.get("compatibility_contracts", []),
+                "behavior_invariants": plan_data.get("behavior_invariants", []),
+                "migration_constraints": plan_data.get("migration_constraints", []),
             }
 
             doc_content = plan_data.get("markdown_doc", "")
             if not doc_content:
                 lines = [f"# {title}\n"]
+                if plan_data.get("target_context") or plan_data.get("architecture_strategy"):
+                    arch_parts = []
+                    if plan_data.get("target_context"):
+                        arch_parts.append(f"Konteks: `{plan_data['target_context']}`")
+                    if plan_data.get("architecture_strategy"):
+                        arch_parts.append(f"Strategi: `{plan_data['architecture_strategy']}`")
+                    lines.append(f"## Konteks Arsitektur & Strategi\n{' | '.join(arch_parts)}\n")
                 if plan_data.get("problem"):
                     lines.append(f"## Masalah (Problem)\n{plan_data['problem']}\n")
                 if plan_data.get("goals"):
                     lines.append("## Tujuan (Goals)")
                     for g in plan_data["goals"]:
                         lines.append(f"- {g}")
+                    lines.append("")
+                if plan_data.get("scope"):
+                    lines.append("## Batasan Perubahan (Scope)")
+                    for sc in plan_data["scope"]:
+                        lines.append(f"- {sc}")
+                    lines.append("")
+                if plan_data.get("non_scope"):
+                    lines.append("## Di Luar Batasan (Non-Scope)")
+                    for nsc in plan_data["non_scope"]:
+                        lines.append(f"- {nsc}")
+                    lines.append("")
+                if plan_data.get("architectural_constraints"):
+                    lines.append("## Batasan Arsitektur (Architectural Constraints)")
+                    for ac in plan_data["architectural_constraints"]:
+                        c_str = ac.get("text", str(ac)) if isinstance(ac, dict) else str(ac)
+                        lines.append(f"- {c_str}")
+                    lines.append("")
+                if plan_data.get("compatibility_contracts"):
+                    lines.append("## Kontrak Kompatibilitas")
+                    for cc in plan_data["compatibility_contracts"]:
+                        lines.append(f"- {cc}")
+                    lines.append("")
+                if plan_data.get("behavior_invariants"):
+                    lines.append("## Behavior & State Invariants")
+                    for bi in plan_data["behavior_invariants"]:
+                        lines.append(f"- {bi}")
+                    lines.append("")
+                if plan_data.get("migration_constraints"):
+                    lines.append("## Batasan Migrasi & Rollback")
+                    for mc in plan_data["migration_constraints"]:
+                        lines.append(f"- {mc}")
+                    lines.append("")
+                if normalized_blocking:
+                    lines.append("## Keputusan Belum Terselesaikan (Blocking Unknowns)")
+                    for bu in normalized_blocking:
+                        bu_str = bu.get("decision", bu.get("question", str(bu))) if isinstance(bu, dict) else str(bu)
+                        lines.append(f"- [BLOCKED] {bu_str}")
+                    lines.append("")
+                if plan_data.get("clarifying_questions"):
+                    lines.append("## Pertanyaan Klarifikasi")
+                    for cq in plan_data["clarifying_questions"]:
+                        lines.append(f"- {cq}")
                     lines.append("")
                 if plan_data.get("codebase_findings"):
                     lines.append("## Temuan Codebase (Facts)")
@@ -1256,7 +1520,13 @@ class Orchestrator:
                             lines.append(f"- {s}")
                 doc_content = "\n".join(lines)
 
-            saved_path = save_plan_document(self.cfg.repo_dir, plan_filename, doc_content, metadata=metadata)
+            saved_path = save_plan_document(
+                self.cfg.repo_dir,
+                plan_filename,
+                doc_content,
+                metadata=metadata,
+                expected_revision=existing_plan.revision if existing_plan is not None else None,
+            )
             try:
                 rel_saved = str(saved_path.relative_to(self.cfg.repo_dir))
             except Exception:
@@ -1265,45 +1535,25 @@ class Orchestrator:
 
             clarifying = plan_data.get("clarifying_questions", [])
             detail_msg = doc_content
+            if plan_data.get("blocking_unknowns"):
+                detail_msg += "\n\n### ⚠️ Keputusan Belum Terselesaikan (Blocking Unknowns):\n" + "\n".join(
+                    [f"- [BLOCKED] {b.get('decision', b.get('question', str(b))) if isinstance(b, dict) else str(b)}" for b in plan_data["blocking_unknowns"]]
+                )
             if clarifying:
                 detail_msg += "\n\n### ❓ Pertanyaan Klarifikasi (Material Decisions):\n" + "\n".join([f"- {q}" for q in clarifying])
 
-            return [StepResult(PlanStep("0", title, relevant_files), "planned", 0, detail_msg)]
+            saved_plan_id = str(existing_plan.id if existing_plan is not None else (metadata.get("id") or f"plan_{saved_path.stem}"))
+            return [StepResult(PlanStep("0", title, relevant_files), "planned", 0, detail_msg, suggestion=saved_plan_id)]
 
-        # BUILD mode: planning with plan_context handoff
-        latest_plan = None
+        # BUILD mode: controlled execution only under an authorized contract.
+        # Plan selection and execution are separate, explicit operations: without a
+        # contract, fail closed before any planning, subagent, or write path is reached.
         if self.cfg.mode == "build" and self.cfg.execution_contract is None:
-            from core.plans import get_latest_plan, format_plan_handoff
-            latest_plan = get_latest_plan(self.cfg.repo_dir)
-            if not self.cfg.plan_context and latest_plan:
-                self.cfg.plan_context = format_plan_handoff(latest_plan, self.cfg.repo_dir)
-
-        task_clean = self.cfg.task.strip().lower()
-        plan_triggers = {
-            "execute from plans.", "execute from plans", "execute from plan", "execute plan",
-            "eksekusi plan", "jalankan plan", "run the plan", "run plan", "implement plan",
-            "build from plan", "sesuai plan", "gass", "gas", "do it", "lanjutkan", "kerjakan plan",
-            "execute", "eksekusi", "jalankan",
-        }
-        is_direct_plan_exec = (
-            task_clean in plan_triggers
-            or any(kw in task_clean for kw in ("execute from plan", "execute plan", "jalankan plan", "eksekusi plan", "sesuai plan", "run the plan", "build from plan"))
-        )
+            msg = "Build mode is defined, but plan selection and controlled execution are not implemented yet."
+            self._log(f"[brainfrog] 🔨 {msg}")
+            return [StepResult(PlanStep("0", "build", []), "not_implemented", 0, msg)]
 
         steps: List[PlanStep] = []
-        if is_direct_plan_exec and latest_plan and latest_plan.steps and self.cfg.execution_contract is None:
-            self._log(f"[brainfrog] 📋 Executing directly from plan: [bold #4EC9B0]{latest_plan.title}[/bold #4EC9B0]")
-            for i, s in enumerate(latest_plan.steps):
-                if isinstance(s, dict):
-                    step_id = str(s.get("id", i + 1))
-                    step_desc = s.get("description", "")
-                    step_files = s.get("files", [])
-                else:
-                    step_id = str(i + 1)
-                    step_desc = str(s)
-                    step_files = []
-                steps.append(PlanStep(id=step_id, description=step_desc, files=step_files))
-
         if not steps:
             # If task is short/ambiguous and plan_context is available, enrich the task
             # with the plan goal so the AI has enough context to generate concrete steps.
@@ -1325,31 +1575,36 @@ class Orchestrator:
 
             model_tag = getattr(self.s2, "model", self.s2_tag)
             self._log(f"[system2/{self.s2_tag}] planning task via {model_tag} (scoped to '{domain_label}') ...")
-            try:
-                steps = _safe_s2_call(
-                    self.s2.plan_task,
-                    effective_task,
-                    scope.focus_tree,
-                    pinned_files=self.pinned_files,
-                    plan_context=self.cfg.plan_context if effective_task == self.cfg.task else None,
-                    images=self.attached_images,
-                )
-            except Exception as e:
-                if latest_plan and latest_plan.steps:
-                    self._log(f"[brainfrog] ⚠️ System 2 planning failed ({e}); falling back to saved plan steps...")
-                    for i, s in enumerate(latest_plan.steps):
-                        if isinstance(s, dict):
-                            steps.append(PlanStep(id=str(s.get("id", i + 1)), description=s.get("description", ""), files=s.get("files", [])))
-                        else:
-                            steps.append(PlanStep(id=str(i + 1), description=str(s), files=[]))
-                else:
-                    raise
+            steps = _safe_s2_call(
+                self.s2.plan_task,
+                effective_task,
+                scope.focus_tree,
+                pinned_files=self.pinned_files,
+                plan_context=self.cfg.plan_context if effective_task == self.cfg.task else None,
+                images=self.attached_images,
+            )
         for s in steps:
             if self.cfg.execution_contract is not None:
                 for path in s.files:
                     self.cfg.execution_contract.require_filesystem("read", path, self.cfg.repo_dir)
             s.files = [_normalize_rel_path(self.cfg.repo_dir, f) for f in s.files]
         self._log(f"[system2/{self.s2_tag}] plan has {len(steps)} step(s)")
+
+        if self.cfg.execution_contract is not None:
+            from core.runtime.step_runner import StructuredStepRunner
+            p_id = self.cfg.plan_id or getattr(self.cfg.execution_contract, "plan_id", None)
+            step_timeout = getattr(self.cfg, "step_timeout", 60.0) or 60.0
+            runner = StructuredStepRunner(
+                workspace_dir=self.cfg.repo_dir,
+                orchestrator=self,
+                contract=self.cfg.execution_contract,
+                plan_id=p_id,
+                step_timeout=step_timeout,
+                tracker=getattr(self.cfg, "progress_tracker", None),
+            )
+            self.cfg.progress_tracker = runner.tracker
+            self.cfg.last_step_runner = runner
+            return runner.run_steps(steps)
 
         results: List[StepResult] = []
         for step in steps:
@@ -1477,6 +1732,8 @@ class Orchestrator:
     def _run_step(self, step: PlanStep, sensitive: bool = False) -> StepResult:
         if self.cfg.mode == "plan":
             raise PermissionError("Eksekusi langkah modifikasi kode dilarang dalam mode Plan.")
+        if self.cfg.mode == "chat":
+            raise PermissionError("Eksekusi langkah modifikasi kode dilarang dalam mode Chat.")
         self._in_production_step = True
         self.cfg.last_transaction_result = None
         from core.runtime.workspace_lock import WorkspaceLock
@@ -1493,13 +1750,70 @@ class Orchestrator:
             self._in_production_step = False
             ws_lock.release()
 
-    def _execute_step(self, step: PlanStep, sensitive: bool = False) -> StepResult:
-        self._log(f"=== Step {step.id}: {step.description} ===")
+    def _record_contract_commit_finalization(self, tx_res: TransactionResult) -> None:
+        """Record durable commit intent for contract-path commits awaiting proof persistence.
+
+        Mirrors the Git-commit lifecycle guarantee: once files are durably committed,
+        an authoritative proof must follow or crash recovery is required.
+        """
+        try:
+            from core.runtime.task_finalization import TaskFinalizationCoordinator
+            from core.runtime.process import _CURRENT_TASK_ID
+
+            task_id = _CURRENT_TASK_ID.get()
+            if not task_id:
+                return
+            finalizer = TaskFinalizationCoordinator(self.cfg.repo_dir)
+            finalizer.record_commit_intent(
+                task_id, transaction_id=getattr(tx_res, "transaction_id", None)
+            )
+            finalizer.record_commit_success(task_id)
+        except Exception:
+            pass
+
+    def _execute_step(self, step: Any, sensitive: bool = False) -> StepResult:
+        raw_id = getattr(step, "id", None) if not isinstance(step, dict) else step.get("id")
+        if raw_id is None or not str(raw_id).strip():
+            raise ValueError("Step payload is malformed: step id is missing or empty.")
+        step_id = str(raw_id).strip()
+        raw_desc = getattr(step, "description", None) if not isinstance(step, dict) else step.get("description")
+        step_desc = str(raw_desc or "")
+        self._log(f"=== Step {step_id}: {step_desc} ===")
+        raw_files = getattr(step, "files", None) or (step.get("files") if isinstance(step, dict) else None) or []
+        step_files = list(raw_files)
         if self.cfg.execution_contract is not None:
             self.cfg.execution_contract.capabilities.require("network.access")
-            for path in step.files:
+            for path in step_files:
                 self.cfg.execution_contract.require_filesystem("read", path, self.cfg.repo_dir)
-        file_contents = _read_files(self.cfg.repo_dir, step.files)
+        file_contents = _read_files(self.cfg.repo_dir, step_files)
+
+        # Resolve active plan document for architectural enforcement & bounded context injection
+        active_plan = getattr(self.cfg, "active_plan", None)
+        if active_plan is None:
+            plan_id_cand = getattr(self.cfg, "plan_id", None) or (
+                getattr(self.cfg.execution_contract, "plan_id", None)
+                if getattr(self.cfg, "execution_contract", None) else None
+            )
+            if plan_id_cand:
+                from core.plans import PlanRegistry
+                try:
+                    active_plan = PlanRegistry(self.cfg.repo_dir).get_plan(plan_id_cand)
+                    self.cfg.active_plan = active_plan
+                except Exception:
+                    pass
+
+        # Invariant: Blocking unknowns halt affected mutation steps fail-closed
+        if active_plan is not None:
+            from core.plans import BlockingUnknownError, format_blocking_unknown_explanation
+            is_blocked, blk_items = active_plan.has_unresolved_blocking_unknowns(step_id=step_id, files=step_files)
+            if is_blocked:
+                err_msg = format_blocking_unknown_explanation(
+                    step_id=step_id,
+                    unknowns=blk_items,
+                    step_files=step_files,
+                )
+                self._log(f"[orchestrator] ⛔ {err_msg}")
+                raise BlockingUnknownError(step_id, blk_items, err_msg, step_files=step_files)
 
         effective_task = self.cfg.task
         if (
@@ -1508,6 +1822,19 @@ class Orchestrator:
             and (len(self.cfg.task.split()) <= 10 or any(kw in self.cfg.task.lower() for kw in ("plan", "execute", "jalankan", "eksekusi", "build", "gass")))
         ):
             effective_task = f"{self.cfg.task}\n\n[Active Plan Context]\n{self.cfg.plan_context}"
+
+        # Inject bounded architectural guidance and constraints relevant to this specific step
+        if active_plan is not None:
+            from core.plans import format_step_architecture_context
+            arch_ctx = active_plan.get_step_architectural_context(step)
+            arch_block = format_step_architecture_context(arch_ctx)
+            if arch_block:
+                effective_task = f"{effective_task}\n\n{arch_block}"
+            if "resolved_clarifications" in arch_ctx and arch_ctx["resolved_clarifications"]:
+                if isinstance(step, dict):
+                    step["clarifications"] = list(arch_ctx["resolved_clarifications"])
+                elif hasattr(step, "clarifications"):
+                    step.clarifications = list(arch_ctx["resolved_clarifications"])
 
         self._log(f"[system2/{self.s2_tag}] writing code ...")
         new_files = _safe_s2_call(
@@ -1519,10 +1846,39 @@ class Orchestrator:
             images=self.attached_images,
         )
 
+        # Step Scope Enforcement (Check 3: Enforces scope before any staging or transaction):
+        if not step_files:
+            if new_files:
+                err_msg = (
+                    f"Scope violation: Step '{step_id}' declared no file targets (files={step_files!r}) "
+                    f"but attempted to mutate {sorted(new_files.keys())}. Failing closed."
+                )
+                self._log(f"[orchestrator] ⛔ {err_msg}")
+                raise PermissionError(err_msg)
+        else:
+            allowed_rel_paths = {
+                Path(_normalize_rel_path(self.cfg.repo_dir, f)).as_posix()
+                for f in step_files
+            }
+            for candidate in new_files.keys():
+                norm_cand = Path(_normalize_rel_path(self.cfg.repo_dir, candidate)).as_posix()
+                is_allowed = (
+                    norm_cand in allowed_rel_paths
+                    or any(norm_cand.startswith(f"{prefix}/") for prefix in allowed_rel_paths)
+                )
+                if not is_allowed:
+                    err_msg = (
+                        f"Scope violation: Step '{getattr(step, 'id', '')}' attempted to mutate '{candidate}' "
+                        f"which is outside planned step scope {sorted(allowed_rel_paths)}."
+                    )
+                    self._log(f"[orchestrator] ⛔ {err_msg}")
+                    raise PermissionError(err_msg)
+
         if self.cfg.execution_contract is not None:
             active_coordinator = self._stage_and_execute_transaction(new_files)
             try:
                 test_executed = False
+                test_proc = None
                 if self.cfg.test_command and self.cfg.test_command != ["forbidden"]:
                     test_proc = self._run_test_suite()
                     self.cfg.last_test_result = test_proc
@@ -1556,7 +1912,7 @@ class Orchestrator:
                     )
                     raise RuntimeError(fail_reason)
 
-                if test_executed:
+                if test_executed and test_proc is not None:
                     active_coordinator.record_domain_verification(
                         command=self.cfg.test_command,
                         passed=True,
@@ -1567,6 +1923,7 @@ class Orchestrator:
                     self.cfg.last_transaction_result = tx_res
                     if tx_res is None or not tx_res.success:
                         raise RuntimeError("Transactional verification did not commit")
+                    self._record_contract_commit_finalization(tx_res)
                     return StepResult(step, "verified", 0,
                                       "Approved files were transactionally applied and verified. "
                                       "Shell, Git, and browser operations were not authorized.")
@@ -1575,6 +1932,7 @@ class Orchestrator:
                     self.cfg.last_transaction_result = tx_res
                     if tx_res is None or not tx_res.success:
                         raise RuntimeError("Transactional write did not commit")
+                    self._record_contract_commit_finalization(tx_res)
                     return StepResult(step, "untested", 0,
                                       "Approved files were transactionally applied to disk, but no domain test suite was configured. "
                                       "Changes remain unverified and cannot be staged or finalized to Git.")
@@ -1621,7 +1979,7 @@ class Orchestrator:
                 self.cfg.test_command
                 and self.cfg.test_command != ["forbidden"]
                 and (
-                    (isinstance(self.cfg.test_command, list) and any(str(c).strip() for c in self.cfg.test_command))
+                    (isinstance(self.cfg.test_command, list) and any(c.strip() for c in self.cfg.test_command))
                     or (isinstance(self.cfg.test_command, str) and self.cfg.test_command.strip())
                 )
             )

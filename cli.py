@@ -1487,15 +1487,6 @@ def execute_task(
             print_banner_box(f"{repo_dir} is not a git repository.", level="error", title="Git Error")
             return 1
 
-    if mode == "build" and not plan_context:
-        try:
-            from plans import get_latest_plan, format_plan_handoff
-            lp = get_latest_plan(repo_dir)
-            if lp:
-                plan_context = format_plan_handoff(lp, repo_dir)
-        except Exception:
-            pass
-
     if test_cmd is not None:
         active_test_cmd = test_cmd
     else:
@@ -1762,9 +1753,10 @@ else:
 
 SLASH_COMMAND_COMPLETIONS = [
     ("/help", "Show help and command list"),
+    ("/chat", "Switch to Chat mode (conversational assistance & diagnostics)"),
     ("/plan", "Switch to Plan mode (read-only exploration & PRD planning)"),
-    ("/build", "Switch to Build mode with optional last plan context"),
-    ("/mode", "Show or toggle active mode (plan | build)"),
+    ("/build", "Switch to Build mode (controlled execution requires approved contract)"),
+    ("/mode", "Show or change active mode (chat | plan | build)"),
     ("/undo", "Revert last change cleanly via Git"),
     ("/diff", "View colored git diff of recent changes"),
     ("/preview", "Capture and inspect headless screenshot of frontend UI"),
@@ -2222,7 +2214,7 @@ def run_interactive(
     pr_risk_ceiling: str = "medium",
     max_retries: int = 3,
     initial_skill: Optional[str] = None,
-    initial_mode: str = "build",
+    initial_mode: Optional[str] = None,
 ) -> None:
     """Full-featured interactive TUI session."""
     from modules import load_module_map
@@ -2239,15 +2231,9 @@ def run_interactive(
         default_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
     active_model = model or claude_model or default_model
     active_skill: Optional[str] = initial_skill
-    active_mode: str = initial_mode
+    from core.plans import normalize_mode
+    active_mode: str = normalize_mode(initial_mode) or "build"
     active_plan_context: Optional[str] = None
-    if active_mode == "build":
-        try:
-            from plans import get_latest_plan, format_plan_handoff
-            _lp = get_latest_plan(repo_dir)
-            active_plan_context = format_plan_handoff(_lp, repo_dir) if _lp else None
-        except Exception:
-            active_plan_context = None
 
     app_state = {"status": "Ready", "icon": "●"}
     staged_images: List[Any] = []
@@ -2260,14 +2246,23 @@ def run_interactive(
         """Top border for composer box — mathematically aligned with VSplit."""
         cols, rows, box_w, margin, pad = get_layout_dims()
         bar_w = box_w - 2
-        mode_badge = f" [PLAN] " if active_mode == "plan" else f" [BUILD] "
+        if active_mode == "plan":
+            mode_badge = " [PLAN] "
+            style_name = "class:mode-plan"
+            border_style = "class:input-border-plan"
+        elif active_mode == "chat":
+            mode_badge = " [CHAT] "
+            style_name = "class:mode-chat"
+            border_style = "class:input-border-chat"
+        else:
+            mode_badge = " [BUILD] "
+            style_name = "class:mode-build"
+            border_style = "class:input-border"
         left_line = "──"
         img_badge = f" [🖼️ {len(staged_images)} img] " if staged_images else ""
         used_len = len(left_line) + len(mode_badge) + len(img_badge)
         right_len = max(1, bar_w - used_len)
         right_line = "─" * right_len
-        style_name = "class:mode-plan" if active_mode == "plan" else "class:mode-build"
-        border_style = "class:input-border-plan" if active_mode == "plan" else "class:input-border"
         items = [
             (border_style, f"{pad}╭{left_line}"),
             (style_name, mode_badge),
@@ -2281,7 +2276,12 @@ def run_interactive(
         """Bottom border attached directly under input buffer."""
         cols, rows, box_w, margin, pad = get_layout_dims()
         bar_w = box_w - 2
-        border_style = "class:input-border-plan" if active_mode == "plan" else "class:input-border"
+        if active_mode == "plan":
+            border_style = "class:input-border-plan"
+        elif active_mode == "chat":
+            border_style = "class:input-border-chat"
+        else:
+            border_style = "class:input-border"
         return [(border_style, f"{pad}╰{'─' * bar_w}╯")]
 
     # Initialize prompt_toolkit session with autocomplete & history
@@ -2326,8 +2326,10 @@ def run_interactive(
             # Mode indicators & borders
             "mode-plan": "bg:#173b37 #4EC9B0 bold",
             "mode-build": f"bg:#1f3326 {COLOR_ACCENT} bold",
+            "mode-chat": f"bg:#1e2a3a {COLOR_INFO} bold",
             "image-badge": "bg:#203b22 #73d216 bold",
             "input-border-plan": "#4EC9B0",
+            "input-border-chat": f"{COLOR_INFO}",
 
             # Input box borders
             "input-border": f"{COLOR_ACCENT}",
@@ -2436,21 +2438,10 @@ def run_interactive(
 
         @kb.add("tab")
         def _tab_handler(event):
-            nonlocal active_mode, active_plan_context
             b = event.current_buffer
             if not b.text.strip():
                 # Toggle between plan and build modes — let PT redraw the border
-                active_mode = "build" if active_mode == "plan" else "plan"
-                # When switching TO build, load the latest plan context (same as /build)
-                if active_mode == "build":
-                    try:
-                        from plans import get_latest_plan, format_plan_handoff
-                        lp = get_latest_plan(repo_dir)
-                        active_plan_context = format_plan_handoff(lp, repo_dir) if lp else None
-                    except Exception:
-                        active_plan_context = None
-                else:
-                    active_plan_context = None
+                _set_cli_mode("build" if active_mode == "plan" else "plan")
                 event.app.invalidate()  # Refresh layout; border already reads active_mode
             elif b.complete_state:
                 b.complete_next()
@@ -2697,7 +2688,7 @@ def run_interactive(
         else:
             model_disp = active_model
 
-        mode_color = "#4EC9B0" if active_mode == "plan" else COLOR_ACCENT
+        mode_color = "#4EC9B0" if active_mode == "plan" else (COLOR_INFO if active_mode == "chat" else COLOR_ACCENT)
         mode_badge = f"[bold {mode_color}][{active_mode.upper()}][/bold {mode_color}]"
 
         if cols >= 60:
@@ -2732,7 +2723,7 @@ def run_interactive(
         table.add_column("Kategori", style=COLOR_FG_SECONDARY)
 
         commands = [
-            ("Tab", "Ganti mode sesi Plan / Build (saat input kosong)", "Shortcut"),
+            ("Tab", "Ganti mode sesi Plan ↔ Build (saat input kosong)", "Shortcut"),
             ("Ctrl+N", "Mulai sesi baru & reset context window ke 0%", "Shortcut"),
             ("Ctrl+P", "Buka bantuan perintah ini", "Shortcut"),
             ("Shift+Enter", "Baris baru tanpa submit (terminal dgn Kitty/CSI u)", "Shortcut"),
@@ -2747,9 +2738,10 @@ def run_interactive(
             ("!command", "Jalankan perintah shell terminal langsung di sesi REPL", "Shell"),
             ("/whoami", "Tampilkan akun Google aktif & info sesi BrainFrog", "Identity"),
             ("/auth [switch|login|list]", "Kelola & ganti akun Google Antigravity (<100ms)", "Identity"),
+            ("/chat [query]", "Beralih ke mode Chat (percakapan & tanya jawab codebase)", "Mode"),
             ("/plan [task]", "Beralih ke mode Plan (eksplorasi codebase, read-only, PRD)", "Mode"),
-            ("/build [task]", "Beralih ke mode Build (eksekusi rencana terakhir & pengujian)", "Mode"),
-            ("/mode [plan|build]", "Lihat atau ganti mode sesi (Plan | Build)", "Mode"),
+            ("/build [task]", "Beralih ke mode Build (eksekusi terkontrol butuh kontrak approval)", "Mode"),
+            ("/mode [chat|plan|build]", "Lihat atau ganti mode sesi (tersimpan di sesi)", "Mode"),
             ("/models", "Pilih model AI aktif dari menu interaktif", "AI Model"),
             ("/provider", "Ganti provider AI (1: Antigravity Google Auth, 2: Claude)", "Provider"),
             ("/undo", "Batalkan perubahan kode terakhir secara bersih via Git", "Safety"),
@@ -2797,6 +2789,29 @@ def run_interactive(
         default_model=active_model,
         default_test_cmd=active_test_cmd,
     )
+
+    def _set_cli_mode(new_mode: str) -> None:
+        """Update REPL mode and persist it to the local CLI session state."""
+        nonlocal active_mode, active_plan_context
+        active_mode = new_mode
+        active_plan_context = None
+        try:
+            sess = runtime.sessions.get_or_create(channel="cli", user_id="local", conversation_id="default")
+            sess.active_mode = new_mode
+            runtime.sessions.save(sess)
+        except Exception:
+            pass
+
+    if initial_mode is not None:
+        # Explicit --mode wins and is persisted for subsequent sessions
+        _set_cli_mode(normalize_mode(initial_mode) or "build")
+    else:
+        # Resume the mode persisted in the local CLI session (default: build)
+        try:
+            _sess = runtime.sessions.get_or_create(channel="cli", user_id="local", conversation_id="default")
+            active_mode = normalize_mode(_sess.active_mode) or "build"
+        except Exception:
+            active_mode = "build"
 
     def _apply_provider_model_switch(new_prov: str, new_mod: str) -> bool:
         nonlocal active_provider, active_model
@@ -2936,7 +2951,12 @@ def run_interactive(
             acct_display = f"[bold {COLOR_ACCENT}]{google_acct}[/bold {COLOR_ACCENT}]" if google_acct else "[italic dim]Belum terdeteksi / tidak login[/italic dim]"
             prov_display = f"[bold {COLOR_FG_PRIMARY}]{active_provider}[/bold {COLOR_FG_PRIMARY}]"
             model_display = f"[bold {COLOR_ACCENT}]{active_model}[/bold {COLOR_ACCENT}]"
-            mode_display = f"[bold #4EC9B0]PLAN[/bold #4EC9B0]" if active_mode == "plan" else f"[bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]"
+            if active_mode == "plan":
+                mode_display = "[bold #4EC9B0]PLAN[/bold #4EC9B0]"
+            elif active_mode == "chat":
+                mode_display = f"[bold {COLOR_INFO}]CHAT[/bold {COLOR_INFO}]"
+            else:
+                mode_display = f"[bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]"
             info_msg = (
                 f"• Akun Google (Antigravity): {acct_display}\n"
                 f"• Provider AI aktif: {prov_display}\n"
@@ -3022,13 +3042,54 @@ def run_interactive(
                         level = "success" if success else "error"
                         print_banner_box(msg, level=level, title="Switch Google Account")
             continue
+        elif lower.startswith("/chat"):
+            parts = prompt.split(maxsplit=1)
+            _set_cli_mode("chat")
+            if len(parts) > 1:
+                sub_task = parts[1].strip()
+                execute_task(
+                    task=sub_task,
+                    repo_dir=repo_dir,
+                    backend=active_backend,
+                    model=active_model,
+                    provider=active_provider,
+                    test_cmd=active_test_cmd,
+                    module_map=module_map,
+                    min_domain_confidence=min_domain_confidence,
+                    auto_pr=auto_pr,
+                    pr_risk_ceiling=pr_risk_ceiling,
+                    max_retries=max_retries,
+                    skill=active_skill,
+                    mode="chat",
+                    runtime=runtime,
+                    is_interactive=False,
+                )
+            else:
+                print_banner_box(
+                    "Mode sesi beralih ke: [bold #58A6FF]CHAT[/bold #58A6FF]\n\n"
+                    "• Tanya jawab & diskusi codebase: [bold #33D17A]Diizinkan[/bold #33D17A]\n"
+                    "• Pembuatan dokumen rencana/PRD: [bold #FF5555]Tidak tersedia[/bold #FF5555]\n"
+                    "• Edit kode sumber, shell mutatif, git commit/PR: [bold #FF5555]Ditolak[/bold #FF5555]",
+                    level="info",
+                    title="Session Mode: CHAT",
+                )
+            continue
         elif lower.startswith("/mode"):
             parts = prompt.split(maxsplit=1)
             if len(parts) > 1:
-                target_mode = parts[1].strip().lower()
-                if target_mode in ("plan", "build"):
-                    active_mode = target_mode
-                    if active_mode == "plan":
+                target_mode = normalize_mode(parts[1])
+                if target_mode in ("chat", "plan", "build"):
+                    _set_cli_mode(target_mode)
+                    if target_mode == "chat":
+                        print_banner_box(
+                            "Mode sesi beralih ke: [bold #58A6FF]CHAT[/bold #58A6FF]\n\n"
+                            "• Tanya jawab & diskusi codebase: [bold #33D17A]Diizinkan[/bold #33D17A]\n"
+                            "• Pembuatan dokumen rencana/PRD: [bold #FF5555]Tidak tersedia[/bold #FF5555]\n"
+                            "• Edit kode sumber, shell mutatif, git commit/PR: [bold #FF5555]Ditolak[/bold #FF5555]",
+                            level="info",
+                            title="Session Mode: CHAT",
+                        )
+                    elif target_mode == "plan":
                         print_banner_box(
                             "Mode sesi beralih ke: [bold #4EC9B0]PLAN[/bold #4EC9B0]\n\n"
                             "• Eksplorasi codebase, tanya jawab, & PRD: [bold #33D17A]Diizinkan[/bold #33D17A]\n"
@@ -3038,57 +3099,39 @@ def run_interactive(
                             title="Session Mode: PLAN",
                         )
                     else:
-                        from plans import get_latest_plan, format_plan_handoff, check_plan_staleness
-                        lp = get_latest_plan(repo_dir)
-                        if lp:
-                            active_plan_context = format_plan_handoff(lp, repo_dir)
-                            stale, stale_reasons = check_plan_staleness(repo_dir, lp)
-                            if stale:
-                                print_banner_box(
-                                    f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
-                                    f"Rencana terakhir dimuat: [bold]{lp.title}[/bold] (.brainfrog/plans/{lp.filename})\n\n"
-                                    f"[bold #F6D32D]⚠️ Peringatan Perubahan Codebase (Stale Plan):[/bold #F6D32D]\n" +
-                                    "\n".join([f"  • {r}" for r in stale_reasons]) +
-                                    "\n\nAgent akan memeriksa ulang file terkait sebelum mengeksekusi.",
-                                    level="warning",
-                                    title="Session Mode: BUILD (Stale Plan)",
-                                )
-                            else:
-                                print_banner_box(
-                                    f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
-                                    f"Rencana terakhir dimuat: [bold]{lp.title}[/bold] (.brainfrog/plans/{lp.filename})\n"
-                                    "Konteks rencana akan digunakan untuk implementasi kode.",
-                                    level="success",
-                                    title="Session Mode: BUILD",
-                                )
-                        else:
-                            active_plan_context = None
-                            print_banner_box(
-                                f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
-                                "Tidak ada rencana tersimpan di .brainfrog/plans/. Eksekusi langsung aktif.",
-                                level="info",
-                                title="Session Mode: BUILD",
-                            )
+                        print_banner_box(
+                            f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n\n"
+                            "• Eksekusi terkontrol memerlukan ApprovedExecutionContract dari alur approval.\n"
+                            "• Tanpa kontrak terotorisasi, tugas Build ditolak aman (fail-closed).\n"
+                            "• Gunakan `/plan` atau `/mode plan` untuk menyusun & mereview rencana implementasi.",
+                            level="info",
+                            title="Session Mode: BUILD",
+                        )
                 else:
-                    print_banner_box(f"Mode tidak dikenal: '{parts[1]}'. Pilihan: `/mode plan` atau `/mode build`.", level="error", title="Mode Error")
+                    print_banner_box(f"Mode tidak dikenal: '{parts[1]}'. Pilihan: `/mode chat`, `/mode plan`, atau `/mode build`.", level="error", title="Mode Error")
             else:
-                desc = (
-                    "Eksplorasi codebase, tanya jawab, pembuatan PRD dan rencana implementasi.\n"
-                    "Perubahan source code dan shell mutatif dinonaktifkan."
-                    if active_mode == "plan"
-                    else
-                    "Eksekusi implementasi kode, pengujian otomatis, dan pembuatan commit/PR."
-                )
+                desc_map = {
+                    "chat": "Tanya jawab dan diskusi codebase.\nModifikasi source code dan shell mutatif dinonaktifkan.",
+                    "plan": "Eksplorasi codebase, tanya jawab, pembuatan PRD dan rencana implementasi.\nPerubahan source code dan shell mutatif dinonaktifkan.",
+                    "build": "Eksekusi implementasi terkontrol (memerlukan ApprovedExecutionContract).\nTanpa kontrak terotorisasi, eksekusi Build ditolak aman.",
+                }
                 print_banner_box(
-                    f"Mode sesi saat ini: [bold {COLOR_ACCENT}]{active_mode.upper()}[/bold {COLOR_ACCENT}]\n{desc}\n\n"
-                    "Gunakan `/plan` untuk beralih ke Plan atau `/build` untuk beralih ke Build.",
+                    f"Mode sesi saat ini: [bold {COLOR_ACCENT}]{active_mode.upper()}[/bold {COLOR_ACCENT}]\n{desc_map.get(active_mode, desc_map['build'])}\n\n"
+                    "Gunakan `/mode chat`, `/mode plan`, atau `/mode build` untuk beralih mode.",
                     level="info",
                     title="Session Mode",
                 )
             continue
         elif lower.startswith("/plan"):
             parts = prompt.split(maxsplit=1)
-            active_mode = "plan"
+            sub_head = parts[1].split()[0].lower() if len(parts) > 1 else ""
+            if sub_head in ("select", "show", "view", "status", "current", "clear", "unselect", "questions", "unknowns", "clarifications", "resolve", "answer"):
+                from core.runtime.messages import IncomingMessage
+                msg = IncomingMessage(text=prompt, channel="cli", user_id="local", conversation_id="default")
+                resp = runtime.handle_message(msg)
+                print_banner_box(resp.text, level="info" if resp.success else "error", title="Plan")
+                continue
+            _set_cli_mode("plan")
             if len(parts) > 1:
                 sub_task = parts[1].strip()
                 cols, rows, box_w, margin, pad = get_layout_dims()
@@ -3116,51 +3159,18 @@ def run_interactive(
                         is_interactive=False,
                     )
 
-                from plans import get_latest_plan, format_plan_handoff
+                from plans import get_latest_plan
                 lp = get_latest_plan(repo_dir)
                 if lp:
                     plan_choice = review_and_confirm_plan(lp, repo_dir, active_test_cmd=active_test_cmd, interactive=True)
                     if plan_choice == "execute":
-                        if not active_test_cmd and lp:
-                            v_cmds = getattr(lp, "verification_commands", None)
-                            if isinstance(v_cmds, list) and v_cmds:
-                                active_test_cmd = " ".join(str(c) for c in v_cmds if str(c).strip())
-                            elif isinstance(v_cmds, str) and v_cmds.strip():
-                                active_test_cmd = v_cmds.strip()
-                        if not active_test_cmd:
-                            res_cmd, res_cancelled = resolve_verification_command(
-                                repo_dir=repo_dir,
-                                configured_cmd=None,
-                                task_description=f"execute plan: {lp.title}",
-                                interactive=True,
-                                console=console,
-                            )
-                            if res_cancelled:
-                                print_banner_box("Eksekusi rencana dibatalkan. Mode tetap PLAN.", level="info", title="Plan Cancelled")
-                                continue
-                            active_test_cmd = res_cmd or ""
-                        active_mode = "build"
-                        active_plan_context = format_plan_handoff(lp, repo_dir)
-                        spin_exec = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas (Build)...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
-                        with Live(Padding(spin_exec, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
-                            execute_task(
-                                task=f"execute plan: {lp.title}",
-                                repo_dir=repo_dir,
-                                backend=active_backend,
-                                model=active_model,
-                                provider=active_provider,
-                                test_cmd=active_test_cmd,
-                                module_map=module_map,
-                                min_domain_confidence=min_domain_confidence,
-                                auto_pr=auto_pr,
-                                pr_risk_ceiling=pr_risk_ceiling,
-                                max_retries=max_retries,
-                                skill=active_skill,
-                                mode="build",
-                                plan_context=active_plan_context,
-                                runtime=runtime,
-                                is_interactive=True,
-                            )
+                        print_banner_box(
+                            "Eksekusi otomatis dari mode Plan belum tersedia: eksekusi Build memerlukan "
+                            "ApprovedExecutionContract yang diterbitkan melalui alur approval.\n"
+                            "Mode tetap PLAN dan tidak ada berkas sumber yang diubah.",
+                            level="warning",
+                            title="Build Execution Unavailable",
+                        )
                     elif plan_choice == "refine":
                         print_banner_box("Mode tetap PLAN untuk perbaikan rencana. Masukkan catatan atau instruksi tambahan.", level="info", title="Plan Refinement")
                     else:
@@ -3178,64 +3188,25 @@ def run_interactive(
             continue
         elif lower.startswith("/build"):
             parts = prompt.split(maxsplit=1)
-            active_mode = "build"
-            from plans import get_latest_plan, format_plan_handoff, check_plan_staleness
+            _set_cli_mode("build")
+            from plans import get_latest_plan
             lp = get_latest_plan(repo_dir)
             if lp:
-                active_plan_context = format_plan_handoff(lp, repo_dir)
                 plan_choice = review_and_confirm_plan(lp, repo_dir, active_test_cmd=active_test_cmd, interactive=True)
                 if plan_choice == "execute":
-                    if not active_test_cmd and lp:
-                        v_cmds = getattr(lp, "verification_commands", None)
-                        if isinstance(v_cmds, list) and v_cmds:
-                            active_test_cmd = " ".join(str(c) for c in v_cmds if str(c).strip())
-                        elif isinstance(v_cmds, str) and v_cmds.strip():
-                            active_test_cmd = v_cmds.strip()
-                    sub_task = parts[1].strip() if len(parts) > 1 else f"execute plan: {lp.title}"
-                    if not active_test_cmd:
-                        res_cmd, res_cancelled = resolve_verification_command(
-                            repo_dir=repo_dir,
-                            configured_cmd=None,
-                            task_description=sub_task,
-                            interactive=True,
-                            console=console,
-                        )
-                        if res_cancelled:
-                            print_banner_box("Eksekusi tugas dibatalkan oleh pengguna.", level="info", title="Task Cancelled")
-                            continue
-                        active_test_cmd = res_cmd or ""
-                    cols, rows, box_w, margin, pad = get_layout_dims()
-                    right_margin = max(0, cols - box_w - margin)
-                    from rich.padding import Padding
-                    from rich.live import Live
-                    from rich.spinner import Spinner
-                    spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]Mengeksekusi rencana tugas (Build)...[/bold {COLOR_FG_PRIMARY}]", style=COLOR_ACCENT)
-                    with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
-                        execute_task(
-                            task=sub_task,
-                            repo_dir=repo_dir,
-                            backend=active_backend,
-                            model=active_model,
-                            provider=active_provider,
-                            test_cmd=active_test_cmd,
-                            module_map=module_map,
-                            min_domain_confidence=min_domain_confidence,
-                            auto_pr=auto_pr,
-                            pr_risk_ceiling=pr_risk_ceiling,
-                            max_retries=max_retries,
-                            skill=active_skill,
-                            mode="build",
-                            plan_context=active_plan_context,
-                            runtime=runtime,
-                            is_interactive=True,
-                        )
+                    print_banner_box(
+                        "Eksekusi otomatis dari mode Build belum tersedia: eksekusi Build memerlukan "
+                        "ApprovedExecutionContract yang diterbitkan melalui alur approval.\n"
+                        "Mode tetap BUILD tanpa mengeksekusi rencana; tidak ada berkas sumber yang diubah.",
+                        level="warning",
+                        title="Build Execution Unavailable",
+                    )
                 elif plan_choice == "refine":
-                    active_mode = "plan"
+                    _set_cli_mode("plan")
                     print_banner_box("Mode beralih ke: PLAN untuk perbaikan rencana. Masukkan instruksi tambahan.", level="info", title="Plan Refinement")
                 else:
                     print_banner_box("Eksekusi rencana dibatalkan. Mode tetap BUILD tanpa eksekusi.", level="info", title="Plan Cancelled")
             else:
-                active_plan_context = None
                 if len(parts) > 1:
                     sub_task = parts[1].strip()
                     cols, rows, box_w, margin, pad = get_layout_dims()
@@ -3266,7 +3237,9 @@ def run_interactive(
                 else:
                     print_banner_box(
                         f"Mode sesi beralih ke: [bold {COLOR_ACCENT}]BUILD[/bold {COLOR_ACCENT}]\n"
-                        "Tidak ada rencana sebelumnya di .brainfrog/plans/. Eksekusi langsung aktif.",
+                        "Tidak ada rencana sebelumnya di .brainfrog/plans/.\n"
+                        "Eksekusi terkontrol memerlukan ApprovedExecutionContract dari alur approval; "
+                        "tanpa kontrak, tugas Build ditolak aman (fail-closed).",
                         level="info",
                         title="Mode: BUILD",
                     )
@@ -3274,8 +3247,13 @@ def run_interactive(
         elif lower == "/status":
             branch = get_git_branch(repo_dir)
             remote_url = get_git_remote_url(repo_dir, "origin") or "none (local only)"
-            mode_color = "#4EC9B0" if active_mode == "plan" else COLOR_ACCENT
-            mode_desc = "Eksplorasi codebase & penyusunan PRD" if active_mode == "plan" else "Eksekusi kode & pengujian"
+            mode_color = "#4EC9B0" if active_mode == "plan" else (COLOR_INFO if active_mode == "chat" else COLOR_ACCENT)
+            if active_mode == "plan":
+                mode_desc = "Eksplorasi codebase & penyusunan PRD"
+            elif active_mode == "chat":
+                mode_desc = "Tanya jawab & diskusi codebase"
+            else:
+                mode_desc = "Eksekusi terkontrol (memerlukan kontrak approval)"
             from system2.visual_inspector import find_browser_bin
             browser_bin = find_browser_bin()
             browser_label = f"[{COLOR_ACCENT}]{Path(browser_bin).name} (Headless Ready)[/{COLOR_ACCENT}]" if browser_bin else f"[{COLOR_FG_MUTED}]Not detected[/{COLOR_FG_MUTED}]"
@@ -3313,6 +3291,12 @@ def run_interactive(
                 except Exception:
                     pass
             print_banner_box(resp.text, level="success" if resp.success else "error", title="Workspace")
+            continue
+        elif lower in ("/plan", "/plans") or lower.startswith(("/plan ", "/plans ")):
+            from core.runtime.messages import IncomingMessage
+            msg = IncomingMessage(text=prompt, channel="cli", user_id="local", conversation_id="default")
+            resp = runtime.handle_message(msg)
+            print_banner_box(resp.text, level="info" if resp.success else "error", title="Plans")
             continue
         elif (
             lower in ("/show-proof", "/proof")
@@ -3890,13 +3874,7 @@ def run_interactive(
                     active_test_cmd = detect_default_test_cmd(repo_dir)
                     print_banner_box(f"Direktori repositori dipindah ke:\n{repo_dir}", level="success", title="Switch Repo")
                     ensure_git_remote(repo_dir)
-                    if active_mode == "build":
-                        try:
-                            from plans import get_latest_plan, format_plan_handoff
-                            _lp = get_latest_plan(repo_dir)
-                            active_plan_context = format_plan_handoff(_lp, repo_dir) if _lp else None
-                        except Exception:
-                            active_plan_context = None
+                    active_plan_context = None
                     runtime = BrainFrogRuntime(
                         repo_dir=repo_dir,
                         default_backend=active_backend,
@@ -4101,34 +4079,6 @@ def run_interactive(
             else:
                 continue
 
-        # Check if this prompt is an execution trigger for an active plan
-        if active_mode == "build":
-            from plans import get_latest_plan, format_plan_handoff
-            lp = get_latest_plan(repo_dir)
-            task_clean = task_text.strip().lower()
-            plan_triggers = {
-                "execute from plans.", "execute from plans", "execute from plan", "execute plan",
-                "eksekusi plan", "jalankan plan", "run the plan", "run plan", "implement plan",
-                "build from plan", "sesuai plan", "gass", "gas", "do it", "lanjutkan", "kerjakan plan",
-                "execute", "eksekusi", "jalankan",
-            }
-            is_direct_plan_exec = (
-                task_clean in plan_triggers
-                or any(kw in task_clean for kw in ("execute from plan", "execute plan", "jalankan plan", "eksekusi plan", "sesuai plan", "run the plan", "build from plan"))
-            )
-            if lp and is_direct_plan_exec:
-                choice = review_and_confirm_plan(lp, repo_dir, active_test_cmd=active_test_cmd, interactive=True)
-                if choice == "cancel":
-                    print_banner_box("Eksekusi rencana dibatalkan. Tidak ada berkas yang diubah.", level="info", title="Plan Cancelled")
-                    staged_images.clear()
-                    continue
-                elif choice == "refine":
-                    active_mode = "plan"
-                    print_banner_box("Mode beralih ke: PLAN untuk perbaikan rencana.", level="info", title="Plan Refinement")
-                    staged_images.clear()
-                    continue
-                active_plan_context = format_plan_handoff(lp, repo_dir)
-
         # Execute task with live braille spinner aligned with text box
         cols, rows, box_w, margin, pad = get_layout_dims()
         right_margin = max(0, cols - box_w - margin)
@@ -4168,8 +4118,12 @@ def run_interactive(
 
         from rich.live import Live
         from rich.spinner import Spinner
-        spinner_style = "#4EC9B0" if active_mode == "plan" else COLOR_ACCENT
-        spinner_text = "Mengeksplorasi codebase & menyusun PRD..." if active_mode == "plan" else "Mengeksekusi rencana tugas..."
+        if active_mode == "plan":
+            spinner_style, spinner_text = "#4EC9B0", "Mengeksplorasi codebase & menyusun PRD..."
+        elif active_mode == "chat":
+            spinner_style, spinner_text = COLOR_INFO, "Menjawab pertanyaan (Chat)..."
+        else:
+            spinner_style, spinner_text = COLOR_ACCENT, "Mengeksekusi rencana tugas..."
         spin = Spinner("dots", text=f" [bold {COLOR_FG_PRIMARY}]{spinner_text}[/bold {COLOR_FG_PRIMARY}]", style=spinner_style)
         with Live(Padding(spin, (0, right_margin, 0, margin)), console=console, refresh_per_second=12.5, transient=True):
             exit_code = execute_task(
@@ -4219,7 +4173,7 @@ def main() -> int:
     p.add_argument("-m", "--model", "--claude-model", dest="model", default=None, help="Model name (e.g. gemini-3.8-flash-high, claude-sonnet-5)")
     p.add_argument("--provider", default=None, help="System 2 AI provider (antigravity, claude, openai, openrouter, sumopod, openai-compatible)")
     p.add_argument("--skill", default=None, help="Explicitly activate a modular skill (e.g. --skill audit-anti-slop)")
-    p.add_argument("--mode", choices=["build", "plan"], default="build", help="Session mode: build (default) or plan")
+    p.add_argument("--mode", choices=["chat", "plan", "build"], default=None, help="Session mode: chat, plan, or build (interactive default: persisted session mode, else build)")
     p.add_argument("--auto-pr", action="store_true", help="Push branch and open GitHub PR when approved")
     p.add_argument("--pr-risk-ceiling", choices=["low", "medium", "high"], default="medium")
     p.add_argument("--max-retries", type=int, default=3)
@@ -4360,7 +4314,7 @@ def main() -> int:
             pr_risk_ceiling=args.pr_risk_ceiling,
             max_retries=args.max_retries,
             skill=args.skill,
-            mode=args.mode,
+            mode=args.mode or "build",
             attached_images=cli_images,
         )
     else:

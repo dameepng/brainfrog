@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import shutil
 import stat
@@ -169,6 +170,50 @@ def _init_git_workspace(ws: Path) -> str:
     return res.stdout.strip()
 
 
+def _execute_with_approval(runtime: BrainFrogRuntime, task_req: TaskRequest, target_file: str) -> TaskResult:
+    """Drive the canonical approval -> contract -> execution flow (Phase 1.6, two-man rule).
+
+    Build-mode mutation fails closed without an ApprovedExecutionContract, so the demo
+    faithfully shows the production flow: request approval, approve as a distinct local
+    operator identity, then execute the approved operation.
+    """
+    approval_meta = dict(task_req.metadata or {})
+    approval_meta.update({
+        "require_approval": True,
+        "requested_action": "write_code",
+        "target": target_file,
+        "user_id": "local",
+    })
+
+    gated_res = runtime.execute_autonomous_task(dataclasses.replace(task_req, metadata=approval_meta))
+    if gated_res.status != "REJECTED":
+        raise RuntimeError(f"Expected approval gating before execution, got status={gated_res.status}")
+    print("Approval required: exact operation queued for human sign-off.")
+
+    pending = [
+        req for req in runtime.approval_service.store.list_requests(active_only=True)
+        if getattr(req.canonical_operation, "target", "") == target_file
+        and str(getattr(req.status, "value", req.status)).lower() == "pending"
+    ]
+    if not pending:
+        raise RuntimeError("Expected a pending approval request after gating")
+    request = max(pending, key=lambda req: getattr(req, "created_at", 0.0))
+
+    ok, msg, _ = runtime.approval_service.approve(
+        request_id=request.request_id,
+        approver_id="operator",
+        channel=task_req.channel or "cli",
+        session_id=request.session_id,
+    )
+    if not ok:
+        raise RuntimeError(f"Approval transition failed: {msg}")
+    print(f"Approved request {request.request_id[:12]}... by distinct operator identity 'operator'.")
+
+    approved_meta = dict(approval_meta)
+    approved_meta["approval_id"] = request.request_id
+    return runtime.execute_autonomous_task(dataclasses.replace(task_req, metadata=approved_meta))
+
+
 def run_scenario_1_verified(ws: Path) -> str:
     """Scenario 1: Successful change with actual test command and VERIFIED proof."""
     print("\n" + "=" * 70)
@@ -230,7 +275,7 @@ def run_scenario_1_verified(ws: Path) -> str:
     )
 
     print(f"Executing canonical production workflow for '{task_id}' via BrainFrogRuntime...")
-    task_res: TaskResult = runtime.execute_autonomous_task(task_req)
+    task_res: TaskResult = _execute_with_approval(runtime, task_req, "math_utils.py")
 
     print(f"Workflow outcome: status={task_res.status}, success={task_res.success}, verified={task_res.verified}")
     assert task_res.success is True, f"Expected task to succeed, got: {task_res.summary}"
@@ -310,7 +355,7 @@ def run_scenario_2_failed_rollback(ws: Path) -> str:
     )
 
     print(f"Executing canonical production workflow for '{task_id}' via BrainFrogRuntime...")
-    task_res: TaskResult = runtime.execute_autonomous_task(task_req)
+    task_res: TaskResult = _execute_with_approval(runtime, task_req, "math_utils.py")
 
     print(f"Workflow outcome: status={task_res.status}, success={task_res.success}, verified={task_res.verified}")
     assert task_res.success is False, "Expected task to fail due to failing unit tests"

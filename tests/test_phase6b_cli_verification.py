@@ -57,6 +57,8 @@ from core.runtime import (
 )
 from orchestrator import PlanStep, StepResult
 
+from tests.approval_flow_helpers import run_approved_task, run_sdk_sync_with_approval
+
 
 class TestPhase6BCLIVerification(unittest.TestCase):
     def setUp(self):
@@ -687,9 +689,9 @@ class TestPhase6BCLIVerification(unittest.TestCase):
         )
 
         task_res_list = []
-        orig_exec = cli.execute_autonomous_task
         def capture_exec(rt, req):
-            res = orig_exec(rt, req)
+            # Phase 1.6 (R1): mutation requires an approved execution contract.
+            res = run_approved_task(rt, req, target="target.py")
             task_res_list.append(res)
             return res
 
@@ -725,8 +727,11 @@ class TestPhase6BCLIVerification(unittest.TestCase):
             system2_factory=lambda **_: s2_sdk,
             default_test_cmd=None,
         )
-        client = BrainFrogClient(workspace=self.repo_dir, runtime=runtime_sdk, test_command=None)
-        res_sdk = client.run_sync(task="SDK mutate target.py", test_command=None)
+        client = BrainFrogClient(workspace=self.repo_dir, runtime=runtime_sdk, test_command=None, conversation_id="default")
+        # Phase 1.6 (R1): mutation requires an approved execution contract.
+        res_sdk = run_sdk_sync_with_approval(
+            client, task="SDK mutate target.py", task_id="task_p6b_12_sdk", target="target.py",
+        )
         client.close_sync()
 
         self.assertFalse(res_sdk.verified)
@@ -752,9 +757,9 @@ class TestPhase6BCLIVerification(unittest.TestCase):
         )
 
         task_res_list = []
-        orig_exec = cli.execute_autonomous_task
         def capture_exec(rt, req):
-            res = orig_exec(rt, req)
+            # Phase 1.6 (R1): mutation requires an approved execution contract.
+            res = run_approved_task(rt, req, target="app_logic.py")
             task_res_list.append(res)
             return res
 
@@ -784,8 +789,12 @@ class TestPhase6BCLIVerification(unittest.TestCase):
             system2_factory=lambda **_: s2_sdk,
             default_test_cmd="",
         )
-        client = BrainFrogClient(workspace=self.repo_dir, runtime=runtime_sdk, test_command=[])
-        res_sdk = client.run_sync(task="SDK modify app_logic", test_command=[])
+        client = BrainFrogClient(workspace=self.repo_dir, runtime=runtime_sdk, test_command=[], conversation_id="default")
+        # Phase 1.6 (R1): mutation requires an approved execution contract.
+        res_sdk = run_sdk_sync_with_approval(
+            client, task="SDK modify app_logic", task_id="task_p6b_13_sdk",
+            target="app_logic.py", test_command=[],
+        )
         client.close_sync()
 
         self.assertFalse(res_sdk.verified)
@@ -810,10 +819,10 @@ class TestPhase6BCLIVerification(unittest.TestCase):
         )
 
         task_res_list = []
-        orig_exec = cli.execute_autonomous_task
         def capture_exec(rt, req):
             with patch.object(FileProofStore, "save", side_effect=IOError("Durable proof persistence error")):
-                res = orig_exec(rt, req)
+                # Phase 1.6 (R1): mutation requires an approved execution contract.
+                res = run_approved_task(rt, req, target="mod.py")
                 task_res_list.append(res)
                 return res
 

@@ -22,6 +22,16 @@ from .approval import (
 )
 from .contract import ApprovedExecutionContract
 from .runtime import BrainFrogRuntime
+from .model_switcher import (
+    SUPPORTED_SYSTEM2_PROVIDERS,
+    check_provider_credentials,
+    format_model_status_markdown,
+    format_models_markdown,
+    get_canonical_provider,
+    get_default_model_for_provider,
+    is_model_supported_for_provider,
+    switch_session_model,
+)
 from .session import SessionManager, SessionState, session_manager
 from .work import (
     ALLOWED_TRANSITIONS,
@@ -306,6 +316,17 @@ from .task_finalization import (
     TaskFinalizationCoordinator,
     safe_atomic_replace,
 )
+from .step_runner import (
+    AmbiguousStepExecutionError,
+    PlanProgressTracker,
+    StaleExecutionAuthorizationError,
+    StepExecutionStatus,
+    StepExecutionTimeoutError,
+    StepProgressRecord,
+    StructuredStepRunner,
+    TRUSTED_IDEMPOTENT_ACTIONS,
+    is_step_safely_idempotent,
+)
 from .proof_verifier import (
     DeterministicProofVerifier,
     MANDATORY_VERIFICATION_GATES,
@@ -584,4 +605,13 @@ __all__ = [
     "VerificationCheckResult",
     "is_safe_workspace_relative_path",
     "verify_proof",
+    "StepExecutionStatus",
+    "StepProgressRecord",
+    "PlanProgressTracker",
+    "StructuredStepRunner",
+    "AmbiguousStepExecutionError",
+    "StepExecutionTimeoutError",
+    "StaleExecutionAuthorizationError",
+    "TRUSTED_IDEMPOTENT_ACTIONS",
+    "is_step_safely_idempotent",
 ]

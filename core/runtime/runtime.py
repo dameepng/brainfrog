@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from enum import Enum
 import hashlib
+import logging
 import os
 import time
 from contextlib import nullcontext
@@ -12,9 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union, TYPE_CHECKING
 
+logger = logging.getLogger(__name__)
+
 from core.config import get_system1
 from core.modules import load_module_map
-from core.plans import format_plan_handoff, get_latest_plan
 if TYPE_CHECKING:
     from orchestrator import Orchestrator, RunConfig, StepResult
 from system2 import System2Client
@@ -247,7 +249,7 @@ class BrainFrogRuntime:
         incomplete = self.transaction_store.list_incomplete()
         results: List[RecoveryResult] = []
         for tx in incomplete[:50]:
-            if not tx.workspace or not str(tx.workspace).strip():
+            if not tx.workspace or not tx.workspace.strip():
                 results.append(RecoveryResult(
                     transaction_id=tx.id,
                     previous_status=tx.status,
@@ -321,16 +323,20 @@ class BrainFrogRuntime:
                             # 3. Task identity must match canonical task ID
                             # 4. Transaction binding must match if work has transaction_id
                             # 5. Transaction status must be COMMITTED
+                            changes_obj = getattr(proof_obj, "changes", None) if proof_obj is not None else None
                             is_valid = (
                                 rep.overall_status == ProofVerificationStatus.VALID
                                 and rep.verdict_status == "VERIFIED"
                                 and proof_obj is not None
-                                and proof_obj.verdict.status == "VERIFIED"
-                                and proof_obj.changes.status == "COMMITTED"
-                                and proof_obj.task.task_id == canonical_task_id
+                                and getattr(proof_obj, "verdict", None) is not None
+                                and getattr(proof_obj.verdict, "status", None) == "VERIFIED"
+                                and changes_obj is not None
+                                and getattr(changes_obj, "status", None) == "COMMITTED"
+                                and getattr(proof_obj, "task", None) is not None
+                                and getattr(proof_obj.task, "task_id", None) == canonical_task_id
                             )
-                            if is_valid and (work.transaction_id or (proof_obj and proof_obj.changes.transaction_id)):
-                                if not proof_obj.changes.transaction_id or proof_obj.changes.transaction_id != work.transaction_id:
+                            if is_valid and (work.transaction_id or (changes_obj and getattr(changes_obj, "transaction_id", None))):
+                                if not changes_obj or not getattr(changes_obj, "transaction_id", None) or changes_obj.transaction_id != work.transaction_id:
                                     is_valid = False
                                 if tx.id != work.transaction_id or recovery.transaction_id != work.transaction_id:
                                     is_valid = False
@@ -454,16 +460,20 @@ class BrainFrogRuntime:
                                     except Exception:
                                         pass
 
+                                    changes_obj = getattr(proof_obj, "changes", None) if proof_obj is not None else None
                                     is_valid = (
                                         rep.overall_status == ProofVerificationStatus.VALID
                                         and rep.verdict_status == "VERIFIED"
                                         and proof_obj is not None
-                                        and proof_obj.verdict.status == "VERIFIED"
-                                        and proof_obj.changes.status == "COMMITTED"
-                                        and proof_obj.task.task_id == canonical_task_id
+                                        and getattr(proof_obj, "verdict", None) is not None
+                                        and getattr(proof_obj.verdict, "status", None) == "VERIFIED"
+                                        and changes_obj is not None
+                                        and getattr(changes_obj, "status", None) == "COMMITTED"
+                                        and getattr(proof_obj, "task", None) is not None
+                                        and getattr(proof_obj.task, "task_id", None) == canonical_task_id
                                     )
-                                    if is_valid and (work.transaction_id or (proof_obj and proof_obj.changes.transaction_id)):
-                                        if not proof_obj.changes.transaction_id or proof_obj.changes.transaction_id != work.transaction_id:
+                                    if is_valid and (work.transaction_id or (changes_obj and getattr(changes_obj, "transaction_id", None))):
+                                        if not changes_obj or not getattr(changes_obj, "transaction_id", None) or changes_obj.transaction_id != work.transaction_id:
                                             is_valid = False
                                         if tx.id != work.transaction_id:
                                             is_valid = False
@@ -658,13 +668,34 @@ class BrainFrogRuntime:
             channel=effective_channel,
             user_id=message.user_id,
             conversation_id=message.conversation_id,
-            default_mode=message.metadata.get("mode", "build"),
+            default_mode=message.metadata.get("mode"),
         )
         initial_incarnation = session.session_incarnation_id
 
         # 2. Deterministic Permission Gate
         policy = self.policy_provider(effective_channel)
-        requested_mode = message.metadata.get("mode") or session.active_mode
+        from core.plans import normalize_mode
+        raw_meta_mode = message.metadata.get("mode")
+        if raw_meta_mode is not None:
+            norm_meta = normalize_mode(raw_meta_mode)
+            if norm_meta is not None:
+                requested_mode = norm_meta
+            else:
+                requested_mode = session.active_mode
+                emit("agent.mode.invalid_metadata", {
+                    "session_id": session.session_id,
+                    "channel": effective_channel,
+                    "raw_mode": str(raw_meta_mode)[:80],
+                    "fallback_mode": session.active_mode,
+                })
+        else:
+            requested_mode = session.active_mode
+
+        meta_plan_id = message.metadata.get("plan_id")
+        if meta_plan_id and session.selected_plan_id and str(meta_plan_id).strip() != str(session.selected_plan_id).strip():
+            reason = f"Plan ID mismatch: message requested plan '{meta_plan_id}', but session has '{session.selected_plan_id}' selected."
+            emit("agent.rejected", {"reason": reason})
+            return OutgoingMessage(text=f"⚠️ {reason}", events=events, success=False, status="rejected", error=reason)
 
         raw_text = message.text.strip()
 
@@ -764,7 +795,8 @@ class BrainFrogRuntime:
         # Handle slash commands for remote/all channels
         if raw_text.startswith("/"):
             parts = raw_text.split(maxsplit=1)
-            cmd = parts[0].lower()
+            raw_cmd = parts[0].lower()
+            cmd = raw_cmd.split("@")[0].rstrip(":")
 
             if cmd in ("/help", "/start"):
                 help_text = (
@@ -772,9 +804,17 @@ class BrainFrogRuntime:
                     "Available commands:\n"
                     "• `/help` — Show available commands and instructions\n"
                     "• `/status` — View active session and runtime diagnostics\n"
+                    "• `/mode` — View active session mode or switch (`/mode <chat|plan|build>`)\n"
+                    "• `/chat` — Switch to Chat mode (`/chat` or `/chat <message>`)\n"
+                    "• `/plan` — Switch to Plan mode or manage plans (`/plan`, `/plan select <id>`)\n"
+                    "• `/build` — Switch to Build mode (`/build` or `/build <task>`)\n"
+                    "• `/model` — View active System 2 model or switch (`/model <provider> <model_id>`)\n"
+                    "• `/models` — List supported providers and available models\n"
                     "• `/doctor` — Run comprehensive system & configuration check\n"
                     "• `/workspaces` — List registered project workspaces\n"
                     "• `/workspace <alias>` — Select active workspace for current session\n"
+                    "• `/plans` — List implementation plans in active workspace\n"
+                    "• `/plan` — View, select, or inspect plans (`/plan <id>`, `/plan select <id>`)\n"
                     "• `/works` — View recent work requests (e.g. `/works active`, `/works failed`)\n"
                     "• `/work <id>` — Inspect detailed status for a specific work unit\n"
                     "• `/resume <id>` — Deterministically resume incomplete work\n"
@@ -789,19 +829,154 @@ class BrainFrogRuntime:
                 return OutgoingMessage(text=help_text, events=events, success=True, status="completed")
 
             if cmd in ("/status", "/info"):
+                from .model_switcher import get_default_model_for_provider
+                from system2 import get_system2_provider
                 current_ws = session.active_workspace or self.workspace_registry.default_alias
                 ws_entry = self.workspace_registry.get(current_ws)
                 ws_path = str(ws_entry.path) if ws_entry else str(self.repo_dir)
+                eff_prov = session.active_provider or self.default_provider or get_system2_provider()
+                eff_model = session.active_model or self.default_model or get_default_model_for_provider(eff_prov)
+                prov_scope = "session override" if session.active_provider else "system default"
+                model_scope = "session override" if session.active_model else "system default"
                 status_text = (
                     f"🐸 **BrainFrog Status**\n"
                     f"• Channel: `{effective_channel}`\n"
                     f"• Session ID: `{session.session_id}`\n"
                     f"• Workspace: `{current_ws}` (`{ws_path}`)\n"
+                    f"• Selected Plan: `{session.selected_plan_id or 'none'}`\n"
+                    f"• Provider: `{eff_prov}` ({prov_scope})\n"
+                    f"• Model: `{eff_model}` ({model_scope})\n"
                     f"• Active Mode: `{session.active_mode}`\n"
                     f"• History Turns: `{len(session.history)}`\n"
                     f"• Trust Level: `{policy.trust_level}`"
                 )
                 return OutgoingMessage(text=status_text, events=events, success=True, status="completed")
+
+            # Deterministic System 2 model inspection and configuration
+            if cmd in ("/models", "/model"):
+                if not policy.is_allowed(PermissionAction.CHANGE_MODEL):
+                    err = f"Model configuration is not permitted by policy for channel '{policy.channel}'."
+                    emit("agent.rejected", {"command": cmd, "reason": err})
+                    return OutgoingMessage(
+                        text=f"⛔ Permission Denied: {err}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=err,
+                    )
+
+                if cmd == "/models":
+                    from .model_switcher import format_models_markdown
+                    sub_parts = parts[1].split() if len(parts) > 1 else []
+                    prov_filter = sub_parts[0].strip(" :,;") if sub_parts else None
+                    text = format_models_markdown(provider_filter=prov_filter)
+                    return OutgoingMessage(text=text, events=events, success=True, status="completed")
+
+                if cmd == "/model":
+                    from .model_switcher import format_model_status_markdown, switch_session_model
+                    sub_text = parts[1].strip() if len(parts) > 1 else ""
+                    if not sub_text:
+                        status_str = format_model_status_markdown(
+                            session=session,
+                            default_provider=self.default_provider,
+                            default_model=self.default_model,
+                        )
+                        return OutgoingMessage(text=status_str, events=events, success=True, status="completed")
+
+                    ok, reply = switch_session_model(
+                        session=session,
+                        raw_args=sub_text,
+                        policy=policy,
+                        default_provider=self.default_provider,
+                        default_model=self.default_model,
+                        system2_factory=self.system2_factory,
+                    )
+                    if ok:
+                        self.sessions.save(session)
+                        emit("agent.model.switched", {
+                            "session_id": session.session_id,
+                            "provider": session.active_provider,
+                            "model": session.active_model,
+                            "actor": message.user_id,
+                            "channel": effective_channel,
+                        })
+                        return OutgoingMessage(text=reply, events=events, success=True, status="completed")
+                    else:
+                        emit("agent.model.switch_rejected", {
+                            "session_id": session.session_id,
+                            "raw_args": sub_text,
+                            "error": reply,
+                            "actor": message.user_id,
+                            "channel": effective_channel,
+                        })
+                        return OutgoingMessage(text=reply, events=events, success=False, status="rejected", error=reply)
+
+            # Deterministic Session Mode inspection and configuration (/mode, /modes, /chat, /build)
+            if cmd in ("/mode", "/modes", "/chat", "/build"):
+                if not policy.is_allowed(PermissionAction.CHANGE_MODE):
+                    err = f"Mode configuration is not permitted by policy for channel '{policy.channel}'."
+                    emit("agent.rejected", {"command": cmd, "reason": err})
+                    return OutgoingMessage(
+                        text=f"⛔ Permission Denied: {err}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=err,
+                    )
+
+                from core.plans import normalize_mode
+                if cmd == "/chat":
+                    target_mode = "chat"
+                    sub_text = parts[1].strip() if len(parts) > 1 else ""
+                elif cmd == "/build":
+                    target_mode = "build"
+                    sub_text = parts[1].strip() if len(parts) > 1 else ""
+                else:
+                    sub_parts = parts[1].split() if len(parts) > 1 else []
+                    if not sub_parts:
+                        status_text = (
+                            f"🎯 **Active Mode:** `{session.active_mode}`\n\n"
+                            "Supported modes:\n"
+                            "• `chat` — Normal conversation & informational assistance (no plans or code mutations)\n"
+                            "• `plan` — Implementation planning; creates and persists plans under `.brainfrog/plans/`\n"
+                            "• `build` — Controlled implementation of existing plans (Phase 1 preview)\n\n"
+                            "Usage: `/mode <chat|plan|build>`"
+                        )
+                        return OutgoingMessage(text=status_text, events=events, success=True, status="completed")
+
+                    raw_target = sub_parts[0]
+                    target_mode = normalize_mode(raw_target)
+                    sub_text = ""
+                    if not target_mode:
+                        err_msg = (
+                            f"❌ Unsupported mode '{raw_target}'. Supported modes are: `chat`, `plan`, `build`.\n"
+                            "Usage: `/mode <chat|plan|build>`"
+                        )
+                        emit("agent.mode.switch_rejected", {
+                            "session_id": session.session_id,
+                            "raw_target": raw_target,
+                            "reason": "unsupported_mode",
+                            "actor": message.user_id,
+                            "channel": effective_channel,
+                        })
+                        return OutgoingMessage(text=err_msg, events=events, success=False, status="rejected", error=err_msg)
+
+                old_mode = session.active_mode
+                session.active_mode = target_mode
+                self.sessions.save(session)
+                emit("agent.mode.switched", {
+                    "session_id": session.session_id,
+                    "from": old_mode,
+                    "to": target_mode,
+                    "actor": message.user_id,
+                    "channel": effective_channel,
+                })
+                if not sub_text:
+                    reply = f"✅ Mode switched to `{target_mode}`."
+                    return OutgoingMessage(text=reply, events=events, success=True, status="completed")
+
+                raw_text = sub_text
+                requested_mode = target_mode
 
             if cmd in ("/doctor", "/diagnose"):
                 from .doctor import run_doctor_diagnostics
@@ -951,6 +1126,7 @@ class BrainFrogRuntime:
                         )
                     if session.active_workspace == target_alias:
                         session.active_workspace = None
+                        session.selected_plan_id = None
                         self.sessions.save(session)
                     emit("agent.workspace.removed", {
                         "alias": target_alias,
@@ -1031,6 +1207,7 @@ class BrainFrogRuntime:
                                         self.approval_service.store.save(cur)
 
                 session.active_workspace = entry.alias
+                session.selected_plan_id = None
                 self.sessions.save(session)
 
                 emit("agent.workspace.selected", {
@@ -1041,6 +1218,463 @@ class BrainFrogRuntime:
                 })
                 resp_text = f"✅ Workspace switched to `{entry.alias}` (`{entry.path}`)."
                 return OutgoingMessage(text=resp_text, events=events, success=True, status="completed")
+
+            if cmd == "/plans":
+                try:
+                    target_ws = self.get_session_workspace(session, message)
+                except WorkspaceNotFoundError as ws_err:
+                    return OutgoingMessage(
+                        text=f"❌ Workspace Error: {ws_err}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=str(ws_err),
+                    )
+                from core.plans import PlanRegistry
+                registry = PlanRegistry(target_ws)
+                sub_filter = parts[1].strip() if len(parts) > 1 else None
+                plans = registry.list_plans(status_filter=sub_filter)
+                ws_name = session.active_workspace or self.workspace_registry.default_alias
+                if not plans:
+                    filter_msg = f" matching '{sub_filter}'" if sub_filter else ""
+                    return OutgoingMessage(
+                        text=f"ℹ️ No plans found in workspace `{ws_name}`{filter_msg}.\nUse `/mode plan` to draft a plan.",
+                        events=events,
+                        success=True,
+                        status="completed",
+                    )
+                lines = [f"📋 **Implementation Plans (`{ws_name}`):**\n"]
+                for p in plans:
+                    sel_marker = " *(selected)*" if session.selected_plan_id == p.id else ""
+                    malformed_marker = " ⚠️(malformed metadata)" if p.metadata_malformed else (" ⚠️(missing metadata)" if p.metadata_missing else "")
+                    lines.append(f"• `{p.id}` — **{p.title}** [`{p.status.value}`]{sel_marker}{malformed_marker} (steps: {p.steps_count})")
+                lines.append("\nUse `/plan select <id>` to select a plan, or `/plan <id>` to view details.")
+                emit("agent.plans.listed", {
+                    "session_id": session.session_id,
+                    "count": len(plans),
+                    "workspace": ws_name,
+                })
+                return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
+
+            if cmd == "/plan":
+                try:
+                    target_ws = self.get_session_workspace(session, message)
+                except WorkspaceNotFoundError as ws_err:
+                    return OutgoingMessage(
+                        text=f"❌ Workspace Error: {ws_err}",
+                        events=events,
+                        success=False,
+                        status="rejected",
+                        error=str(ws_err),
+                    )
+                from core.plans import (
+                    PlanRegistry,
+                    PlanStatus,
+                    PlanNotFoundError,
+                    InvalidPlanTransitionError,
+                    StalePlanStateError,
+                    AmbiguousPlanError,
+                )
+                registry = PlanRegistry(target_ws)
+                ws_name = session.active_workspace or self.workspace_registry.default_alias
+                raw_args = parts[1].strip() if len(parts) > 1 else ""
+
+                if not raw_args or raw_args.lower() in ("current", "selected"):
+                    if not raw_args and session.active_mode != "plan":
+                        old_mode = session.active_mode
+                        session.active_mode = "plan"
+                        self.sessions.save(session)
+                        emit("agent.mode.switched", {
+                            "session_id": session.session_id,
+                            "from": old_mode,
+                            "to": "plan",
+                            "actor": message.user_id,
+                            "channel": effective_channel,
+                        })
+                    res = registry.select_plan(session_selected_id=session.selected_plan_id)
+                    if res.selected:
+                        p = res.selected
+                        status_str = (
+                            f"📌 **Currently Selected Plan (`{ws_name}`):**\n"
+                            f"• ID: `{p.id}`\n"
+                            f"• Title: **{p.title}**\n"
+                            f"• Status: `{p.status.value}`\n"
+                            f"• Goal: {p.goal}\n"
+                            f"• Steps: {len(p.steps)}\n"
+                            f"• Acceptance Criteria: {len(p.acceptance_criteria)}\n"
+                            f"• Resumable: {'Yes' if p.is_resumable else 'No'}\n"
+                            f"• Executable: {'Yes' if p.is_executable else 'No'} (requires ApprovedExecutionContract)\n"
+                            f"• Verifiable: {'Yes' if p.is_verifiable else 'No'}\n\n"
+                            "Use `/plan <id>` to view full details, or `/plans` to list all plans."
+                        )
+                        return OutgoingMessage(text=status_str, events=events, success=True, status="completed")
+                    else:
+                        return OutgoingMessage(
+                            text=f"ℹ️ No plan is currently selected for this session.\nUse `/plans` to list plans or `/plan select <id>` to select one.",
+                            events=events,
+                            success=True,
+                            status="completed",
+                        )
+
+                sub_parts = raw_args.split(maxsplit=2)
+                sub_action = sub_parts[0].lower()
+
+                if sub_action in ("select", "use", "choose"):
+                    target_query = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+                    if not target_query:
+                        return OutgoingMessage(
+                            text="⚠️ Usage: `/plan select <plan_id>`",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="Missing plan identifier",
+                        )
+                    sel_res = registry.select_plan(query=target_query, candidate_intent=False)
+                    if sel_res.status == "selected" and sel_res.selected:
+                        p = sel_res.selected
+                        session.selected_plan_id = p.id
+                        self.sessions.save(session)
+                        emit("agent.plan.selected", {
+                            "session_id": session.session_id,
+                            "plan_id": p.id,
+                            "workspace": ws_name,
+                            "actor": message.user_id,
+                        })
+                        reply = (
+                            f"✅ Plan selected: `{p.id}` (**{p.title}**) [status: `{p.status.value}`].\n"
+                            "ℹ️ Plan selection sets session focus but does not authorize execution or modify files."
+                        )
+                        return OutgoingMessage(text=reply, events=events, success=True, status="completed")
+                    elif sel_res.status == "ambiguous":
+                        lines = [f"⚠️ {sel_res.message}\n"]
+                        for c in sel_res.candidates:
+                            lines.append(f"• `{c.id}` — **{c.title}** [`{c.status.value}`]")
+                        return OutgoingMessage(text="\n".join(lines), events=events, success=False, status="rejected", error="Ambiguous plan match")
+                    else:
+                        return OutgoingMessage(text=f"❌ {sel_res.message}", events=events, success=False, status="rejected", error=sel_res.message)
+
+                if sub_action in ("unselect", "clear", "deselect"):
+                    old_id = session.selected_plan_id
+                    session.selected_plan_id = None
+                    self.sessions.save(session)
+                    emit("agent.plan.unselected", {
+                        "session_id": session.session_id,
+                        "previous_plan_id": old_id,
+                        "actor": message.user_id,
+                    })
+                    return OutgoingMessage(text="🔄 Plan selection cleared for this session.", events=events, success=True, status="completed")
+
+                if sub_action in ("status", "transition"):
+                    if len(sub_parts) < 3:
+                        return OutgoingMessage(
+                            text="⚠️ Usage: `/plan status <plan_id> <target_status> [reason]`",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="Invalid usage",
+                        )
+                    p_id = sub_parts[1].strip()
+                    tail = sub_parts[2].strip().split(maxsplit=1)
+                    target_st = tail[0].strip()
+                    reason_text = tail[1].strip() if len(tail) > 1 else f"Manual status update by {message.user_id}"
+
+                    try:
+                        updated_plan = registry.update_status(
+                            plan_id=p_id,
+                            new_status=target_st,
+                            actor=message.user_id,
+                            reason=reason_text,
+                        )
+                        emit("agent.plan.status_changed", {
+                            "session_id": session.session_id,
+                            "plan_id": updated_plan.id,
+                            "new_status": updated_plan.status.value,
+                            "actor": message.user_id,
+                        })
+                        return OutgoingMessage(
+                            text=f"✅ Plan `{updated_plan.id}` transitioned to `{updated_plan.status.value}` (revision: {updated_plan.revision}).",
+                            events=events,
+                            success=True,
+                            status="completed",
+                        )
+                    except (InvalidPlanTransitionError, PlanNotFoundError, StalePlanStateError) as trans_err:
+                        return OutgoingMessage(
+                            text=f"❌ Status transition rejected: {trans_err}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=str(trans_err),
+                        )
+
+                if sub_action == "verify":
+                    target_query = sub_parts[1].strip() if len(sub_parts) > 1 else (session.selected_plan_id or "")
+                    if not target_query:
+                        return OutgoingMessage(
+                            text="⚠️ Usage: `/plan verify <plan_id>` (or select a plan first with `/plan select <id>`).",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="No plan specified for verification",
+                        )
+                    try:
+                        passed, evidence, updated_plan = registry.verify_plan(
+                            plan_id=target_query,
+                            actor=message.user_id,
+                        )
+                        if passed:
+                            emit("agent.plan.verified", {
+                                "session_id": session.session_id,
+                                "plan_id": updated_plan.id,
+                                "revision": updated_plan.revision,
+                                "workspace": ws_name,
+                                "actor": message.user_id,
+                            })
+                            rep_lines = [
+                                f"✅ **Plan Verification Succeeded:** `{updated_plan.id}` (**{updated_plan.title}**)",
+                                f"• Status: `{updated_plan.status.value}` (revision: {updated_plan.revision})",
+                                f"• Verifier: `{evidence.verifier}`",
+                                f"• Timestamp: {evidence.timestamp}",
+                                f"• Checks: {len(evidence.checks)} passed (structural criteria checks)",
+                                f"• Scope: All declared acceptance criteria checks passed. (Note: Proves structural check execution; domain semantic correctness requires code review.)",
+                            ]
+                            for chk in evidence.checks:
+                                rep_lines.append(f"  - `{chk.command}`: **{chk.status}**")
+                            return OutgoingMessage(text="\n".join(rep_lines), events=events, success=True, status="completed")
+                        else:
+                            emit("agent.plan.verification_failed", {
+                                "session_id": session.session_id,
+                                "plan_id": updated_plan.id,
+                                "revision": updated_plan.revision,
+                                "workspace": ws_name,
+                                "actor": message.user_id,
+                            })
+                            rep_lines = [
+                                f"❌ **Plan Verification Failed:** `{updated_plan.id}` (**{updated_plan.title}**)",
+                                f"• Status: `{updated_plan.status.value}` (revision: {updated_plan.revision})",
+                                f"• Diagnostics preserved in failure history.",
+                            ]
+                            for chk in evidence.checks:
+                                rep_lines.append(f"  - `{chk.command}`: **{chk.status}**")
+                            return OutgoingMessage(text="\n".join(rep_lines), events=events, success=False, status="failed", error="Verification checks failed")
+                    except (InvalidPlanTransitionError, PlanNotFoundError, StalePlanStateError) as v_err:
+                        return OutgoingMessage(
+                            text=f"❌ Verification rejected: {v_err}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=str(v_err),
+                        )
+
+                if sub_action in ("questions", "unknowns", "clarifications"):
+                    target_query = sub_parts[1].strip() if len(sub_parts) > 1 else (session.selected_plan_id or "")
+                    if not target_query:
+                        return OutgoingMessage(
+                            text="⚠️ No plan specified. Use `/plan questions <plan_id>` or select a plan first with `/plan select <id>`.",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="No plan specified",
+                        )
+                    try:
+                        questions = registry.list_blocking_questions(target_query)
+                        if not questions:
+                            return OutgoingMessage(
+                                text=f"ℹ️ Plan `{target_query}` has no blocking questions or unknowns.",
+                                events=events,
+                                success=True,
+                                status="completed",
+                            )
+                        lines = [f"📋 **Blocking Unknowns & Questions for Plan `{target_query}`:**\n"]
+                        unresolved_count = 0
+                        for q in questions:
+                            status_icon = "❓ UNRESOLVED" if not q.get("resolved") else "✅ RESOLVED"
+                            if not q.get("resolved"):
+                                unresolved_count += 1
+                            lines.append(f"• **[{q.get('id')}]** `{status_icon}` (Revision: {q.get('plan_revision', 1)})")
+                            lines.append(f"  **Question:** {q.get('question') or q.get('decision')}")
+                            if q.get("reason"):
+                                lines.append(f"  **Why it matters:** {q.get('reason')}")
+                            if q.get("affected_steps"):
+                                lines.append(f"  **Affected Steps:** {', '.join(str(s) for s in q.get('affected_steps'))}")
+                            if q.get("affected_files"):
+                                lines.append(f"  **Affected Files:** {', '.join(str(f) for f in q.get('affected_files'))}")
+                            if q.get("resolved"):
+                                lines.append(f"  **Answer:** {q.get('answer')} (resolved by `{q.get('answered_by')}` at {str(q.get('answered_at', ''))[:19]})")
+                            lines.append("")
+
+                        if unresolved_count > 0:
+                            lines.append("To resolve an unknown, provide an answer using:")
+                            lines.append("  `/plan resolve <unknown_id> <your answer>`")
+                        else:
+                            lines.append("All blocking questions for this plan are resolved.")
+
+                        emit("agent.plan.questions_listed", {
+                            "session_id": session.session_id,
+                            "plan_id": target_query,
+                            "count": len(questions),
+                            "unresolved_count": unresolved_count,
+                            "actor": message.user_id,
+                        })
+                        return OutgoingMessage(text="\n".join(lines).strip(), events=events, success=True, status="completed")
+                    except (PlanNotFoundError, PermissionError) as q_err:
+                        return OutgoingMessage(
+                            text=f"❌ Error listing questions: {q_err}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=str(q_err),
+                        )
+
+                if sub_action in ("resolve", "answer"):
+                    after_action = raw_args.split(maxsplit=1)[1].strip() if len(raw_args.split(maxsplit=1)) > 1 else ""
+                    if not after_action:
+                        return OutgoingMessage(
+                            text="⚠️ Usage: `/plan resolve <unknown_id> <answer>` (or `/plan resolve <plan_id> <unknown_id> <answer>`).",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="Missing parameters for resolve",
+                        )
+
+                    tokens = after_action.split(maxsplit=2)
+                    target_plan_id: Optional[str] = None
+                    target_uid: Optional[str] = None
+                    answer_text: Optional[str] = None
+
+                    # Check if first token is an existing plan ID in the registry
+                    if len(tokens) >= 3 and registry.get_plan(tokens[0]) is not None:
+                        target_plan_id = tokens[0]
+                        target_uid = tokens[1]
+                        answer_text = tokens[2]
+                    else:
+                        target_plan_id = session.selected_plan_id
+                        target_uid = tokens[0]
+                        answer_text = after_action.split(maxsplit=1)[1].strip() if len(tokens) > 1 else ""
+
+                    if not target_plan_id:
+                        return OutgoingMessage(
+                            text="⚠️ No plan selected. Usage: `/plan resolve <plan_id> <unknown_id> <answer>` or select a plan first with `/plan select <plan_id>`.",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="No plan specified",
+                        )
+
+                    if not target_uid or not answer_text:
+                        return OutgoingMessage(
+                            text="⚠️ Usage: `/plan resolve <unknown_id> <answer>` (both unknown ID and answer are required).",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="Missing unknown_id or answer",
+                        )
+
+                    try:
+                        updated_plan = registry.resolve_blocking_unknown(
+                            plan_id=target_plan_id,
+                            unknown_id=target_uid,
+                            answer=answer_text,
+                            actor=message.user_id,
+                            session_id=session.session_id,
+                        )
+                        emit("agent.plan.unknown_resolved", {
+                            "session_id": session.session_id,
+                            "plan_id": updated_plan.id,
+                            "unknown_id": target_uid,
+                            "actor": message.user_id,
+                            "revision": updated_plan.revision,
+                        })
+                        resp_lines = [
+                            f"✅ **Blocking Unknown Resolved:** `{target_uid}` in Plan `{updated_plan.id}` (**{updated_plan.title}**)",
+                            f"• **Recorded Answer:** {answer_text}",
+                            f"• **Updated Revision:** {updated_plan.revision}",
+                            f"• **Plan Status:** `{updated_plan.status.value}`",
+                            f"• **Assumptions Updated:** Answer bound to authoritative plan specification.",
+                            "",
+                            "🔒 **Security Notice:** Previous execution approvals have been invalidated due to plan requirement changes.",
+                            "Answering a clarification does NOT grant execution authorization.",
+                            f"Before BUILD mutations can resume, review the updated plan with `/plan show {updated_plan.id}` and obtain fresh user approval.",
+                        ]
+                        return OutgoingMessage(text="\n".join(resp_lines), events=events, success=True, status="completed")
+                    except (ValueError, PlanNotFoundError, StalePlanStateError, PermissionError, InvalidPlanTransitionError) as res_err:
+                        return OutgoingMessage(
+                            text=f"❌ Failed to resolve unknown: {res_err}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=str(res_err),
+                        )
+
+                if sub_action in ("show", "view", "info", "get") or not sub_action.startswith("-"):
+                    target_query = sub_parts[1].strip() if sub_action in ("show", "view", "info", "get") and len(sub_parts) > 1 else raw_args
+                    plan_obj = registry.get_plan(target_query)
+                    if plan_obj is None:
+                        try:
+                            plan_obj = registry.get_plan_by_title(target_query)
+                        except AmbiguousPlanError as amb_err:
+                            return OutgoingMessage(text=f"❌ {amb_err}", events=events, success=False, status="rejected", error=str(amb_err))
+                    if plan_obj is not None:
+                        lines = [
+                            f"📋 **Plan Details:** `{plan_obj.id}`\n",
+                            f"• **Title:** {plan_obj.title}",
+                            f"• **Status:** `{plan_obj.status.value}` (revision: {plan_obj.revision})",
+                            f"• **Goal:** {plan_obj.goal}",
+                            f"• **File:** `.brainfrog/plans/{plan_obj.filename}`",
+                            f"• **Resumable:** {'Yes' if plan_obj.is_resumable else 'No'}",
+                            f"• **Executable:** {'Yes' if plan_obj.is_executable else 'No'} (requires ApprovedExecutionContract)",
+                            f"• **Verifiable:** {'Yes' if plan_obj.is_verifiable else 'No'}",
+                            f"• **Created:** {plan_obj.created_at}",
+                            f"• **Updated:** {plan_obj.updated_at}",
+                        ]
+                        if plan_obj.acceptance_criteria:
+                            lines.append("\n**Acceptance Criteria:**")
+                            for ac in plan_obj.acceptance_criteria:
+                                lines.append(f"- [ ] {ac}")
+                        if plan_obj.steps:
+                            lines.append("\n**Steps:**")
+                            for s in plan_obj.steps:
+                                if isinstance(s, dict):
+                                    lines.append(f"{s.get('id', '-')}. {s.get('description', '')}")
+                                else:
+                                    lines.append(f"- {s}")
+                        if plan_obj.transitions:
+                            lines.append(f"\n**Lifecycle History ({len(plan_obj.transitions)} transitions):**")
+                            for t in plan_obj.transitions[-5:]:
+                                lines.append(f"- `{t.get('from_status')}` ➔ `{t.get('to_status')}` by `{t.get('actor')}` ({t.get('timestamp', '')[:19]}): {t.get('reason')}")
+                        if plan_obj.verification_history:
+                            lines.append(f"\n**Verification Evidence:** {len(plan_obj.verification_history)} records")
+                        if plan_obj.failure_history:
+                            lines.append(f"\n**Failure History:** {len(plan_obj.failure_history)} records")
+
+                        return OutgoingMessage(text="\n".join(lines), events=events, success=True, status="completed")
+                    elif sub_action in ("show", "view", "info", "get"):
+                        return OutgoingMessage(
+                            text=f"❌ Plan '{target_query}' not found in workspace `{ws_name}`.\nUse `/plans` to list available plans.",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error="Plan not found",
+                        )
+                    else:
+                        # User typed `/plan <task>` that does not match an existing plan ID; switch to plan mode and route task to planning
+                        if sub_action in ("create", "new", "init", "start"):
+                            session.selected_plan_id = None
+                            raw_text = raw_args.split(maxsplit=1)[1].strip() if len(sub_parts) > 1 else raw_args
+                        else:
+                            raw_text = raw_args
+
+                        if session.active_mode != "plan":
+                            old_mode = session.active_mode
+                            session.active_mode = "plan"
+                            emit("agent.mode.switched", {
+                                "session_id": session.session_id,
+                                "from": old_mode,
+                                "to": "plan",
+                                "actor": message.user_id,
+                                "channel": effective_channel,
+                            })
+                        self.sessions.save(session)
+                        requested_mode = "plan"
 
             if cmd in ("/reset", "/new"):
                 old_incarnation = session.session_incarnation_id
@@ -1336,7 +1970,7 @@ class BrainFrogRuntime:
                 if not tx:
                     return OutgoingMessage(text=f"❌ Transaction '{tx_id}' not found.", events=events, success=False, status="rejected")
 
-                if not tx.workspace or not str(tx.workspace).strip():
+                if not tx.workspace or not tx.workspace.strip():
                     err_msg = f"Transaction '{tx_id}' has no recorded workspace. Recovery cannot proceed safely."
                     emit("agent.transaction.recovery_failed", {"transaction_id": tx_id, "error": err_msg})
                     return OutgoingMessage(text=f"❌ Recovery failed: {err_msg}", events=events, success=False, status="rejected", error=err_msg)
@@ -1494,16 +2128,53 @@ class BrainFrogRuntime:
                     execution_contract = ApprovedExecutionContract.from_approval_request(
                         app_req, repo_dir=appr_ws,
                     )
+                    expected_p_id = session.selected_plan_id if (execution_contract and execution_contract.plan_id) else (app_req.plan_id if app_req else None)
                     execution_contract.validate(
                         actor=message.user_id, channel=effective_channel,
                         session_id=session.session_id,
                         session_incarnation_id=session.session_incarnation_id,
                         repo_dir=active_session_ws.resolve(),
+                        expected_plan_id=expected_p_id,
                     )
                     execution_contract.capabilities.require("network.access")
                 except (ValueError, PermissionError) as exc:
                     return OutgoingMessage(text=str(exc), events=events, success=False,
                                            status="rejected", error=str(exc))
+
+                # Transition bound plan READY -> IN_PROGRESS on authorized execution start (Fail-Closed)
+                if execution_contract and execution_contract.plan_id:
+                    try:
+                        from core.plans import InvalidPlanTransitionError, PlanNotFoundError, PlanRegistry, PlanStatus
+                        p_reg = PlanRegistry(active_session_ws.resolve())
+                        target_p = p_reg.get_plan(execution_contract.plan_id)
+                        if target_p is None:
+                            raise PlanNotFoundError(f"Bound plan '{execution_contract.plan_id}' does not exist in workspace.")
+                        if target_p.content_tampered:
+                            raise InvalidPlanTransitionError(
+                                f"Cannot execute plan '{execution_contract.plan_id}': Markdown content has been modified out-of-band."
+                            )
+                        if target_p.status == PlanStatus.READY:
+                            p_reg.update_status(
+                                plan_id=execution_contract.plan_id,
+                                new_status=PlanStatus.IN_PROGRESS,
+                                actor=message.user_id,
+                                reason="Authorized execution started under ApprovedExecutionContract",
+                                contract=execution_contract,
+                            )
+                        elif target_p.status != PlanStatus.IN_PROGRESS:
+                            raise InvalidPlanTransitionError(
+                                f"Cannot execute plan '{execution_contract.plan_id}': status is '{target_p.status.value}', expected 'ready' or 'in_progress'."
+                            )
+                    except Exception as plan_trans_err:
+                        logger.error("Could not transition plan %s to IN_PROGRESS: %s", execution_contract.plan_id, plan_trans_err)
+                        return OutgoingMessage(
+                            text=f"❌ Execution rejected: plan lifecycle transition failed: {plan_trans_err}",
+                            events=events,
+                            success=False,
+                            status="rejected",
+                            error=str(plan_trans_err),
+                        )
+
                 # Incoming metadata cannot replace the approved task or workspace.
                 raw_text = f"{app_req.canonical_operation.action_type} {app_req.canonical_operation.target}"
                 message.metadata.clear()
@@ -1599,6 +2270,24 @@ class BrainFrogRuntime:
                             events=events, success=False, status="rejected",
                             error="remote_work_invalid",
                         )
+                bound_plan_id = None
+                bound_plan_rev = None
+                bound_plan_hash = None
+                bound_plan_meta_hash = None
+                target_plan_id = message.metadata.get("plan_id") or session.selected_plan_id
+                if target_plan_id:
+                    try:
+                        from core.plans import PlanRegistry
+                        t_reg = PlanRegistry(target_ws)
+                        p_doc = t_reg.get_plan(target_plan_id)
+                        if p_doc is not None and not p_doc.content_tampered and not p_doc.metadata_malformed:
+                            bound_plan_id = p_doc.id
+                            bound_plan_rev = p_doc.revision
+                            bound_plan_hash = p_doc.content_hash
+                            bound_plan_meta_hash = getattr(p_doc, "metadata_hash", None)
+                    except Exception:
+                        pass
+
                 try:
                     app_req = self.approval_service.create_request(
                         session_id=session.session_id,
@@ -1611,6 +2300,10 @@ class BrainFrogRuntime:
                         session_incarnation_id=session.session_incarnation_id,
                         capabilities=capabilities,
                         workspace_root=str(target_ws.resolve()),
+                        plan_id=bound_plan_id,
+                        plan_revision=bound_plan_rev,
+                        plan_content_hash=bound_plan_hash,
+                        plan_metadata_hash=bound_plan_meta_hash,
                     )
                 except ApprovalQuotaExceededError as qe:
                     if pending_remote_work is not None:
@@ -1700,10 +2393,18 @@ class BrainFrogRuntime:
         if approved_execution:
             effective_mode = "build"
         elif policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value:
-            if not policy.allow_code_edits and requested_mode == "build":
-                # Fallback to plan mode so remote users get safe architectural analysis & PRD
-                effective_mode = "plan"
-                emit("agent.mode.fallback", {"from": "build", "to": "plan", "reason": "remote_channel_read_only"})
+            if requested_mode == "build":
+                # In Phase 1, Build mode is not implemented for remote execution without an approved contract
+                emit("agent.mode.build_unimplemented", {
+                    "session_id": session.session_id,
+                    "channel": effective_channel,
+                })
+                return OutgoingMessage(
+                    text="🔨 Build mode is defined, but plan selection and controlled execution are not implemented yet. Use `/mode plan` to draft an implementation plan or `/mode chat` for conversation.",
+                    events=events,
+                    success=True,
+                    status="completed",
+                )
 
         # 3. Resolve Workspace & Providers
         try:
@@ -1724,11 +2425,11 @@ class BrainFrogRuntime:
         auto_pr = bool(message.metadata.get("auto_pr", False)) and policy.allow_auto_pr
         max_retries = int(message.metadata.get("max_retries", 3))
 
-        session.active_mode = effective_mode
-        if provider:
-            session.active_provider = provider
-        if model:
-            session.active_model = model
+        # Session active_mode remains isolated per session and is not mutated by execution
+        if message.metadata.get("provider"):
+            session.active_provider = message.metadata.get("provider")
+        if message.metadata.get("model"):
+            session.active_model = message.metadata.get("model")
         if skill:
             session.active_skill = skill
 
@@ -1740,11 +2441,13 @@ class BrainFrogRuntime:
             plan_context = message.metadata.get("plan_context")
         else:
             plan_context = message.metadata.get("plan_context") or session.plan_context
-            if effective_mode == "build" and not plan_context:
+            if not plan_context and session.selected_plan_id:
                 try:
-                    lp = get_latest_plan(workspace_dir)
-                    if lp:
-                        plan_context = format_plan_handoff(lp, workspace_dir)
+                    from core.plans import PlanRegistry, format_plan_handoff
+                    reg = PlanRegistry(workspace_dir)
+                    sel_doc = reg.get_plan(session.selected_plan_id)
+                    if sel_doc is not None:
+                        plan_context = format_plan_handoff(sel_doc, workspace_dir)
                 except Exception:
                     pass
 
@@ -1766,7 +2469,7 @@ class BrainFrogRuntime:
             return OutgoingMessage(text=f"❌ {err_msg}", events=events, success=False, error=err_msg)
 
         # 5. Load Domains & Prepare Orchestrator Config
-        can_auto_create = bool(effective_mode == "build" and policy.allow_code_edits)
+        can_auto_create = bool(effective_mode == "build" and policy.allow_code_edits and execution_contract is not None)
         custom_mod_map = message.metadata.get("module_map")
         map_path = Path(custom_mod_map) if custom_mod_map else None
         domains = {} if execution_contract else load_module_map(
@@ -1823,7 +2526,11 @@ class BrainFrogRuntime:
             session_id=session.session_id,
             session_incarnation_id=session.session_incarnation_id,
             work_id=remote_context.work_id if remote_context else message.metadata.get("work_id"),
-            plan_id=remote_context.plan_id if remote_context else message.metadata.get("plan_id"),
+            plan_id=(
+                execution_contract.plan_id
+                if execution_contract is not None
+                else (remote_context.plan_id if remote_context else (message.metadata.get("plan_id") or session.selected_plan_id))
+            ),
             task_id=remote_context.work_id if remote_context else (message.metadata.get("task_id") or message.id),
             transaction_store=self.transaction_store,
             transaction_verifier=self.transaction_verifier,
@@ -1912,6 +2619,20 @@ class BrainFrogRuntime:
                 results: List[StepResult] = orchestrator.run()
             except KeyboardInterrupt:
                 emit("agent.cancelled", {"reason": "KeyboardInterrupt"})
+                if execution_contract and execution_contract.plan_id:
+                    try:
+                        from core.plans import PlanRegistry, PlanStatus
+                        p_reg = PlanRegistry(workspace_dir)
+                        curr_p = p_reg.get_plan(execution_contract.plan_id)
+                        if curr_p and curr_p.status == PlanStatus.IN_PROGRESS:
+                            p_reg.update_status(
+                                plan_id=execution_contract.plan_id,
+                                new_status=PlanStatus.FAILED,
+                                actor=message.user_id,
+                                reason="Execution cancelled by user",
+                            )
+                    except Exception:
+                        pass
                 if remote_context is not None:
                     try:
                         self.remote_work.transition_for_approval(
@@ -1953,6 +2674,35 @@ class BrainFrogRuntime:
                 raise
             except Exception as e:
                 err_msg = f"Orchestration Error: {e}"
+                if execution_contract and execution_contract.plan_id:
+                    try:
+                        from core.plans import PlanRegistry, PlanStatus
+                        p_reg = PlanRegistry(workspace_dir)
+                        curr_p = p_reg.get_plan(execution_contract.plan_id)
+                        if curr_p and curr_p.status == PlanStatus.IN_PROGRESS:
+                            p_reg.update_status(
+                                plan_id=execution_contract.plan_id,
+                                new_status=PlanStatus.FAILED,
+                                actor=message.user_id,
+                                reason=f"Orchestration Exception: {e}",
+                            )
+                    except Exception:
+                        pass
+                err_meta: Dict[str, Any] = {
+                    "session_id": session.session_id,
+                    "mode": effective_mode,
+                }
+                # Preserve authoritative transaction/test outcomes produced before the
+                # failure so callers can distinguish rollback from an untracked error.
+                err_tx = getattr(cfg, "last_transaction_result", None)
+                if err_tx is not None:
+                    err_meta["transaction_id"] = err_tx.transaction_id
+                    err_meta["transaction_status"] = err_tx.status.value
+                    err_meta["transaction_success"] = err_tx.success
+                    err_meta["transaction_result"] = err_tx
+                err_test = getattr(cfg, "last_test_result", None)
+                if err_test is not None:
+                    err_meta["test_result"] = err_test
                 remote_result = None
                 if remote_context is not None:
                     is_verif_fail = (
@@ -1989,8 +2739,7 @@ class BrainFrogRuntime:
                     status="error",
                     error=err_msg,
                     metadata={
-                        "session_id": session.session_id,
-                        "mode": effective_mode,
+                        **err_meta,
                         **({"remote_work": remote_result.to_dict()} if remote_result else {}),
                     },
                 )
@@ -2279,6 +3028,8 @@ class BrainFrogRuntime:
             elif r.outcome == "planned" and detail_str:
                 reply_texts.append(detail_str)
                 session.plan_context = detail_str
+                if getattr(r, "suggestion", None):
+                    session.selected_plan_id = str(r.suggestion)
             elif r.outcome == "needs_clarification" and detail_str:
                 reply_texts.append(f"❓ {detail_str}")
             elif r.outcome in ("opened_pr", "drafted_pr"):
@@ -2294,6 +3045,31 @@ class BrainFrogRuntime:
         if remote_result is not None:
             final_text = remote_result.message
             is_success = remote_result.status == "completed" and remote_result.verification_passed
+
+        # Phase 2B.2: IN_PROGRESS -> IMPLEMENTED on successful execution; FAILED on failure
+        if execution_contract and execution_contract.plan_id:
+            try:
+                from core.plans import PlanRegistry, PlanStatus
+                p_reg = PlanRegistry(workspace_dir)
+                curr_p = p_reg.get_plan(execution_contract.plan_id)
+                if curr_p and curr_p.status == PlanStatus.IN_PROGRESS:
+                    if is_success:
+                        p_reg.update_status(
+                            plan_id=execution_contract.plan_id,
+                            new_status=PlanStatus.IMPLEMENTED,
+                            actor=message.user_id,
+                            reason="Plan execution completed successfully",
+                        )
+                        session.selected_plan_id = None
+                    else:
+                        p_reg.update_status(
+                            plan_id=execution_contract.plan_id,
+                            new_status=PlanStatus.FAILED,
+                            actor=message.user_id,
+                            reason=f"Plan execution failed: {final_text[:200]}",
+                        )
+            except Exception as plan_trans_err:
+                logger.warning("Failed to transition plan %s post-execution: %s", execution_contract.plan_id, plan_trans_err)
 
         # Check if session was reset while request was in-flight (F02 Guard)
         if session.session_incarnation_id != initial_incarnation:

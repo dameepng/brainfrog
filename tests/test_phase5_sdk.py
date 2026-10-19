@@ -78,6 +78,17 @@ from core.runtime import (
 from orchestrator import PlanStep, StepResult
 from system1.base import Answer
 
+from tests.approval_flow_helpers import (
+    APPROVER_ID,
+    _sdk_pending_id,
+    approval_metadata,
+    prepare_sdk_approval,
+    prepare_sdk_sync_approval,
+    run_approved_task,
+    run_sdk_sync_with_approval,
+    run_sdk_with_approval,
+)
+
 FIXTURE_SRC = Path(__file__).resolve().parent / "fixtures" / "phase3_demo"
 
 
@@ -149,6 +160,22 @@ def _mock_success_systems(navbar_code: str = FIXED_NAVBAR_CODE):
     return mock_s1, mock_s2
 
 
+def _synthetic_github_token() -> str:
+    """Deterministic, synthetic GitHub-style token fixture (obviously fake)."""
+    prefix = "ghp" + "_"
+    seed = "SYNTHETICPATFIXTURE"
+    pad_len = max(0, 36 - len(seed))
+    return prefix + seed + "a" * pad_len
+
+
+def _synthetic_anthropic_key() -> str:
+    """Deterministic, synthetic Anthropic-style key fixture (obviously fake)."""
+    prefix = "-".join(["sk", "ant", "api03"]) + "-"
+    seed = "SYNTHETICANTHROPICFIXTURE"
+    pad_len = max(0, 32 - len(seed))
+    return prefix + seed + "a" * pad_len
+
+
 # =============================================================================
 # 1. Basic Execution Tests
 # =============================================================================
@@ -165,9 +192,11 @@ class TestSDKBasicExecution:
                 test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
             ) as client:
                 task_id = "task_sdk_exec_001"
-                res = await client.run(
+                res = await run_sdk_with_approval(
+                    client,
                     task="Fix mobile navbar toggle",
                     task_id=task_id,
+                    target="navbar.py",
                 )
 
                 # Invariant: success=True requires verified=True
@@ -194,14 +223,18 @@ class TestSDKBasicExecution:
                 test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
             ) as client:
                 task_id = "task_sdk_proof_002"
-                res = await client.run(task="Fix navbar", task_id=task_id)
+                res = await run_sdk_with_approval(
+                    client, task="Fix navbar", task_id=task_id, target="navbar.py"
+                )
                 assert res.verified is True
 
                 proof = client.get_proof(task_id)
                 assert proof is not None
                 assert proof.task.task_id == task_id
                 assert proof.verdict.status == "VERIFIED"
-                assert proof.changes.status == "COMMITTED"
+                # Approved contract-path commits are recorded as VERIFIED;
+                # the legacy direct path recorded COMMITTED.
+                assert proof.changes.status in ("COMMITTED", "VERIFIED")
                 assert len(proof.changes.files) >= 1
 
                 retrieved = client.get_task(task_id)
@@ -222,9 +255,11 @@ class TestSDKBasicExecution:
             test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
         ) as client:
             task_id = "task_sdk_sync_003"
-            res = client.run_sync(
+            res = run_sdk_sync_with_approval(
+                client,
                 task="Fix navbar sync",
                 task_id=task_id,
+                target="navbar.py",
             )
 
             assert res.success is True
@@ -300,7 +335,9 @@ class TestSDKIdentityAndIsolation:
                 test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
             ) as client:
                 task_id = "task_correlation_004"
-                res = await client.run("Fix navbar", task_id=task_id)
+                res = await run_sdk_with_approval(
+                    client, task="Fix navbar", task_id=task_id, target="navbar.py"
+                )
                 assert res.transaction_id is not None
 
                 proof = client.get_proof(task_id)
@@ -389,7 +426,13 @@ class TestSDKCancellation:
                 system2_factory=lambda **k: mock_s2,
             ) as client:
                 task_id = "task_cancel_006"
-                handle = client.start("Fix navbar with delay", task_id=task_id)
+                approved_meta = await prepare_sdk_approval(
+                    client,
+                    "Fix navbar with delay",
+                    task_id=task_id,
+                    target="navbar.py",
+                )
+                handle = client.start("Fix navbar with delay", task_id=task_id, metadata=approved_meta)
 
                 # Wait until execution begins
                 await asyncio.to_thread(cancel_reached.wait, timeout=3.0)
@@ -518,7 +561,9 @@ class TestSDKIdempotency:
                 test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
             ) as client:
                 task_id = "task_idempotent_011"
-                res1 = await client.run("Initial execution", task_id=task_id)
+                res1 = await run_sdk_with_approval(
+                    client, task="Initial execution", task_id=task_id, target="navbar.py"
+                )
                 assert res1.verified is True
 
                 # Second submission with the exact same task_id must be rejected
@@ -546,10 +591,12 @@ class TestSDKEvents:
                 system2_factory=lambda **k: mock_s2,
                 test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
             ) as client:
-                secret_token = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
-                res = await client.run(
-                    f"Fix navbar with secret {secret_token}",
+                secret_token = _synthetic_github_token()
+                res = await run_sdk_with_approval(
+                    client,
+                    task=f"Fix navbar with secret {secret_token}",
                     task_id=task_id,
+                    target="navbar.py",
                     on_event=lambda ev: emitted_events.append(ev),
                 )
                 assert res.verified is True
@@ -612,8 +659,12 @@ class TestSDKConcurrency:
             )
 
             res1, res2 = await asyncio.gather(
-                client1.run("Fix navbar in repo1", task_id="task_conc_013"),
-                client2.run("Fix navbar in repo2", task_id="task_conc_014"),
+                run_sdk_with_approval(
+                    client1, task="Fix navbar in repo1", task_id="task_conc_013", target="navbar.py"
+                ),
+                run_sdk_with_approval(
+                    client2, task="Fix navbar in repo2", task_id="task_conc_014", target="navbar.py"
+                ),
             )
 
             assert res1.verified is True
@@ -640,12 +691,17 @@ class TestSDKCLIParity:
             system2_factory=lambda **k: mock_s2,
         )
 
-        exit_code = cli.execute_task(
-            task="Fix navbar via CLI",
-            repo_dir=phase5_repo,
-            runtime=runtime,
-            test_cmd=f"{sys.executable} -m pytest tests/test_navbar.py -q",
-        )
+        # CLI execution runs through the same approval -> contract flow
+        def capture_exec(rt: Any, req: Any) -> Any:
+            return run_approved_task(rt, req, target="navbar.py")
+
+        with patch("cli.execute_autonomous_task", side_effect=capture_exec):
+            exit_code = cli.execute_task(
+                task="Fix navbar via CLI",
+                repo_dir=phase5_repo,
+                runtime=runtime,
+                test_cmd=f"{sys.executable} -m pytest tests/test_navbar.py -q",
+            )
         assert exit_code == 0
 
         # SDK execution with the exact same runtime produces equivalent verified results
@@ -654,7 +710,9 @@ class TestSDKCLIParity:
             runtime=runtime,
             test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
         )
-        res = client.run_sync("Fix navbar via SDK", task_id="task_cli_parity_015")
+        res = run_sdk_sync_with_approval(
+            client, task="Fix navbar via SDK", task_id="task_cli_parity_015", target="navbar.py"
+        )
         assert res.verified is True
         assert res.status == "COMMITTED"
 
@@ -710,8 +768,21 @@ class TestSDKAdversarial:
         with pytest.raises(InvalidRequestError, match="Scope path traversal forbidden"):
             client.run_sync("Fix navbar", allowed_scope=["../../etc/passwd"])
 
+        # Root-relative ("absolute-looking") path: ntpath.isabs() is False for
+        # single-separator paths on Windows; the validator must fail closed anyway.
         with pytest.raises(InvalidRequestError, match="Scope path traversal forbidden"):
             client.run_sync("Fix navbar", allowed_scope=["/absolute/path/outside"])
+
+        with pytest.raises(InvalidRequestError, match="Scope path traversal forbidden"):
+            client.run_sync("Fix navbar", allowed_scope=["/root_relative/backslash"])
+
+        # UNC path anchored outside the workspace
+        with pytest.raises(InvalidRequestError, match="Scope path traversal forbidden"):
+            client.run_sync("Fix navbar", allowed_scope=[r"\\server\share\evil"])
+
+        # Legitimate relative scope within the workspace must be accepted.
+        req = client._normalize_request("Fix navbar", allowed_scope=["sub/dir"])
+        assert req.allowed_scope == ["sub/dir"]
 
     def test_path_traversal_in_task_id_rejected(self, phase5_repo: Path) -> None:
         """SDK must reject directory traversal attempts in task_id."""
@@ -750,7 +821,7 @@ class TestSDKAdversarial:
         """Secrets present in input or output must be scrubbed from events and proof."""
         mock_s1, mock_s2 = _mock_success_systems()
         task_id = "task_adv_secret_017"
-        secret = "sk-ant-api03-secret1234567890abcdef1234567890"
+        secret = _synthetic_anthropic_key()
 
         captured_events: List[SDKEvent] = []
 
@@ -761,9 +832,11 @@ class TestSDKAdversarial:
             test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
         )
 
-        res = client.run_sync(
-            f"Fix navbar with credential {secret}",
+        res = run_sdk_sync_with_approval(
+            client,
+            task=f"Fix navbar with credential {secret}",
             task_id=task_id,
+            target="navbar.py",
             on_event=lambda ev: captured_events.append(ev),
         )
         assert res.verified is True
@@ -888,7 +961,10 @@ class TestPhase5DSDKRemediation:
             system2_factory=lambda **_: s2,
             test_command=self.TEST_CMD,
         )
-        handle1 = client.start("Fix navbar 1", task_id="task_start_dup_01")
+        approved_meta = prepare_sdk_sync_approval(
+            client, "Fix navbar 1", task_id="task_start_dup_01", target="navbar.py"
+        )
+        handle1 = client.start("Fix navbar 1", task_id="task_start_dup_01", metadata=approved_meta)
         with pytest.raises(InvalidRequestError, match="(already actively executing|already active)"):
             client.start("Fix navbar 2", task_id="task_start_dup_01")
 
@@ -905,7 +981,10 @@ class TestPhase5DSDKRemediation:
             system2_factory=lambda **_: s2,
             test_command=self.TEST_CMD,
         )
-        handle = client.start("Fix navbar", task_id="task_race_01")
+        approved_meta = prepare_sdk_sync_approval(
+            client, "Fix navbar", task_id="task_race_01", target="navbar.py"
+        )
+        handle = client.start("Fix navbar", task_id="task_race_01", metadata=approved_meta)
         with pytest.raises(InvalidRequestError, match="(already actively executing|already active)"):
             client.run_sync("Fix navbar duplicate", task_id="task_race_01")
 
@@ -979,8 +1058,12 @@ class TestPhase5DSDKRemediation:
         client1 = BrainFrogClient(workspace=phase5_repo, system1_factory=lambda _: s1, system2_factory=lambda **_: s2, test_command=self.TEST_CMD)
         client2 = BrainFrogClient(workspace=repo2, system1_factory=lambda _: s1, system2_factory=lambda **_: s2, test_command=self.TEST_CMD)
 
-        res1 = client1.run_sync("Task 1", task_id="task_shared_id_diff_ws")
-        res2 = client2.run_sync("Task 2", task_id="task_shared_id_diff_ws")
+        res1 = run_sdk_sync_with_approval(
+            client1, task="Task 1", task_id="task_shared_id_diff_ws", target="navbar.py"
+        )
+        res2 = run_sdk_sync_with_approval(
+            client2, task="Task 2", task_id="task_shared_id_diff_ws", target="navbar.py"
+        )
 
         assert res1.verified is True
         assert res2.verified is True
@@ -991,7 +1074,9 @@ class TestPhase5DSDKRemediation:
         """A completed task ID cannot be resubmitted by the same or different client."""
         s1, s2 = _mock_success_systems()
         client1 = BrainFrogClient(workspace=phase5_repo, system1_factory=lambda _: s1, system2_factory=lambda **_: s2, test_command=self.TEST_CMD)
-        res = client1.run_sync("Initial task", task_id="task_proven_001")
+        res = run_sdk_sync_with_approval(
+            client1, task="Initial task", task_id="task_proven_001", target="navbar.py"
+        )
         assert res.verified is True
 
         # Resubmit via same client
@@ -1021,7 +1106,12 @@ class TestPhase5DSDKRemediation:
 
         s1, s2 = _mock_success_systems()
         client = BrainFrogClient(workspace=phase5_repo, system1_factory=lambda _: s1, system2_factory=lambda **_: s2, test_command=self.TEST_CMD)
-        res = client.run_sync("Fix navbar with reclaimed stale lock", task_id="stale_task_999")
+        res = run_sdk_sync_with_approval(
+            client,
+            task="Fix navbar with reclaimed stale lock",
+            task_id="stale_task_999",
+            target="navbar.py",
+        )
         assert res.verified is True
         client.close_sync()
 
@@ -1088,10 +1178,18 @@ class TestPhase5DSDKRemediation:
         result_holder: List[Any] = []
         error_holder: List[Exception] = []
 
+        approved_meta = prepare_sdk_sync_approval(
+            client, "Fix navbar in raw thread", task_id="task_raw_thread_01", target="navbar.py"
+        )
+
         def thread_without_loop() -> None:
             asyncio.set_event_loop(None)
             try:
-                handle = client.start("Fix navbar in raw thread", task_id="task_raw_thread_01")
+                handle = client.start(
+                    "Fix navbar in raw thread",
+                    task_id="task_raw_thread_01",
+                    metadata=approved_meta,
+                )
                 res = handle.wait_sync(timeout=10.0)
                 result_holder.append(res)
             except Exception as exc:
@@ -1217,7 +1315,12 @@ class TestPhase5DSDKRemediation:
         )
         client_ref.append(client)
 
-        res = client.run_sync("Fix navbar with cancel in planning", task_id="task_cancel_plan_01")
+        res = run_sdk_sync_with_approval(
+            client,
+            task="Fix navbar with cancel in planning",
+            task_id="task_cancel_plan_01",
+            target="navbar.py",
+        )
         assert res.verified is False
         assert res.status == "CANCELLED"
 
@@ -1252,7 +1355,12 @@ class TestPhase5DSDKRemediation:
         )
         client_ref.append(client)
 
-        res = client.run_sync("Fix navbar and cancel before write", task_id="task_cancel_pre_mutate_01")
+        res = run_sdk_sync_with_approval(
+            client,
+            task="Fix navbar and cancel before write",
+            task_id="task_cancel_pre_mutate_01",
+            target="navbar.py",
+        )
         assert res.verified is False
         assert res.status == "CANCELLED"
 
@@ -1357,11 +1465,22 @@ class TestPhase5FCrashConsistencyRemediation:
             client.cancel_task(task_id)
             return res
 
+        # Gate first (no event capture), then approve as a distinct operator identity
+        req_meta = approval_metadata(target="navbar.py")
+        gated = client.run_sync("Fix navbar with late cancel", task_id=task_id, metadata=req_meta)
+        assert gated.status == "REJECTED"
+        req_id = _sdk_pending_id(client, target="navbar.py")
+        client.approve(req_id, approver=APPROVER_ID)
+        approved_meta = dict(req_meta)
+        approved_meta["approval_id"] = req_id
+
         emitted_events: List[SDKEvent] = []
         client.on_event(lambda ev: emitted_events.append(ev))
 
         with patch.object(FileProofStore, "save", side_effect=save_and_cancel, autospec=True):
-            res = client.run_sync("Fix navbar with late cancel", task_id=task_id)
+            res = client.run_sync(
+                "Fix navbar with late cancel", task_id=task_id, metadata=approved_meta
+            )
 
         # Monotonic cutoff: Result must be COMMITTED and verified=True
         assert res.status == "COMMITTED"

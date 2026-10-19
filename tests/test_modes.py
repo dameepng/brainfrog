@@ -527,10 +527,10 @@ class TestPlanAndBuildModes(unittest.TestCase):
         self.assertIn("/provider", cmd_dict)
 
     # -------------------------------------------------------------------------
-    # 11. Build mode executes directly from saved plan
+    # 11. Build mode fails closed without an authorized contract (R1 regression)
     # -------------------------------------------------------------------------
-    def test_build_mode_executes_directly_from_saved_plan(self):
-        # Save a plan document into .brainfrog/plans/
+    def test_build_mode_direct_plan_execution_fails_closed_without_contract(self):
+        # Save a plan document into .brainfrog/plans/ — it must NOT be auto-selected/executed
         meta = {
             "title": "Aplikasi CRUD Todo",
             "goal": "Membangun aplikasi CRUD Todo",
@@ -544,26 +544,37 @@ class TestPlanAndBuildModes(unittest.TestCase):
 
         s1 = MockSystem1()
         s2 = MockSystem2()
-        # Ensure plan_task is NOT called when executing directly from plan
+        # Neither planning nor writing may occur without an authorized contract
         s2.plan_task = MagicMock(side_effect=RuntimeError("plan_task should not be called"))
+        s2.write_code = MagicMock(side_effect=RuntimeError("write_code should not be called"))
 
-        cfg = RunConfig(
-            repo_dir=self.repo_dir,
-            task="execute from plans.",
-            test_command=["python", "--version"],
-            mode=MODE_BUILD,
-            plan_context=None,  # Not provided explicitly; must be auto-loaded!
-        )
-        orchestrator = Orchestrator(s1, s2, cfg)
-        results = orchestrator.run()
+        for trigger in ("execute from plans.", "jalankan plan", "lanjutkan", "do it", "gass"):
+            cfg = RunConfig(
+                repo_dir=self.repo_dir,
+                task=trigger,
+                test_command=["python", "--version"],
+                mode=MODE_BUILD,
+                plan_context=None,  # Not provided explicitly; must NOT be auto-loaded!
+            )
+            orchestrator = Orchestrator(s1, s2, cfg)
+            results = orchestrator.run()
 
-        # Should execute the 2 steps directly from the plan document
-        self.assertEqual(len(results), 2)
-        self.assertEqual(results[0].step.id, "1")
-        self.assertEqual(results[0].step.description, "Create index.html")
-        self.assertEqual(results[1].step.id, "2")
-        self.assertEqual(results[1].step.description, "Create app.js")
+            # Fail closed: bounded not-implemented response, no planning, no execution
+            self.assertEqual(len(results), 1, trigger)
+            self.assertEqual(results[0].outcome, "not_implemented", trigger)
+            self.assertIn(
+                "Build mode is defined, but plan selection and controlled execution are not implemented yet",
+                results[0].detail,
+                trigger,
+            )
+            # No transaction may be committed
+            self.assertIsNone(orchestrator.cfg.last_transaction_result, trigger)
+
         s2.plan_task.assert_not_called()
+        s2.write_code.assert_not_called()
+        # No source files may be created from the saved plan
+        self.assertFalse((self.repo_dir / "index.html").exists())
+        self.assertFalse((self.repo_dir / "app.js").exists())
 
 
 class TestDiffBreakdown(unittest.TestCase):
@@ -643,4 +654,3 @@ class TestDiffBreakdown(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

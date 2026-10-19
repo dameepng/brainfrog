@@ -535,13 +535,15 @@ def execute_autonomous_task(
     try:
         ws_lock.acquire()
     except WorkspaceLockedError as lock_err:
-        emit_event("TASK_FAILED", payload={"status": "FAILED", "reason": str(lock_err)})
+        # Canonical contract: workspace lock contention maps to LOCKED, not FAILED
+        # (see facade mapping below and SDK WorkspaceBusyError handling).
+        emit_event("TASK_FAILED", payload={"status": "LOCKED", "reason": str(lock_err)})
         return TaskResult(
             task_id=request.task_id,
             user_request=request.user_request,
             success=False,
             verified=False,
-            status="FAILED",
+            status="LOCKED",
             summary=f"❌ Workspace Locked: {lock_err}",
             failure_reason=str(lock_err),
         )

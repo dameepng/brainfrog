@@ -32,6 +32,8 @@ class PermissionAction(str, Enum):
     ACCESS_CREDENTIALS = "access_credentials"
     DEPLOYMENT = "deployment"
     DEPLOY_PROJECT = "deploy_project"
+    CHANGE_MODEL = "change_model"
+    CHANGE_MODE = "change_mode"
 
 
 # Canonical mapping for synonyms
@@ -46,6 +48,8 @@ CANONICAL_ACTION_MAP: Dict[str, str] = {
     PermissionAction.DEPLOYMENT.value: PermissionAction.DEPLOYMENT.value,
     PermissionAction.WRITE_FILES.value: PermissionAction.WRITE_CODE.value,
     PermissionAction.WRITE_CODE.value: PermissionAction.WRITE_CODE.value,
+    PermissionAction.CHANGE_MODEL.value: PermissionAction.CHANGE_MODEL.value,
+    PermissionAction.CHANGE_MODE.value: PermissionAction.CHANGE_MODE.value,
 }
 
 
@@ -116,6 +120,8 @@ def get_default_policy(channel: str, allow_code_edits: bool = False) -> Permissi
             PermissionAction.ACCESS_CREDENTIALS.value,
             PermissionAction.DEPLOYMENT.value,
             PermissionAction.DEPLOY_PROJECT.value,
+            PermissionAction.CHANGE_MODEL.value,
+            PermissionAction.CHANGE_MODE.value,
         }
         return PermissionPolicy(
             channel=channel,
@@ -130,6 +136,8 @@ def get_default_policy(channel: str, allow_code_edits: bool = False) -> Permissi
         PermissionAction.READ_CODE.value,
         PermissionAction.DIAGNOSE.value,
         PermissionAction.PLAN.value,
+        PermissionAction.CHANGE_MODEL.value,
+        PermissionAction.CHANGE_MODE.value,
     }
     if allow_code_edits:
         allowed.add(PermissionAction.WRITE_CODE.value)
@@ -240,8 +248,23 @@ def classify_request_action(
         if re.search(pat, clean):
             return PermissionAction.GIT_SAFE_OPS
 
-    # 7. Fallback based on question vs plan vs read
-    if clean.endswith("?") or any(clean.startswith(w) for w in ("how ", "what ", "why ", "explain ", "describe ", "list ")):
+    # 7. Model configuration / switching and Mode switching
+    if clean.startswith(("/mode", "/modes", "/chat", "/build", "switch mode", "change mode", "select mode")) or clean in ("/plan",):
+        return PermissionAction.CHANGE_MODE
+
+    if clean.startswith(("/model", "/models", "switch model", "change model", "select model")):
+        return PermissionAction.CHANGE_MODEL
+
+    # 8. Fallback based on question vs conversational vs plan vs read
+    if (
+        clean.endswith("?")
+        or any(clean.startswith(w) for w in (
+            "how ", "what ", "why ", "explain ", "describe ", "list ",
+            "apa ", "apakah ", "bagaimana ", "kenapa ", "mengapa ", "siapa ",
+            "jelaskan ", "tolong jelaskan ", "sebutkan ", "ceritakan ", "tampilkan ",
+            "balas ", "jawab ", "reply ", "respond ", "echo ", "say ", "ping", "hello", "hi", "halo"
+        ))
+    ):
         return PermissionAction.DIAGNOSE
 
     return PermissionAction.PLAN
