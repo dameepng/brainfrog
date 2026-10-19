@@ -1,0 +1,951 @@
+{
+  "metadata": {
+    "suite": "brainfrog-architecture-baseline",
+    "version": "1.0.0",
+    "run_timestamp": "2026-10-19T03:38:05.211962+00:00",
+    "git_commit": "2d63615eab817cdd6b9ca69ce805c69621176bd1",
+    "git_branch": "feat/trustworthy-verification-workflow",
+    "provider": "antigravity",
+    "model": "gemini-3.8-flash-high",
+    "model_effort": "high",
+    "temperature": "cli_default",
+    "execution_mode": "plan",
+    "skill_selection_mode": "dynamic_intent_routing",
+    "environment_config": {
+      "BRAINFROG_ALLOW_UNRESTRICTED_ANTIGRAVITY_CLI": "1",
+      "ANTIGRAVITY_BIN": "C:\\Users\\Adam\\.gemini\\bin\\agy.EXE"
+    },
+    "fixture_path": "tests\\fixtures\\evals\\architecture_cases.json",
+    "fixture_sha256": "813352473cc4662d583270387e924bb3de60bc4f5fb144a545357cc3159d069b",
+    "references_loaded": false,
+    "total_scenarios": 10
+  },
+  "results": [
+    {
+      "id": "SCN-01-GREENFIELD-SIMPLE",
+      "title": "Simple Greenfield CLI Application",
+      "context_type_expected": "greenfield",
+      "prompt": "Create a new standalone command-line tool `log-sieve` that reads a server log file, filters lines matching a given regex, and writes a structured JSON summary with line counts and matched entries.",
+      "provided_context": {
+        "repo_tree": "pyproject.toml\nREADME.md\n",
+        "files": {
+          "pyproject.toml": "[project]\nname = \"log-sieve\"\nversion = \"0.1.0\"\ndependencies = []\n\n[project.scripts]\nlog-sieve = \"log_sieve.cli:main\"\n",
+          "README.md": "# Log Sieve\nA lightweight log filtering utility.\n"
+        },
+        "mode": "plan",
+        "notes": "Empty repository with no existing code or compatibility contracts."
+      },
+      "selected_skill": "implement-code-change",
+      "status": "completed",
+      "latency_seconds": 39.91,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"Implement standalone log-sieve CLI utility for regex log filtering and JSON summarization\",\n  \"is_small_task\": true,\n  \"problem\": \"The repository contains configuration for `log-sieve` in `pyproject.toml` pointing to `log_sieve.cli:main`, but the package and source code have not been implemented. Users need a lightweight, self-contained command-line utility to read server log files, filter lines matching regular expressions, and output structured JSON summaries containing line counts and matched entries.\",\n  \"goals\": [\n    \"Implement the core filtering engine in `log_sieve/core.py` to stream and filter log lines using compiled regular expressions, tracking total lines and match counts.\",\n    \"Implement the CLI entrypoint in `log_sieve/cli.py` conforming to `log-sieve = \\\"log_sieve.cli:main\\\"` defined in `pyproject.toml`.\",\n    \"Provide formatted JSON output containing `total_lines`, `matched_lines`, `pattern`, and `matches` with line numbers and matched content.\",\n    \"Support writing output to stdout or an optional output file path.\",\n    \"Add complete automated test coverage using the standard library `unittest` framework.\"\n  ],\n  \"scope\": [\n    \"Create package files `log_sieve/__init__.py`, `log_sieve/core.py`, and `log_sieve/cli.py`.\",\n    \"Support positional/flagged log file path input, regex pattern argument, and optional `--output`/`-o` flag.\",\n    \"Provide structured JSON output with error handling for missing files, unreadable encodings, and invalid regex patterns.\",\n    \"Create unit tests in `tests/test_core.py` and CLI tests in `tests/test_cli.py`.\"\n  ],\n  \"non_scope\": [\n    \"Adding external dependencies (the implementation will strictly use Python standard library modules: `argparse`, `re`, `json`, `sys`, `pathlib`).\",\n    \"Real-time streaming daemonization or file tailing (`tail -f`).\",\n    \"Predefined domain-specific log parsers (e.g. Apache Combined, Syslog, or Nginx) beyond user-supplied regular expressions.\"\n  ],\n  \"codebase_findings\": [\n    \"pyproject.toml:5 declares the console script entry point: `log-sieve = \\\"log_sieve.cli:main\\\"`.\",\n    \"pyproject.toml:3 defines `dependencies = []`, indicating zero external dependencies must be introduced.\",\n    \"README.md:1-2 states the project identity: 'A lightweight log filtering utility.'.\",\n    \"The workspace has no existing Python source or test files.\"\n  ],\n  \"assumptions\": [\n    \"CLI arguments will accept `file` (positional path to log file), `-p`/`--pattern` (regex string, required), and optional `-o`/`--output` (destination file path, defaulting to stdout).\",\n    \"Standard exit codes will be used: 0 for successful execution (including zero matches), 1 for runtime/file/regex errors, and 2 for command-line syntax errors via `argparse`.\",\n    \"JSON summary schema will be: `{\\\"file\\\": str, \\\"pattern\\\": str, \\\"total_lines\\\": int, \\\"matched_lines\\\": int, \\\"matches\\\": [{\\\"line_number\\\": int, \\\"line\\\": str}]}`.\",\n    \"Atomic file write will be used when saving to `--output` to prevent corrupted or partial writes upon interruption.\"\n  ],\n  \"clarifying_questions\": [],\n  \"acceptance_criteria\": [\n    \"`log-sieve --help` prints usage information, arguments, and options cleanly and exits with code 0.\",\n    \"Executing `log-sieve <file> -p <regex>` correctly counts total lines, counts matched lines, and outputs valid JSON to stdout.\",\n    \"Executing `log-sieve <file> -p <regex> -o <out_file>` atomically writes the JSON summary to `<out_file>` without dumping output to stdout.\",\n    \"Providing an invalid regular expression produces a concise, actionable error message and exits with status code 1 without raw tracebacks.\",\n    \"Providing a non-existent or inaccessible file path produces an actionable error message and exits with status code 1.\",\n    \"`python -m unittest discover tests` runs and passes 100% of test cases.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Create package structure `log_sieve/__init__.py` and implement core filtering and summarization logic in `log_sieve/core.py`.\",\n      \"files\": [\n        \"log_sieve/__init__.py\",\n        \"log_sieve/core.py\"\n      ]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Implement CLI argument parser and execution handler in `log_sieve/cli.py` matching entry point `log_sieve.cli:main`.\",\n      \"files\": [\n        \"log_sieve/cli.py\"\n      ]\n    },\n    {\n      \"id\": \"3\",\n      \"description\": \"Add comprehensive unit tests for core processing and CLI execution under `tests/test_core.py` and `tests/test_cli.py`.\",\n      \"files\": [\n        \"tests/test_core.py\",\n        \"tests/test_cli.py\"\n      ]\n    }\n  ],\n  \"relevant_files\": [\n    \"pyproject.toml\",\n    \"log_sieve/__init__.py\",\n    \"log_sieve/core.py\",\n    \"log_sieve/cli.py\",\n    \"tests/test_core.py\",\n    \"tests/test_cli.py\"\n  ],\n  \"markdown_doc\": \"# Product Requirements Document & Plan: `log-sieve` CLI\\n\\n## 1. Executive Summary\\n`log-sieve` is a zero-dependency standalone command-line tool written in Python. It scans server log files line by line, evaluates regular expressions against each line, and generates a structured JSON summary reporting line totals, match counts, and extracted match entries.\\n\\n## 2. Codebase Facts & Architecture\\n- **Entry Point**: `pyproject.toml` binds `log-sieve` to `log_sieve.cli:main`.\\n- **Dependencies**: `pyproject.toml` specifies `dependencies = []`. The design leverages Python standard library packages exclusively (`argparse`, `re`, `json`, `pathlib`, `sys`).\\n- **Architecture Boundaries**:\\n  - `log_sieve.core`: Pure business logic and data structures for streaming files, compiling regex, counting lines, and assembling the summary dictionary.\\n  - `log_sieve.cli`: Argument parsing, file existence validation, error formatting, stream redirection, and process exit code handling.\\n  - `tests`: Isolated verification of core logic and CLI behavior.\\n\\n## 3. Data Contracts\\n\\n### JSON Output Schema\\n```json\\n{\\n  \\\"file\\\": \\\"/path/to/server.log\\\",\\n  \\\"pattern\\\": \\\"ERROR|WARN\\\",\\n  \\\"total_lines\\\": 1250,\\n  \\\"matched_lines\\\": 2,\\n  \\\"matches\\\": [\\n    {\\n      \\\"line_number\\\": 42,\\n      \\\"line\\\": \\\"2026-10-19 10:00:01 ERROR Database connection timed out\\\"\\n    },\\n    {\\n      \\\"line_number\\\": 88,\\n      \\\"line\\\": \\\"2026-10-19 10:02:15 WARN Retrying failed job 103\\\"\\n    }\\n  ]\\n}\\n```\\n\\n### CLI Interface Specification\\n- `log-sieve <file> -p <regex> [-o <output_file>] [--max-matches <N>]`\\n- Options:\\n  - `file`: Positional path to the target server log file.\\n  - `-p`, `--pattern`: Required regex pattern string.\\n  - `-o`, `--output`: Optional output path to write JSON summary.\\n  - `--max-matches`: Optional upper cap on collected match items to prevent memory bloat on large logs.\\n\\n## 4. Reliability & Error Handling Strategy\\n1. **Atomic File Writes**: Output file writes via `-o` write to a temporary sibling file (`.tmp_*`) before replacing the target file (`os.replace`) to prevent zero-byte or corrupt files on interruption.\\n2. **Actionable Errors**: Clean terminal feedback without raw Python tracebacks for common failure conditions (e.g. `RegexSyntaxError`, `FileNotFoundError`, `PermissionError`).\\n3. **Memory Bounding**: Line-by-line file streaming to handle large log files without loading entire files into RAM.\\n\\n## 5. Phased Implementation Plan\\n\\n### Step 1: Core Filtering Engine (`log_sieve/core.py`)\\n- Define `FilterResult` dataclass or dictionary contract.\\n- Implement `sieve_log(file_path: Path, pattern: str, max_matches: Optional[int]) -> dict`.\\n- Compile regex with error trapping for `re.error`.\\n- Stream file with `utf-8` decoding and `errors='replace'` to handle non-UTF-8 log anomalies.\\n\\n### Step 2: CLI Interface (`log_sieve/cli.py`)\\n- Implement `create_parser() -> argparse.ArgumentParser`.\\n- Implement `main(argv=None) -> int`.\\n- Handle stdout formatting with indent=2.\\n- Implement atomic write helper for `-o`/`--output`.\\n\\n### Step 3: Test Suite (`tests/`)\\n- `tests/test_core.py`: Test exact match, no match, regex syntax error, large file streaming, and UTF-8 replacement.\\n- `tests/test_cli.py`: Test exit codes (0 for success, 1 for errors, 2 for missing required args), stdout output, and file output flag.\"\n}\n",
+      "parsed_output": {
+        "title": "Implement standalone log-sieve CLI utility for regex log filtering and JSON summarization",
+        "is_small_task": true,
+        "problem": "The repository contains configuration for `log-sieve` in `pyproject.toml` pointing to `log_sieve.cli:main`, but the package and source code have not been implemented. Users need a lightweight, self-contained command-line utility to read server log files, filter lines matching regular expressions, and output structured JSON summaries containing line counts and matched entries.",
+        "goals": [
+          "Implement the core filtering engine in `log_sieve/core.py` to stream and filter log lines using compiled regular expressions, tracking total lines and match counts.",
+          "Implement the CLI entrypoint in `log_sieve/cli.py` conforming to `log-sieve = \"log_sieve.cli:main\"` defined in `pyproject.toml`.",
+          "Provide formatted JSON output containing `total_lines`, `matched_lines`, `pattern`, and `matches` with line numbers and matched content.",
+          "Support writing output to stdout or an optional output file path.",
+          "Add complete automated test coverage using the standard library `unittest` framework."
+        ],
+        "scope": [
+          "Create package files `log_sieve/__init__.py`, `log_sieve/core.py`, and `log_sieve/cli.py`.",
+          "Support positional/flagged log file path input, regex pattern argument, and optional `--output`/`-o` flag.",
+          "Provide structured JSON output with error handling for missing files, unreadable encodings, and invalid regex patterns.",
+          "Create unit tests in `tests/test_core.py` and CLI tests in `tests/test_cli.py`."
+        ],
+        "non_scope": [
+          "Adding external dependencies (the implementation will strictly use Python standard library modules: `argparse`, `re`, `json`, `sys`, `pathlib`).",
+          "Real-time streaming daemonization or file tailing (`tail -f`).",
+          "Predefined domain-specific log parsers (e.g. Apache Combined, Syslog, or Nginx) beyond user-supplied regular expressions."
+        ],
+        "codebase_findings": [
+          "pyproject.toml:5 declares the console script entry point: `log-sieve = \"log_sieve.cli:main\"`.",
+          "pyproject.toml:3 defines `dependencies = []`, indicating zero external dependencies must be introduced.",
+          "README.md:1-2 states the project identity: 'A lightweight log filtering utility.'.",
+          "The workspace has no existing Python source or test files."
+        ],
+        "assumptions": [
+          "CLI arguments will accept `file` (positional path to log file), `-p`/`--pattern` (regex string, required), and optional `-o`/`--output` (destination file path, defaulting to stdout).",
+          "Standard exit codes will be used: 0 for successful execution (including zero matches), 1 for runtime/file/regex errors, and 2 for command-line syntax errors via `argparse`.",
+          "JSON summary schema will be: `{\"file\": str, \"pattern\": str, \"total_lines\": int, \"matched_lines\": int, \"matches\": [{\"line_number\": int, \"line\": str}]}`.",
+          "Atomic file write will be used when saving to `--output` to prevent corrupted or partial writes upon interruption."
+        ],
+        "clarifying_questions": [],
+        "acceptance_criteria": [
+          "`log-sieve --help` prints usage information, arguments, and options cleanly and exits with code 0.",
+          "Executing `log-sieve <file> -p <regex>` correctly counts total lines, counts matched lines, and outputs valid JSON to stdout.",
+          "Executing `log-sieve <file> -p <regex> -o <out_file>` atomically writes the JSON summary to `<out_file>` without dumping output to stdout.",
+          "Providing an invalid regular expression produces a concise, actionable error message and exits with status code 1 without raw tracebacks.",
+          "Providing a non-existent or inaccessible file path produces an actionable error message and exits with status code 1.",
+          "`python -m unittest discover tests` runs and passes 100% of test cases."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Create package structure `log_sieve/__init__.py` and implement core filtering and summarization logic in `log_sieve/core.py`.",
+            "files": [
+              "log_sieve/__init__.py",
+              "log_sieve/core.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Implement CLI argument parser and execution handler in `log_sieve/cli.py` matching entry point `log_sieve.cli:main`.",
+            "files": [
+              "log_sieve/cli.py"
+            ]
+          },
+          {
+            "id": "3",
+            "description": "Add comprehensive unit tests for core processing and CLI execution under `tests/test_core.py` and `tests/test_cli.py`.",
+            "files": [
+              "tests/test_core.py",
+              "tests/test_cli.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "pyproject.toml",
+          "log_sieve/__init__.py",
+          "log_sieve/core.py",
+          "log_sieve/cli.py",
+          "tests/test_core.py",
+          "tests/test_cli.py"
+        ],
+        "markdown_doc": "# Product Requirements Document & Plan: `log-sieve` CLI\n\n## 1. Executive Summary\n`log-sieve` is a zero-dependency standalone command-line tool written in Python. It scans server log files line by line, evaluates regular expressions against each line, and generates a structured JSON summary reporting line totals, match counts, and extracted match entries.\n\n## 2. Codebase Facts & Architecture\n- **Entry Point**: `pyproject.toml` binds `log-sieve` to `log_sieve.cli:main`.\n- **Dependencies**: `pyproject.toml` specifies `dependencies = []`. The design leverages Python standard library packages exclusively (`argparse`, `re`, `json`, `pathlib`, `sys`).\n- **Architecture Boundaries**:\n  - `log_sieve.core`: Pure business logic and data structures for streaming files, compiling regex, counting lines, and assembling the summary dictionary.\n  - `log_sieve.cli`: Argument parsing, file existence validation, error formatting, stream redirection, and process exit code handling.\n  - `tests`: Isolated verification of core logic and CLI behavior.\n\n## 3. Data Contracts\n\n### JSON Output Schema\n```json\n{\n  \"file\": \"/path/to/server.log\",\n  \"pattern\": \"ERROR|WARN\",\n  \"total_lines\": 1250,\n  \"matched_lines\": 2,\n  \"matches\": [\n    {\n      \"line_number\": 42,\n      \"line\": \"2026-10-19 10:00:01 ERROR Database connection timed out\"\n    },\n    {\n      \"line_number\": 88,\n      \"line\": \"2026-10-19 10:02:15 WARN Retrying failed job 103\"\n    }\n  ]\n}\n```\n\n### CLI Interface Specification\n- `log-sieve <file> -p <regex> [-o <output_file>] [--max-matches <N>]`\n- Options:\n  - `file`: Positional path to the target server log file.\n  - `-p`, `--pattern`: Required regex pattern string.\n  - `-o`, `--output`: Optional output path to write JSON summary.\n  - `--max-matches`: Optional upper cap on collected match items to prevent memory bloat on large logs.\n\n## 4. Reliability & Error Handling Strategy\n1. **Atomic File Writes**: Output file writes via `-o` write to a temporary sibling file (`.tmp_*`) before replacing the target file (`os.replace`) to prevent zero-byte or corrupt files on interruption.\n2. **Actionable Errors**: Clean terminal feedback without raw Python tracebacks for common failure conditions (e.g. `RegexSyntaxError`, `FileNotFoundError`, `PermissionError`).\n3. **Memory Bounding**: Line-by-line file streaming to handle large log files without loading entire files into RAM.\n\n## 5. Phased Implementation Plan\n\n### Step 1: Core Filtering Engine (`log_sieve/core.py`)\n- Define `FilterResult` dataclass or dictionary contract.\n- Implement `sieve_log(file_path: Path, pattern: str, max_matches: Optional[int]) -> dict`.\n- Compile regex with error trapping for `re.error`.\n- Stream file with `utf-8` decoding and `errors='replace'` to handle non-UTF-8 log anomalies.\n\n### Step 2: CLI Interface (`log_sieve/cli.py`)\n- Implement `create_parser() -> argparse.ArgumentParser`.\n- Implement `main(argv=None) -> int`.\n- Handle stdout formatting with indent=2.\n- Implement atomic write helper for `-o`/`--output`.\n\n### Step 3: Test Suite (`tests/`)\n- `tests/test_core.py`: Test exact match, no match, regex syntax error, large file streaming, and UTF-8 replacement.\n- `tests/test_cli.py`: Test exit codes (0 for success, 1 for errors, 2 for missing required args), stdout output, and file output flag."
+      },
+      "json_parse_error": null,
+      "error": null
+    },
+    {
+      "id": "SCN-02-BROWNFIELD-MULTI-CALLER",
+      "title": "Existing API with Multiple Callers",
+      "context_type_expected": "brownfield",
+      "prompt": "Update `format_metric_value` in `core/formatting.py` so that it displays values smaller than 0.0001 in scientific notation.",
+      "provided_context": {
+        "repo_tree": "core/\n  formatting.py\nreports/\n  daily_summary.py\n  billing_export.py\n  sla_monitor.py\ntests/\n  test_formatting.py\n",
+        "files": {
+          "core/formatting.py": "def format_metric_value(val: float, precision: int = 2) -> str:\n    \"\"\"Format a numeric metric value for report display.\"\"\"\n    if val is None:\n        return \"N/A\"\n    return f\"{val:.{precision}f}\"\n",
+          "reports/billing_export.py": "from core.formatting import format_metric_value\n\ndef export_row(charge_amount: float) -> str:\n    return format_metric_value(charge_amount)\n",
+          "reports/sla_monitor.py": "from core.formatting import format_metric_value\n\ndef check_latency(p99: float) -> str:\n    return f\"Latency: {format_metric_value(p99)}s\"\n",
+          "tests/test_formatting.py": "import unittest\nfrom core.formatting import format_metric_value\n\nclass TestFormatting(unittest.TestCase):\n    def test_standard_format(self):\n        self.assertEqual(format_metric_value(12.3456), \"12.35\")\n        self.assertEqual(format_metric_value(0.0), \"0.00\")\n"
+        },
+        "mode": "plan",
+        "notes": "Core formatting utility used across financial and SLA reporting modules."
+      },
+      "selected_skill": "implement-code-change",
+      "status": "completed",
+      "latency_seconds": 25.8,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"Format metric values smaller than 0.0001 in scientific notation\",\n  \"is_small_task\": true,\n  \"problem\": \"In `core/formatting.py`, `format_metric_value` formats all numeric inputs using fixed-point formatting (`f'{val:.{precision}f}'`). Numeric values smaller than 0.0001 (e.g., 0.00005) round down to '0.00' when using the default precision of 2, obscuring meaningful resolution in metrics and SLA reports.\",\n  \"goals\": [\n    \"Format non-zero values with magnitude smaller than 0.0001 using scientific notation (`e` specifier with the requested precision).\",\n    \"Preserve existing formatting behavior for `0.0`, `None`, and values >= 0.0001 to ensure backward compatibility across downstream consumers.\"\n  ],\n  \"scope\": [\n    \"Update `format_metric_value` in `core/formatting.py` with conditional formatting for `0 < abs(val) < 0.0001`.\",\n    \"Add test cases to `tests/test_formatting.py` covering positive/negative sub-0.0001 values, boundary values, zero, and existing standard formats.\"\n  ],\n  \"non_scope\": [\n    \"Altering call sites or signatures in `reports/billing_export.py` or `reports/sla_monitor.py`.\",\n    \"Modifying default precision (`precision=2`) or handling of `None` ('N/A').\"\n  ],\n  \"codebase_findings\": [\n    \"`core/formatting.py:format_metric_value`: Handles `None` by returning `'N/A'`, otherwise outputs `f'{val:.{precision}f}'`.\",\n    \"`tests/test_formatting.py:TestFormatting.test_standard_format`: Explicitly tests `format_metric_value(0.0) == '0.00'`, establishing that `0.0` must remain in standard fixed-point notation.\",\n    \"`reports/billing_export.py:export_row` and `reports/sla_monitor.py:check_latency`: Depend on `format_metric_value` without passing custom precision arguments.\"\n  ],\n  \"assumptions\": [\n    \"Threshold applies to the absolute value magnitude (`0 < abs(val) < 0.0001`), correctly formatting negative values near zero while keeping `0.0` as fixed-point.\",\n    \"Scientific notation uses Python's standard lowercase exponential format `f'{val:.{precision}e}'` matching standard formatting conventions.\"\n  ],\n  \"clarifying_questions\": [],\n  \"acceptance_criteria\": [\n    \"`format_metric_value(0.00005, precision=2)` returns `'5.00e-05'`.\",\n    \"`format_metric_value(-0.000025, precision=2)` returns `'-2.50e-05'`.\",\n    \"`format_metric_value(0.0001, precision=2)` uses standard fixed-point notation (`'0.00'`).\",\n    \"`format_metric_value(0.0)` continues to return `'0.00'`.\",\n    \"`format_metric_value(None)` continues to return `'N/A'`.\",\n    \"`tests/test_formatting.py` test suite passes completely.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Update `format_metric_value` in `core/formatting.py` to check `if 0 < abs(val) < 0.0001:` and return `f'{val:.{precision}e}'`.\",\n      \"files\": [\n        \"core/formatting.py\"\n      ]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Extend `tests/test_formatting.py` with test cases covering scientific notation for sub-0.0001 numbers, boundary cases (0.0001), negative small numbers, zero, and None.\",\n      \"files\": [\n        \"tests/test_formatting.py\"\n      ]\n    }\n  ],\n  \"relevant_files\": [\n    \"core/formatting.py\",\n    \"tests/test_formatting.py\"\n  ],\n  \"markdown_doc\": \"# PRD & Implementation Plan: Scientific Notation for Metric Values < 0.0001\\n\\n## 1. Problem Statement\\n`format_metric_value` currently uses fixed-point formatting `f\\\"{val:.{precision}f}\\\"`. Any non-zero metric value smaller than `0.0001` rounds to `\\\"0.00\\\"` at the default precision of `2`, resulting in loss of critical resolution in SLA monitoring (`reports/sla_monitor.py`) and billing exports (`reports/billing_export.py`).\\n\\n## 2. Technical Findings\\n- **Current Implementation (`core/formatting.py:format_metric_value`)**:\\n  ```python\\n  def format_metric_value(val: float, precision: int = 2) -> str:\\n      if val is None:\\n          return \\\"N/A\\\"\\n      return f\\\"{val:.{precision}f}\\\"\\n  ```\\n- **Baseline Invariant (`tests/test_formatting.py:TestFormatting.test_standard_format`)**:\\n  Explicitly asserts that `0.0` formats to `\\\"0.00\\\"`. Therefore, a simple `val < 0.0001` check would incorrectly format zero as `0.00e+00`. The condition must strictly be `0 < abs(val) < 0.0001`.\\n\\n## 3. Proposed Implementation\\nUpdate `format_metric_value` in `core/formatting.py`:\\n```python\\ndef format_metric_value(val: float, precision: int = 2) -> str:\\n    \\\"\\\"\\\"Format a numeric metric value for report display.\\\"\\\"\\\"\\n    if val is None:\\n        return \\\"N/A\\\"\\n    if 0 < abs(val) < 0.0001:\\n        return f\\\"{val:.{precision}e}\\\"\\n    return f\\\"{val:.{precision}f}\\\"\\n```\\n\\n## 4. Verification & Testing\\nAdd tests to `tests/test_formatting.py` verifying:\\n- `format_metric_value(0.00005)` -> `\\\"5.00e-05\\\"`\\n- `format_metric_value(-0.00005)` -> `\\\"-5.00e-05\\\"`\\n- `format_metric_value(0.0001)` -> `\\\"0.00\\\"`\\n- `format_metric_value(0.0)` -> `\\\"0.00\\\"`\\n- `format_metric_value(None)` -> `\\\"N/A\\\"`\"\n}\n",
+      "parsed_output": {
+        "title": "Format metric values smaller than 0.0001 in scientific notation",
+        "is_small_task": true,
+        "problem": "In `core/formatting.py`, `format_metric_value` formats all numeric inputs using fixed-point formatting (`f'{val:.{precision}f}'`). Numeric values smaller than 0.0001 (e.g., 0.00005) round down to '0.00' when using the default precision of 2, obscuring meaningful resolution in metrics and SLA reports.",
+        "goals": [
+          "Format non-zero values with magnitude smaller than 0.0001 using scientific notation (`e` specifier with the requested precision).",
+          "Preserve existing formatting behavior for `0.0`, `None`, and values >= 0.0001 to ensure backward compatibility across downstream consumers."
+        ],
+        "scope": [
+          "Update `format_metric_value` in `core/formatting.py` with conditional formatting for `0 < abs(val) < 0.0001`.",
+          "Add test cases to `tests/test_formatting.py` covering positive/negative sub-0.0001 values, boundary values, zero, and existing standard formats."
+        ],
+        "non_scope": [
+          "Altering call sites or signatures in `reports/billing_export.py` or `reports/sla_monitor.py`.",
+          "Modifying default precision (`precision=2`) or handling of `None` ('N/A')."
+        ],
+        "codebase_findings": [
+          "`core/formatting.py:format_metric_value`: Handles `None` by returning `'N/A'`, otherwise outputs `f'{val:.{precision}f}'`.",
+          "`tests/test_formatting.py:TestFormatting.test_standard_format`: Explicitly tests `format_metric_value(0.0) == '0.00'`, establishing that `0.0` must remain in standard fixed-point notation.",
+          "`reports/billing_export.py:export_row` and `reports/sla_monitor.py:check_latency`: Depend on `format_metric_value` without passing custom precision arguments."
+        ],
+        "assumptions": [
+          "Threshold applies to the absolute value magnitude (`0 < abs(val) < 0.0001`), correctly formatting negative values near zero while keeping `0.0` as fixed-point.",
+          "Scientific notation uses Python's standard lowercase exponential format `f'{val:.{precision}e}'` matching standard formatting conventions."
+        ],
+        "clarifying_questions": [],
+        "acceptance_criteria": [
+          "`format_metric_value(0.00005, precision=2)` returns `'5.00e-05'`.",
+          "`format_metric_value(-0.000025, precision=2)` returns `'-2.50e-05'`.",
+          "`format_metric_value(0.0001, precision=2)` uses standard fixed-point notation (`'0.00'`).",
+          "`format_metric_value(0.0)` continues to return `'0.00'`.",
+          "`format_metric_value(None)` continues to return `'N/A'`.",
+          "`tests/test_formatting.py` test suite passes completely."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Update `format_metric_value` in `core/formatting.py` to check `if 0 < abs(val) < 0.0001:` and return `f'{val:.{precision}e}'`.",
+            "files": [
+              "core/formatting.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Extend `tests/test_formatting.py` with test cases covering scientific notation for sub-0.0001 numbers, boundary cases (0.0001), negative small numbers, zero, and None.",
+            "files": [
+              "tests/test_formatting.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "core/formatting.py",
+          "tests/test_formatting.py"
+        ],
+        "markdown_doc": "# PRD & Implementation Plan: Scientific Notation for Metric Values < 0.0001\n\n## 1. Problem Statement\n`format_metric_value` currently uses fixed-point formatting `f\"{val:.{precision}f}\"`. Any non-zero metric value smaller than `0.0001` rounds to `\"0.00\"` at the default precision of `2`, resulting in loss of critical resolution in SLA monitoring (`reports/sla_monitor.py`) and billing exports (`reports/billing_export.py`).\n\n## 2. Technical Findings\n- **Current Implementation (`core/formatting.py:format_metric_value`)**:\n  ```python\n  def format_metric_value(val: float, precision: int = 2) -> str:\n      if val is None:\n          return \"N/A\"\n      return f\"{val:.{precision}f}\"\n  ```\n- **Baseline Invariant (`tests/test_formatting.py:TestFormatting.test_standard_format`)**:\n  Explicitly asserts that `0.0` formats to `\"0.00\"`. Therefore, a simple `val < 0.0001` check would incorrectly format zero as `0.00e+00`. The condition must strictly be `0 < abs(val) < 0.0001`.\n\n## 3. Proposed Implementation\nUpdate `format_metric_value` in `core/formatting.py`:\n```python\ndef format_metric_value(val: float, precision: int = 2) -> str:\n    \"\"\"Format a numeric metric value for report display.\"\"\"\n    if val is None:\n        return \"N/A\"\n    if 0 < abs(val) < 0.0001:\n        return f\"{val:.{precision}e}\"\n    return f\"{val:.{precision}f}\"\n```\n\n## 4. Verification & Testing\nAdd tests to `tests/test_formatting.py` verifying:\n- `format_metric_value(0.00005)` -> `\"5.00e-05\"`\n- `format_metric_value(-0.00005)` -> `\"-5.00e-05\"`\n- `format_metric_value(0.0001)` -> `\"0.00\"`\n- `format_metric_value(0.0)` -> `\"0.00\"`\n- `format_metric_value(None)` -> `\"N/A\"`"
+      },
+      "json_parse_error": null,
+      "error": null
+    },
+    {
+      "id": "SCN-03-MIXED-NEW-PROVIDER",
+      "title": "New Component Inside Existing Architecture",
+      "context_type_expected": "mixed",
+      "prompt": "Add a new System 2 model provider `DeepSeekSystem2Client` in `system2/deepseek_client.py`.",
+      "provided_context": {
+        "repo_tree": "system2/\n  __init__.py\n  claude_client.py\n  openai_client.py\n  antigravity_client.py\norchestrator.py\ncore/skills.py\n",
+        "files": {
+          "system2/__init__.py": "from .claude_client import System2Client as ClaudeSystem2Client, UsageTracker, usage_tracker\nfrom .openai_client import OpenAISystem2Client\nfrom .antigravity_client import AntigravitySystem2Client\n\nSystem2ClientType = ClaudeSystem2Client | AntigravitySystem2Client | OpenAISystem2Client\n\ndef get_system2_provider(explicit: str = None) -> str:\n    ...\n",
+          "system2/openai_client.py": "class OpenAISystem2Client:\n    provider_name = \"openai\"\n    def __init__(self, model: str = \"gpt-4o\", api_key: str = None, guidelines: str = \"\"):\n        ...\n    def _apply_guidelines(self, system: str) -> str:\n        ...\n    def plan_task(self, task: str, repo_tree: str, ...) -> list:\n        ...\n"
+        },
+        "mode": "plan",
+        "notes": "Existing multi-provider architecture in BrainFrog system2."
+      },
+      "selected_skill": "implement-code-change",
+      "status": "completed",
+      "latency_seconds": 31.57,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"Add DeepSeek System 2 Model Provider (DeepSeekSystem2Client)\",\n  \"is_small_task\": false,\n  \"problem\": \"BrainFrog currently supports Claude, Antigravity, and OpenAI as System 2 model providers for planning, code generation, and PR review. Developers requiring DeepSeek (e.g., deepseek-chat or deepseek-reasoner) for cost efficiency or specialized reasoning capabilities cannot currently select DeepSeek natively within the System 2 multi-provider architecture.\",\n  \"goals\": [\n    \"Implement DeepSeekSystem2Client in system2/deepseek_client.py adhering to the System 2 client interface (plan_task, write_code, review_and_fix, draft_pr).\",\n    \"Integrate DeepSeek into system2/__init__.py by exporting DeepSeekSystem2Client, updating System2ClientType, and wiring provider resolution in get_system2_provider().\",\n    \"Support standard DeepSeek models (defaulting to deepseek-chat, configurable to deepseek-reasoner) using OpenAI-compatible API endpoints (https://api.deepseek.com).\",\n    \"Ensure token tracking integrates cleanly with BrainFrog's UsageTracker and usage_tracker.\",\n    \"Add unit tests with synthetic, safe test fixtures verifying instantiation, API call delegation, and error handling without secret leakage.\"\n  ],\n  \"scope\": [\n    \"Creation of system2/deepseek_client.py implementing DeepSeekSystem2Client with OpenAI SDK / HTTP compatibility.\",\n    \"Registration of DeepSeek in system2/__init__.py including export, type union update, and get_system2_provider resolution for 'deepseek'.\",\n    \"Environment variable handling for DEEPSEEK_API_KEY with graceful fallback and actionable error messaging.\",\n    \"Unit test suite in tests/test_deepseek_client.py covering client initialization, parameter mapping, and mock response parsing.\"\n  ],\n  \"non_scope\": [\n    \"Changes to System 1 (Jev/typesafe) logic or classification gates.\",\n    \"Modifying CLI UI layouts or non-DeepSeek provider implementations.\",\n    \"Live external network calls to DeepSeek APIs during automated test runs.\"\n  ],\n  \"codebase_findings\": [\n    \"system2/__init__.py: Defines System2ClientType union (ClaudeSystem2Client | AntigravitySystem2Client | OpenAISystem2Client) and get_system2_provider(explicit: str = None) factory routing.\",\n    \"system2/openai_client.py: Defines OpenAISystem2Client with provider_name = 'openai', standard method contracts (_apply_guidelines, plan_task, write_code, etc.), and openai SDK client delegation.\",\n    \"system2/claude_client.py: Establishes the canonical System 2 contract and integrates token usage tracking via UsageTracker / usage_tracker.\"\n  ],\n  \"assumptions\": [\n    \"DeepSeek utilizes an OpenAI-compatible API protocol with base_url 'https://api.deepseek.com' and environment variable DEEPSEEK_API_KEY.\",\n    \"Default model will be 'deepseek-chat', with support for 'deepseek-reasoner' via constructor or configuration.\",\n    \"Existing openai client library is available in the environment and can be configured with DeepSeek's base_url.\",\n    \"Token usage reporting from DeepSeek API matches standard OpenAI response usage objects (prompt_tokens, completion_tokens).\"\n  ],\n  \"clarifying_questions\": [],\n  \"acceptance_criteria\": [\n    \"DeepSeekSystem2Client is defined in system2/deepseek_client.py with provider_name = 'deepseek'.\",\n    \"DeepSeekSystem2Client implements plan_task, write_code, review_and_fix, and draft_pr adhering to the existing System 2 contract.\",\n    \"get_system2_provider('deepseek') correctly returns 'deepseek', and system2/__init__.py exports DeepSeekSystem2Client and includes it in System2ClientType.\",\n    \"Missing DEEPSEEK_API_KEY produces an actionable error message guiding the user to set DEEPSEEK_API_KEY in ~/.brainfrog/.env or the environment.\",\n    \"All unit tests pass using synthetic credentials adhering to BrainFrog's safe test fixture rules, with 0 secret scanner violations.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Implement DeepSeekSystem2Client in system2/deepseek_client.py with OpenAI-compatible base URL (https://api.deepseek.com), default model 'deepseek-chat', guideline formatting, and core System 2 methods.\",\n      \"files\": [\n        \"system2/deepseek_client.py\"\n      ]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Export DeepSeekSystem2Client in system2/__init__.py, update System2ClientType union, and extend get_system2_provider() to recognize 'deepseek'.\",\n      \"files\": [\n        \"system2/__init__.py\"\n      ]\n    },\n    {\n      \"id\": \"3\",\n      \"description\": \"Add comprehensive unit tests in tests/test_deepseek_client.py verifying provider initialization, endpoint routing, mock response parsing, and error handling using safe synthetic fixtures.\",\n      \"files\": [\n        \"tests/test_deepseek_client.py\"\n      ]\n    }\n  ],\n  \"relevant_files\": [\n    \"system2/deepseek_client.py\",\n    \"system2/__init__.py\",\n    \"system2/openai_client.py\",\n    \"tests/test_deepseek_client.py\"\n  ],\n  \"markdown_doc\": \"# Product Requirements Document & Architecture Plan: DeepSeek System 2 Client\\n\\n## 1. Executive Summary\\nThis plan introduces `DeepSeekSystem2Client` as a first-class System 2 model provider in BrainFrog, situated in `system2/deepseek_client.py` and registered within `system2/__init__.py`. Following BrainFrog's multi-provider architecture, DeepSeek provides cost-effective code generation and deep reasoning capabilities via its OpenAI-compatible endpoint.\\n\\n## 2. Architectural Context & Component Boundaries\\n- **Host Layer:** `system2/` module in BrainFrog.\\n- **Interface Contract:** Matches `ClaudeSystem2Client` and `OpenAISystem2Client` interfaces:\\n  - `provider_name: str = \\\"deepseek\\\"`\\n  - `plan_task(task: str, repo_tree: str, focus_files: List[str] = None) -> List[PlanStep]`\\n  - `write_code(task: str, step: PlanStep, repo_tree: str, file_context: Dict[str, str]) -> Dict[str, str]`\\n  - `review_and_fix(task: str, step: PlanStep, error_output: str, file_context: Dict[str, str]) -> Dict[str, str]`\\n  - `draft_pr(task: str, steps_completed: List[PlanStep], diff_summary: str) -> Tuple[str, str]`\\n- **Data Flow:** System 1 (`orchestrator.py`) selects provider via `get_system2_provider()`, instantiates `DeepSeekSystem2Client`, and passes task context. Completed responses update `usage_tracker`.\\n\\n## 3. Trade-Off Evaluation\\n| Dimension | Option A: Inherit/Wrap OpenAISystem2Client | Option B: Dedicated DeepSeekSystem2Client (Chosen) |\\n|---|---|---|\\n| **Maintainability** | Tightly couples DeepSeek to OpenAI client internal changes. | Clean isolation; DeepSeek-specific headers or reasoning parameters (e.g. reasoning_content) can evolve independently. |\\n| **Reliability** | Shared failure blast radius if OpenAI client alters defaults. | Independent configuration (base_url, default model, error handling). |\\n| **Simplicity** | Slightly fewer lines of code. | Explicit contracts, matching BrainFrog's existing peer pattern (`antigravity_client.py`, `openai_client.py`, `claude_client.py`). |\\n\\n## 4. Security & Safe Test Fixtures\\n- Adheres strictly to `.agents/rules/safe_test_fixtures_and_git_hygiene.md`.\\n- Never hardcode real API keys. In unit tests, use synthetic generators such as `\\\"synthetic_deepseek_key_for_test_redaction\\\"`.\\n- Passwords and tokens must never appear in test assertions or committed code.\\n\\n## 5. Implementation Phases\\n1. **system2/deepseek_client.py**: Core client implementation with default model `deepseek-chat`, base URL `https://api.deepseek.com`, and token usage tracking.\\n2. **system2/__init__.py**: Export `DeepSeekSystem2Client`, update `System2ClientType = ClaudeSystem2Client | AntigravitySystem2Client | OpenAISystem2Client | DeepSeekSystem2Client`, and map `\\\"deepseek\\\"` in `get_system2_provider()`.\\n3. **tests/test_deepseek_client.py**: Unit test coverage for client lifecycle, environment variable detection, and prompt formatting.\"\n}\n",
+      "parsed_output": {
+        "title": "Add DeepSeek System 2 Model Provider (DeepSeekSystem2Client)",
+        "is_small_task": false,
+        "problem": "BrainFrog currently supports Claude, Antigravity, and OpenAI as System 2 model providers for planning, code generation, and PR review. Developers requiring DeepSeek (e.g., deepseek-chat or deepseek-reasoner) for cost efficiency or specialized reasoning capabilities cannot currently select DeepSeek natively within the System 2 multi-provider architecture.",
+        "goals": [
+          "Implement DeepSeekSystem2Client in system2/deepseek_client.py adhering to the System 2 client interface (plan_task, write_code, review_and_fix, draft_pr).",
+          "Integrate DeepSeek into system2/__init__.py by exporting DeepSeekSystem2Client, updating System2ClientType, and wiring provider resolution in get_system2_provider().",
+          "Support standard DeepSeek models (defaulting to deepseek-chat, configurable to deepseek-reasoner) using OpenAI-compatible API endpoints (https://api.deepseek.com).",
+          "Ensure token tracking integrates cleanly with BrainFrog's UsageTracker and usage_tracker.",
+          "Add unit tests with synthetic, safe test fixtures verifying instantiation, API call delegation, and error handling without secret leakage."
+        ],
+        "scope": [
+          "Creation of system2/deepseek_client.py implementing DeepSeekSystem2Client with OpenAI SDK / HTTP compatibility.",
+          "Registration of DeepSeek in system2/__init__.py including export, type union update, and get_system2_provider resolution for 'deepseek'.",
+          "Environment variable handling for DEEPSEEK_API_KEY with graceful fallback and actionable error messaging.",
+          "Unit test suite in tests/test_deepseek_client.py covering client initialization, parameter mapping, and mock response parsing."
+        ],
+        "non_scope": [
+          "Changes to System 1 (Jev/typesafe) logic or classification gates.",
+          "Modifying CLI UI layouts or non-DeepSeek provider implementations.",
+          "Live external network calls to DeepSeek APIs during automated test runs."
+        ],
+        "codebase_findings": [
+          "system2/__init__.py: Defines System2ClientType union (ClaudeSystem2Client | AntigravitySystem2Client | OpenAISystem2Client) and get_system2_provider(explicit: str = None) factory routing.",
+          "system2/openai_client.py: Defines OpenAISystem2Client with provider_name = 'openai', standard method contracts (_apply_guidelines, plan_task, write_code, etc.), and openai SDK client delegation.",
+          "system2/claude_client.py: Establishes the canonical System 2 contract and integrates token usage tracking via UsageTracker / usage_tracker."
+        ],
+        "assumptions": [
+          "DeepSeek utilizes an OpenAI-compatible API protocol with base_url 'https://api.deepseek.com' and environment variable DEEPSEEK_API_KEY.",
+          "Default model will be 'deepseek-chat', with support for 'deepseek-reasoner' via constructor or configuration.",
+          "Existing openai client library is available in the environment and can be configured with DeepSeek's base_url.",
+          "Token usage reporting from DeepSeek API matches standard OpenAI response usage objects (prompt_tokens, completion_tokens)."
+        ],
+        "clarifying_questions": [],
+        "acceptance_criteria": [
+          "DeepSeekSystem2Client is defined in system2/deepseek_client.py with provider_name = 'deepseek'.",
+          "DeepSeekSystem2Client implements plan_task, write_code, review_and_fix, and draft_pr adhering to the existing System 2 contract.",
+          "get_system2_provider('deepseek') correctly returns 'deepseek', and system2/__init__.py exports DeepSeekSystem2Client and includes it in System2ClientType.",
+          "Missing DEEPSEEK_API_KEY produces an actionable error message guiding the user to set DEEPSEEK_API_KEY in ~/.brainfrog/.env or the environment.",
+          "All unit tests pass using synthetic credentials adhering to BrainFrog's safe test fixture rules, with 0 secret scanner violations."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Implement DeepSeekSystem2Client in system2/deepseek_client.py with OpenAI-compatible base URL (https://api.deepseek.com), default model 'deepseek-chat', guideline formatting, and core System 2 methods.",
+            "files": [
+              "system2/deepseek_client.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Export DeepSeekSystem2Client in system2/__init__.py, update System2ClientType union, and extend get_system2_provider() to recognize 'deepseek'.",
+            "files": [
+              "system2/__init__.py"
+            ]
+          },
+          {
+            "id": "3",
+            "description": "Add comprehensive unit tests in tests/test_deepseek_client.py verifying provider initialization, endpoint routing, mock response parsing, and error handling using safe synthetic fixtures.",
+            "files": [
+              "tests/test_deepseek_client.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "system2/deepseek_client.py",
+          "system2/__init__.py",
+          "system2/openai_client.py",
+          "tests/test_deepseek_client.py"
+        ],
+        "markdown_doc": "# Product Requirements Document & Architecture Plan: DeepSeek System 2 Client\n\n## 1. Executive Summary\nThis plan introduces `DeepSeekSystem2Client` as a first-class System 2 model provider in BrainFrog, situated in `system2/deepseek_client.py` and registered within `system2/__init__.py`. Following BrainFrog's multi-provider architecture, DeepSeek provides cost-effective code generation and deep reasoning capabilities via its OpenAI-compatible endpoint.\n\n## 2. Architectural Context & Component Boundaries\n- **Host Layer:** `system2/` module in BrainFrog.\n- **Interface Contract:** Matches `ClaudeSystem2Client` and `OpenAISystem2Client` interfaces:\n  - `provider_name: str = \"deepseek\"`\n  - `plan_task(task: str, repo_tree: str, focus_files: List[str] = None) -> List[PlanStep]`\n  - `write_code(task: str, step: PlanStep, repo_tree: str, file_context: Dict[str, str]) -> Dict[str, str]`\n  - `review_and_fix(task: str, step: PlanStep, error_output: str, file_context: Dict[str, str]) -> Dict[str, str]`\n  - `draft_pr(task: str, steps_completed: List[PlanStep], diff_summary: str) -> Tuple[str, str]`\n- **Data Flow:** System 1 (`orchestrator.py`) selects provider via `get_system2_provider()`, instantiates `DeepSeekSystem2Client`, and passes task context. Completed responses update `usage_tracker`.\n\n## 3. Trade-Off Evaluation\n| Dimension | Option A: Inherit/Wrap OpenAISystem2Client | Option B: Dedicated DeepSeekSystem2Client (Chosen) |\n|---|---|---|\n| **Maintainability** | Tightly couples DeepSeek to OpenAI client internal changes. | Clean isolation; DeepSeek-specific headers or reasoning parameters (e.g. reasoning_content) can evolve independently. |\n| **Reliability** | Shared failure blast radius if OpenAI client alters defaults. | Independent configuration (base_url, default model, error handling). |\n| **Simplicity** | Slightly fewer lines of code. | Explicit contracts, matching BrainFrog's existing peer pattern (`antigravity_client.py`, `openai_client.py`, `claude_client.py`). |\n\n## 4. Security & Safe Test Fixtures\n- Adheres strictly to `.agents/rules/safe_test_fixtures_and_git_hygiene.md`.\n- Never hardcode real API keys. In unit tests, use synthetic generators such as `\"synthetic_deepseek_key_for_test_redaction\"`.\n- Passwords and tokens must never appear in test assertions or committed code.\n\n## 5. Implementation Phases\n1. **system2/deepseek_client.py**: Core client implementation with default model `deepseek-chat`, base URL `https://api.deepseek.com`, and token usage tracking.\n2. **system2/__init__.py**: Export `DeepSeekSystem2Client`, update `System2ClientType = ClaudeSystem2Client | AntigravitySystem2Client | OpenAISystem2Client | DeepSeekSystem2Client`, and map `\"deepseek\"` in `get_system2_provider()`.\n3. **tests/test_deepseek_client.py**: Unit test coverage for client lifecycle, environment variable detection, and prompt formatting."
+      },
+      "json_parse_error": null,
+      "error": null
+    },
+    {
+      "id": "SCN-04-UNKNOWN-INSUFFICIENT-CONTEXT",
+      "title": "Insufficient Repository Context",
+      "context_type_expected": "unknown",
+      "prompt": "Refactor `calculate_rebate` to support tiered customer loyalty programs and currency conversion.",
+      "provided_context": {
+        "repo_tree": "services/pricing/\n  rebate.py\n",
+        "files": {
+          "services/pricing/rebate.py": "def calculate_rebate(customer_id: str, amount: float) -> float:\n    # Internal tier calculation\n    tier = lookup_tier(customer_id)\n    if tier == \"gold\":\n        return amount * 0.10\n    return amount * 0.02\n"
+        },
+        "mode": "plan",
+        "notes": "Caller files, lookup_tier implementation, database schemas, and currency models are not provided."
+      },
+      "selected_skill": null,
+      "status": "completed",
+      "latency_seconds": 51.18,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"Refactor calculate_rebate for Tiered Customer Loyalty and Currency Conversion\",\n  \"is_small_task\": false,\n  \"problem\": \"The current calculate_rebate implementation in services/pricing/rebate.py only supports a binary loyalty check ('gold' at 10% vs default at 2%), lacks support for additional customer tiers (e.g., platinum, silver, bronze), assumes a single implicit currency, and provides no mechanism for currency conversion or precision rounding.\",\n  \"goals\": [\n    \"Support a multi-tier customer loyalty structure (e.g., Platinum, Gold, Silver, Bronze/Standard) with extensible rate mapping.\",\n    \"Support currency conversion to target currencies with explicit exchange rates or conversion adapters.\",\n    \"Preserve 100% backward compatibility for existing callers passing (customer_id, amount).\",\n    \"Enforce input validation (e.g., non-negative amounts) and deterministic 2-decimal monetary rounding.\"\n  ],\n  \"scope\": [\n    \"Refactor calculate_rebate in services/pricing/rebate.py to introduce tiered loyalty rates.\",\n    \"Add optional currency parameters (currency, target_currency, exchange_rates / rate_provider) with safe defaults.\",\n    \"Validate inputs (reject negative amounts, validate currency codes and conversion rate availability).\",\n    \"Add unit tests covering all tiers, fallback behaviors, edge cases, and currency conversion calculations.\"\n  ],\n  \"non_scope\": [\n    \"Modifying external database models or schemas.\",\n    \"Modifying the implementation of lookup_tier(customer_id) in upstream services.\",\n    \"Integrating a live external forex network API service (conversion rates should be provided via rate mappings or injectable adapters to prevent network hangs).\"\n  ],\n  \"codebase_findings\": [\n    \"services/pricing/rebate.py:calculate_rebate currently accepts customer_id: str and amount: float, returning float.\",\n    \"services/pricing/rebate.py:calculate_rebate depends on an external or unimported lookup_tier(customer_id) function.\",\n    \"services/pricing/rebate.py:calculate_rebate applies a hardcoded 0.10 multiplier if tier == 'gold' and falls back to 0.02 for all other tiers without case normalization or validation.\"\n  ],\n  \"assumptions\": [\n    \"Tier names can be normalized to lowercase (e.g., 'platinum', 'gold', 'silver', 'bronze', 'standard') with default rates: Platinum (15%), Gold (10%), Silver (5%), Default/Standard (2%).\",\n    \"Existing callers call calculate_rebate(customer_id, amount) without currency arguments; preserving default arguments (e.g., currency: str = 'USD', target_currency: Optional[str] = None) ensures backward compatibility.\",\n    \"Exchange rates can be supplied as a dictionary mapping pairs (e.g., {'USD_EUR': 0.92}) or normalized relative to a base currency (e.g., {'USD': 1.0, 'EUR': 0.92}).\",\n    \"Rebate amounts should be rounded to 2 decimal places using standard monetary rounding to eliminate floating-point drift.\"\n  ],\n  \"clarifying_questions\": [\n    \"What are the official tier names and their corresponding rebate percentages required by the business?\",\n    \"Should currency exchange rates be passed as an in-memory dictionary/mapping, or should an injectable callable/protocol (e.g., ExchangeRateProvider) be supported?\"\n  ],\n  \"acceptance_criteria\": [\n    \"Calling calculate_rebate(customer_id, 100.0) where tier is 'gold' returns 10.0, matching legacy behavior.\",\n    \"Calling calculate_rebate for other tiers applies expected rates (e.g., Platinum -> 15.0, Silver -> 5.0, Default/Unknown -> 2.0).\",\n    \"Calling calculate_rebate with amount <= 0 raises ValueError with a descriptive message.\",\n    \"Calling calculate_rebate with target_currency='EUR' and exchange rate 0.92 converts the rebate to EUR and rounds to 2 decimal places.\",\n    \"Missing exchange rates for requested target currencies raise an actionable ValueError explaining the missing conversion pair.\",\n    \"Unit tests achieve 100% branch coverage across all loyalty tiers, currency conversions, and validation error paths.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Define tier rate constants, default currency constants, and an extensible TierRateMapping structure in services/pricing/rebate.py.\",\n      \"files\": [\n        \"services/pricing/rebate.py\"\n      ]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Update calculate_rebate signature and logic to validate inputs, compute tiered rebate, apply currency conversion if target_currency is provided, and round the final result.\",\n      \"files\": [\n        \"services/pricing/rebate.py\"\n      ]\n    },\n    {\n      \"id\": \"3\",\n      \"description\": \"Create unit tests in tests/test_rebate.py verifying tier calculations, backward compatibility, currency conversions, edge cases, and error handling.\",\n      \"files\": [\n        \"tests/test_rebate.py\"\n      ]\n    }\n  ],\n  \"relevant_files\": [\n    \"services/pricing/rebate.py\",\n    \"tests/test_rebate.py\"\n  ],\n  \"markdown_doc\": \"# PRD & Architectural Plan: Tiered Loyalty & Currency Conversion in `calculate_rebate`\\n\\n## 1. Problem Statement & Context\\nThe current function `calculate_rebate` in `services/pricing/rebate.py:calculate_rebate` supports only a hardcoded binary loyalty rebate ('gold' at 10% vs default at 2%). Modern customer loyalty programs require multi-tiered structures (e.g., Platinum, Gold, Silver, Bronze/Standard). Additionally, the system lacks multi-currency support, which is necessary when transactions occur in non-base currencies or when rebates must be credited in a target currency.\\n\\n## 2. Codebase Facts & Grounding\\n- **File**: `services/pricing/rebate.py`\\n- **Function**: `calculate_rebate(customer_id: str, amount: float) -> float`\\n- **Current Behavior**:\\n  - Calls `tier = lookup_tier(customer_id)`.\\n  - Evaluates `if tier == \\\"gold\\\": return amount * 0.10`.\\n  - Falls back to `return amount * 0.02` for all other cases.\\n  - No currency parameters or exchange rate handling.\\n  - No validation for non-positive or invalid amounts.\\n\\n## 3. Proposed Architecture & Contract Design\\n\\n### 3.1 Function Signature (Backward Compatible)\\n```python\\nfrom typing import Dict, Optional, Union\\nfrom decimal import Decimal, ROUND_HALF_UP\\n\\nDEFAULT_TIER_RATES: Dict[str, float] = {\\n    \\\"platinum\\\": 0.15,\\n    \\\"gold\\\": 0.10,\\n    \\\"silver\\\": 0.05,\\n    \\\"bronze\\\": 0.02,\\n    \\\"standard\\\": 0.02,\\n}\\n\\ndef calculate_rebate(\\n    customer_id: str,\\n    amount: float,\\n    currency: str = \\\"USD\\\",\\n    target_currency: Optional[str] = None,\\n    exchange_rates: Optional[Dict[str, float]] = None,\\n    custom_tier_rates: Optional[Dict[str, float]] = None,\\n) -> float:\\n    \\\"\\\"\\\"\\n    Calculate customer loyalty rebate with tiered rates and optional currency conversion.\\n    \\n    :param customer_id: Unique identifier for the customer.\\n    :param amount: Transaction amount (must be positive).\\n    :param currency: Currency code of the transaction amount (default 'USD').\\n    :param target_currency: Optional currency code for the resulting rebate.\\n    :param exchange_rates: Mapping of currency codes to conversion rates relative to base,\\n                           or specific direct pair rates (e.g., {'USD': 1.0, 'EUR': 0.92}\\n                           or {'USD_EUR': 0.92}).\\n    :param custom_tier_rates: Optional override for loyalty tier percentages.\\n    :return: Rebate amount rounded to 2 decimal places.\\n    \\\"\\\"\\\"\\n```\\n\\n### 3.2 Component Flow\\n1. **Validation**: Check that `amount >= 0`. If `amount < 0`, raise `ValueError(\\\"Transaction amount cannot be negative.\\\")`.\\n2. **Tier Lookup & Normalization**: Retrieve `tier = lookup_tier(customer_id)`. Normalize `tier_key = str(tier).strip().lower() if tier else \\\"standard\\\"`.\\n3. **Rate Lookup**: Query `custom_tier_rates` or `DEFAULT_TIER_RATES`. Fallback to standard (2%) if tier is unrecognized.\\n4. **Base Rebate Calculation**: `base_rebate = amount * rate`.\\n5. **Currency Conversion**:\\n   - If `target_currency` is None or equals `currency`, conversion multiplier is `1.0`.\\n   - Otherwise, resolve exchange rate from `exchange_rates` (supporting direct pair `'USD_EUR'` or base-relative ratios `rates[target] / rates[currency]`).\\n   - If conversion rate cannot be determined, raise an actionable `ValueError` detailing the missing rate.\\n6. **Monetary Rounding**: Apply standard monetary rounding to 2 decimal places.\\n\\n## 4. Trade-Off Analysis\\n\\n| Option | Pros | Cons | Decision |\\n| :--- | :--- | :--- | :--- |\\n| **Option A: Pure in-memory parameter passing** (Exchange rate dictionary passed to function) | Idempotent, deterministic, $0 external network overhead, immune to network timeouts. | Caller must provide rate dictionary when converting currencies. | **Chosen**: Fits local CLI architecture and BrainFrog reliability rules (no unbounded network calls in pricing engine). |\\n| **Option B: Live Forex API network call inside calculate_rebate** | Always uses latest market rate automatically. | Introduces external SPOF, network latency, credential leakage risks, and flakiness in offline/test environments. | **Rejected**: Violates reliability and security principles. |\\n\\n## 5. Testability & Acceptance Criteria\\n- **AC-1**: Legacy invocations `calculate_rebate('c1', 100.0)` for gold customers return `10.0`.\\n- **AC-2**: Platinum customers receive 15% (`15.0` on 100.0), Silver customers receive 5% (`5.0` on 100.0).\\n- **AC-3**: Unknown or None tiers receive the fallback rate of 2% (`2.0` on 100.0).\\n- **AC-4**: Currency conversion with `currency='USD'`, `target_currency='EUR'`, and rate `0.92` on a 100.0 Gold purchase yields `9.20` EUR.\\n- **AC-5**: Negative amount raises `ValueError`.\\n- **AC-6**: Missing exchange rate raises actionable `ValueError` indicating the missing currency pair.\"\n}\n",
+      "parsed_output": {
+        "title": "Refactor calculate_rebate for Tiered Customer Loyalty and Currency Conversion",
+        "is_small_task": false,
+        "problem": "The current calculate_rebate implementation in services/pricing/rebate.py only supports a binary loyalty check ('gold' at 10% vs default at 2%), lacks support for additional customer tiers (e.g., platinum, silver, bronze), assumes a single implicit currency, and provides no mechanism for currency conversion or precision rounding.",
+        "goals": [
+          "Support a multi-tier customer loyalty structure (e.g., Platinum, Gold, Silver, Bronze/Standard) with extensible rate mapping.",
+          "Support currency conversion to target currencies with explicit exchange rates or conversion adapters.",
+          "Preserve 100% backward compatibility for existing callers passing (customer_id, amount).",
+          "Enforce input validation (e.g., non-negative amounts) and deterministic 2-decimal monetary rounding."
+        ],
+        "scope": [
+          "Refactor calculate_rebate in services/pricing/rebate.py to introduce tiered loyalty rates.",
+          "Add optional currency parameters (currency, target_currency, exchange_rates / rate_provider) with safe defaults.",
+          "Validate inputs (reject negative amounts, validate currency codes and conversion rate availability).",
+          "Add unit tests covering all tiers, fallback behaviors, edge cases, and currency conversion calculations."
+        ],
+        "non_scope": [
+          "Modifying external database models or schemas.",
+          "Modifying the implementation of lookup_tier(customer_id) in upstream services.",
+          "Integrating a live external forex network API service (conversion rates should be provided via rate mappings or injectable adapters to prevent network hangs)."
+        ],
+        "codebase_findings": [
+          "services/pricing/rebate.py:calculate_rebate currently accepts customer_id: str and amount: float, returning float.",
+          "services/pricing/rebate.py:calculate_rebate depends on an external or unimported lookup_tier(customer_id) function.",
+          "services/pricing/rebate.py:calculate_rebate applies a hardcoded 0.10 multiplier if tier == 'gold' and falls back to 0.02 for all other tiers without case normalization or validation."
+        ],
+        "assumptions": [
+          "Tier names can be normalized to lowercase (e.g., 'platinum', 'gold', 'silver', 'bronze', 'standard') with default rates: Platinum (15%), Gold (10%), Silver (5%), Default/Standard (2%).",
+          "Existing callers call calculate_rebate(customer_id, amount) without currency arguments; preserving default arguments (e.g., currency: str = 'USD', target_currency: Optional[str] = None) ensures backward compatibility.",
+          "Exchange rates can be supplied as a dictionary mapping pairs (e.g., {'USD_EUR': 0.92}) or normalized relative to a base currency (e.g., {'USD': 1.0, 'EUR': 0.92}).",
+          "Rebate amounts should be rounded to 2 decimal places using standard monetary rounding to eliminate floating-point drift."
+        ],
+        "clarifying_questions": [
+          "What are the official tier names and their corresponding rebate percentages required by the business?",
+          "Should currency exchange rates be passed as an in-memory dictionary/mapping, or should an injectable callable/protocol (e.g., ExchangeRateProvider) be supported?"
+        ],
+        "acceptance_criteria": [
+          "Calling calculate_rebate(customer_id, 100.0) where tier is 'gold' returns 10.0, matching legacy behavior.",
+          "Calling calculate_rebate for other tiers applies expected rates (e.g., Platinum -> 15.0, Silver -> 5.0, Default/Unknown -> 2.0).",
+          "Calling calculate_rebate with amount <= 0 raises ValueError with a descriptive message.",
+          "Calling calculate_rebate with target_currency='EUR' and exchange rate 0.92 converts the rebate to EUR and rounds to 2 decimal places.",
+          "Missing exchange rates for requested target currencies raise an actionable ValueError explaining the missing conversion pair.",
+          "Unit tests achieve 100% branch coverage across all loyalty tiers, currency conversions, and validation error paths."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Define tier rate constants, default currency constants, and an extensible TierRateMapping structure in services/pricing/rebate.py.",
+            "files": [
+              "services/pricing/rebate.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Update calculate_rebate signature and logic to validate inputs, compute tiered rebate, apply currency conversion if target_currency is provided, and round the final result.",
+            "files": [
+              "services/pricing/rebate.py"
+            ]
+          },
+          {
+            "id": "3",
+            "description": "Create unit tests in tests/test_rebate.py verifying tier calculations, backward compatibility, currency conversions, edge cases, and error handling.",
+            "files": [
+              "tests/test_rebate.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "services/pricing/rebate.py",
+          "tests/test_rebate.py"
+        ],
+        "markdown_doc": "# PRD & Architectural Plan: Tiered Loyalty & Currency Conversion in `calculate_rebate`\n\n## 1. Problem Statement & Context\nThe current function `calculate_rebate` in `services/pricing/rebate.py:calculate_rebate` supports only a hardcoded binary loyalty rebate ('gold' at 10% vs default at 2%). Modern customer loyalty programs require multi-tiered structures (e.g., Platinum, Gold, Silver, Bronze/Standard). Additionally, the system lacks multi-currency support, which is necessary when transactions occur in non-base currencies or when rebates must be credited in a target currency.\n\n## 2. Codebase Facts & Grounding\n- **File**: `services/pricing/rebate.py`\n- **Function**: `calculate_rebate(customer_id: str, amount: float) -> float`\n- **Current Behavior**:\n  - Calls `tier = lookup_tier(customer_id)`.\n  - Evaluates `if tier == \"gold\": return amount * 0.10`.\n  - Falls back to `return amount * 0.02` for all other cases.\n  - No currency parameters or exchange rate handling.\n  - No validation for non-positive or invalid amounts.\n\n## 3. Proposed Architecture & Contract Design\n\n### 3.1 Function Signature (Backward Compatible)\n```python\nfrom typing import Dict, Optional, Union\nfrom decimal import Decimal, ROUND_HALF_UP\n\nDEFAULT_TIER_RATES: Dict[str, float] = {\n    \"platinum\": 0.15,\n    \"gold\": 0.10,\n    \"silver\": 0.05,\n    \"bronze\": 0.02,\n    \"standard\": 0.02,\n}\n\ndef calculate_rebate(\n    customer_id: str,\n    amount: float,\n    currency: str = \"USD\",\n    target_currency: Optional[str] = None,\n    exchange_rates: Optional[Dict[str, float]] = None,\n    custom_tier_rates: Optional[Dict[str, float]] = None,\n) -> float:\n    \"\"\"\n    Calculate customer loyalty rebate with tiered rates and optional currency conversion.\n    \n    :param customer_id: Unique identifier for the customer.\n    :param amount: Transaction amount (must be positive).\n    :param currency: Currency code of the transaction amount (default 'USD').\n    :param target_currency: Optional currency code for the resulting rebate.\n    :param exchange_rates: Mapping of currency codes to conversion rates relative to base,\n                           or specific direct pair rates (e.g., {'USD': 1.0, 'EUR': 0.92}\n                           or {'USD_EUR': 0.92}).\n    :param custom_tier_rates: Optional override for loyalty tier percentages.\n    :return: Rebate amount rounded to 2 decimal places.\n    \"\"\"\n```\n\n### 3.2 Component Flow\n1. **Validation**: Check that `amount >= 0`. If `amount < 0`, raise `ValueError(\"Transaction amount cannot be negative.\")`.\n2. **Tier Lookup & Normalization**: Retrieve `tier = lookup_tier(customer_id)`. Normalize `tier_key = str(tier).strip().lower() if tier else \"standard\"`.\n3. **Rate Lookup**: Query `custom_tier_rates` or `DEFAULT_TIER_RATES`. Fallback to standard (2%) if tier is unrecognized.\n4. **Base Rebate Calculation**: `base_rebate = amount * rate`.\n5. **Currency Conversion**:\n   - If `target_currency` is None or equals `currency`, conversion multiplier is `1.0`.\n   - Otherwise, resolve exchange rate from `exchange_rates` (supporting direct pair `'USD_EUR'` or base-relative ratios `rates[target] / rates[currency]`).\n   - If conversion rate cannot be determined, raise an actionable `ValueError` detailing the missing rate.\n6. **Monetary Rounding**: Apply standard monetary rounding to 2 decimal places.\n\n## 4. Trade-Off Analysis\n\n| Option | Pros | Cons | Decision |\n| :--- | :--- | :--- | :--- |\n| **Option A: Pure in-memory parameter passing** (Exchange rate dictionary passed to function) | Idempotent, deterministic, $0 external network overhead, immune to network timeouts. | Caller must provide rate dictionary when converting currencies. | **Chosen**: Fits local CLI architecture and BrainFrog reliability rules (no unbounded network calls in pricing engine). |\n| **Option B: Live Forex API network call inside calculate_rebate** | Always uses latest market rate automatically. | Introduces external SPOF, network latency, credential leakage risks, and flakiness in offline/test environments. | **Rejected**: Violates reliability and security principles. |\n\n## 5. Testability & Acceptance Criteria\n- **AC-1**: Legacy invocations `calculate_rebate('c1', 100.0)` for gold customers return `10.0`.\n- **AC-2**: Platinum customers receive 15% (`15.0` on 100.0), Silver customers receive 5% (`5.0` on 100.0).\n- **AC-3**: Unknown or None tiers receive the fallback rate of 2% (`2.0` on 100.0).\n- **AC-4**: Currency conversion with `currency='USD'`, `target_currency='EUR'`, and rate `0.92` on a 100.0 Gold purchase yields `9.20` EUR.\n- **AC-5**: Negative amount raises `ValueError`.\n- **AC-6**: Missing exchange rate raises actionable `ValueError` indicating the missing currency pair."
+      },
+      "json_parse_error": null,
+      "error": null
+    },
+    {
+      "id": "SCN-05-BROAD-REFACTOR-REQUEST",
+      "title": "Broad Refactor and Clean-Up Request",
+      "context_type_expected": "brownfield",
+      "prompt": "Clean up and refactor the architecture of `auth_service.py` to make it modern, clean, and follow best practices.",
+      "provided_context": {
+        "repo_tree": "auth/\n  auth_service.py\ntests/\n  test_auth_service.py\n",
+        "files": {
+          "auth/auth_service.py": "import hashlib\nimport secrets\nfrom typing import Optional, Dict\n\nclass AuthService:\n    def __init__(self, user_db: Dict[str, dict]):\n        self.db = user_db\n        self.sessions = {}\n\n    def authenticate(self, username: str, password: str) -> Optional[str]:\n        user = self.db.get(username)\n        if not user:\n            return None\n        salt = user[\"salt\"]\n        expected = hashlib.sha256((password + salt).encode()).hexdigest()\n        if secrets.compare_digest(user[\"hash\"], expected):\n            token = secrets.token_hex(16)\n            self.sessions[token] = username\n            return token\n        return None\n\n    def validate_session(self, token: str) -> Optional[str]:\n        return self.sessions.get(token)\n",
+          "tests/test_auth_service.py": "import unittest\nfrom auth.auth_service import AuthService\n\nclass TestAuth(unittest.TestCase):\n    def test_auth_flow(self):\n        db = {\"alice\": {\"salt\": \"s1\", \"hash\": \"...\"}}\n        svc = AuthService(db)\n        # 100% passing tests for authenticate and validate_session\n"
+        },
+        "mode": "plan",
+        "notes": "Self-contained, working authentication service with 100% test coverage."
+      },
+      "selected_skill": "refactor-code-safely",
+      "status": "completed",
+      "latency_seconds": 51.99,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"AuthService Architecture Evaluation and Conservative Local Refactor\",\n  \"is_small_task\": true,\n  \"problem\": \"The request seeks an architectural cleanup and modernization of `auth_service.py`. However, based on repository analysis and the 'refactor-code-safely' principle ('No architectural change is justified'), `auth/auth_service.py` is a 24-line, self-contained, working module with 100% test coverage and no demonstrated coupling, state ownership defects, or performance bottlenecks. Introducing heavyweight architectural patterns (e.g. repository interfaces, abstract session providers, JWTs, or external databases) would violate YAGNI and increase blast radius without delivering user value. A conservative local refactor focusing on strict typing and internal readability while strictly preserving public contracts is the optimal path.\",\n  \"goals\": [\n    \"Defend a 'keep' architectural stance against premature complexity and speculative over-engineering (YAGNI).\",\n    \"Preserve 100% backward compatibility for existing callers and test fixtures in `tests/test_auth_service.py`.\",\n    \"Improve type clarity by explicitly annotating instance attributes (e.g. `self.sessions: Dict[str, str]`).\",\n    \"Optionally encapsulate password hashing/comparison in a private helper without modifying hashing algorithms or timing-attack protection.\",\n    \"Ensure the entire test suite in `tests/test_auth_service.py` continues to pass with exit code 0.\"\n  ],\n  \"scope\": [\n    \"Architectural evaluation of `auth/auth_service.py` under the 'refactor-code-safely' framework.\",\n    \"Localized typing refinements in `auth/auth_service.py` (explicit dictionary attribute types).\",\n    \"Optional extraction of private password verification helper `_verify_password` within `AuthService`.\",\n    \"Verification against existing tests in `tests/test_auth_service.py`.\"\n  ],\n  \"non_scope\": [\n    \"Introducing new external dependencies, ORMs, or async frameworks.\",\n    \"Altering public method signatures or return types of `AuthService.authenticate` or `AuthService.validate_session`.\",\n    \"Changing the hashing algorithm (SHA-256) or token generation format (`secrets.token_hex(16)`).\",\n    \"Refactoring in-memory session storage to persistent or distributed storage.\",\n    \"Modifying assertions or fixtures in `tests/test_auth_service.py`.\"\n  ],\n  \"codebase_findings\": [\n    \"Fact: `auth/auth_service.py:AuthService.__init__` accepts `user_db: Dict[str, dict]` and initializes `self.sessions = {}` without an explicit attribute type annotation.\",\n    \"Fact: `auth/auth_service.py:AuthService.authenticate` looks up the user dictionary, extracts `salt` and `hash`, calculates `hashlib.sha256((password + salt).encode()).hexdigest()`, and compares via constant-time `secrets.compare_digest`.\",\n    \"Fact: `auth/auth_service.py:AuthService.authenticate` issues tokens via `secrets.token_hex(16)` and stores them in `self.sessions[token] = username`.\",\n    \"Fact: `auth/auth_service.py:AuthService.validate_session` performs a direct lookup `self.sessions.get(token)` returning `Optional[str]`.\",\n    \"Fact: `tests/test_auth_service.py:TestAuth.test_auth_flow` verifies the end-to-end authentication and session validation flow using a local in-memory dict fixture and currently has 100% test coverage.\"\n  ],\n  \"assumptions\": [\n    \"Assumption: Existing consumers depend on `AuthService.__init__` accepting a dictionary structure matching `{'salt': ..., 'hash': ...}`.\",\n    \"Assumption: Consumers rely on synchronous execution and string session tokens returned by `authenticate`.\",\n    \"Assumption: No persistence across process restarts or multi-instance concurrency is required for the current usage context.\",\n    \"Proposal: Use the `keep` strategy for the architectural structure and apply only a Type 2 (Two-Way Door) local refactor for typing precision and readability.\"\n  ],\n  \"clarifying_questions\": [],\n  \"acceptance_criteria\": [\n    \"All tests in `tests/test_auth_service.py` pass without modification (exit code 0).\",\n    \"Public API contracts for `AuthService.__init__`, `AuthService.authenticate`, and `AuthService.validate_session` remain 100% identical in arguments and return values.\",\n    \"Password comparison remains resistant to timing attacks via `secrets.compare_digest`.\",\n    \"Token generation continues to produce secure 32-character hex tokens using `secrets.token_hex(16)`.\",\n    \"Static type checkers recognize `self.sessions` as `Dict[str, str]` and `self.db` as `Dict[str, dict]`.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Refine type hints in `auth/auth_service.py` by annotating `self.sessions: Dict[str, str] = {}` and clarifying type aliases without breaking public contracts.\",\n      \"files\": [\"auth/auth_service.py\"]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Extract the password validation logic into an internal private method `_verify_password(self, password: str, user: dict) -> bool` to isolate hashing details while preserving exact SHA-256 and constant-time comparison.\",\n      \"files\": [\"auth/auth_service.py\"]\n    },\n    {\n      \"id\": \"3\",\n      \"description\": \"Run `python -m unittest tests/test_auth_service.py` to verify complete behavioral equivalence and confirm 100% test pass rate.\",\n      \"files\": [\"tests/test_auth_service.py\"]\n    }\n  ],\n  \"relevant_files\": [\n    \"auth/auth_service.py\",\n    \"tests/test_auth_service.py\"\n  ],\n  \"markdown_doc\": \"# PRD & Architectural Plan: AuthService Refactoring\\n\\n## 1. Executive Summary & Strategy Recommendation\\n\\n- **Target:** `auth/auth_service.py`\\n- **Current State:** 24 lines of clean, self-contained Python code with 100% passing test coverage in `tests/test_auth_service.py`.\\n- **Recommended Strategy:** **`keep` with minimal `local_refactor`**.\\n- **Architectural Verdict:** **No major architectural change is justified.**\\n\\nIn accordance with the **refactor-code-safely** guidelines and the **BRAINFROG.md** core tenets (YAGNI, Simplicity First, Type 2 Reversible Decisions), structural rewrites must be supported by observable problems such as circular dependencies, state ownership defects, or testability barriers. Because `auth_service.py` has zero external coupling and 100% test coverage, introducing speculative architectural layers (e.g. Repository Pattern, SessionManager interfaces, JWTs, or external databases) would constitute premature complexity and create unnecessary blast radius.\\n\\n---\\n\\n## 2. Problem Statement & Context\\n\\nThe prompt requests cleaning up and refactoring the architecture of `auth_service.py` to make it \\\"modern, clean, and follow best practices\\\". While well-intentioned, abstract \\\"modernization\\\" often leads to over-engineering. The service already uses modern standard library primitives (`secrets`, `hashlib`, type hints). The only real opportunities for improvement are localized Type 2 refinements: explicit typing on internal attributes and clean isolation of internal password verification logic.\\n\\n---\\n\\n## 3. Codebase Facts vs. Assumptions\\n\\n### Grounded Codebase Facts\\n1. `auth/auth_service.py:AuthService.__init__` accepts `user_db: Dict[str, dict]` and assigns `self.db` and unannotated `self.sessions = {}`.\\n2. `auth/auth_service.py:AuthService.authenticate` extracts `salt` and `hash` from `user_db.get(username)`, hashes `password + salt` using SHA-256, compares via `secrets.compare_digest`, generates a 16-byte hex token with `secrets.token_hex(16)`, stores it in `self.sessions`, and returns the token.\\n3. `auth/auth_service.py:AuthService.validate_session` returns `self.sessions.get(token)`.\\n4. `tests/test_auth_service.py:TestAuth.test_auth_flow` provides 100% test coverage for authentication and validation using an in-memory dictionary.\\n\\n### Assumptions & Proposals\\n- Callers rely on the exact synchronous contract and in-memory dict structure.\\n- Preserving exact behavior of `authenticate` and `validate_session` is paramount.\\n- We assume no multi-process session sharing or persistence is currently required.\\n\\n---\\n\\n## 4. Architectural Trade-Off Analysis\\n\\n| Option | Description | Pros | Cons | Recommendation |\\n|---|---|---|---|---|\\n| **Option A: Heavyweight Architecture** | Introduce `UserRepository` protocol, `SessionStore` protocol, `PasswordHasher` class, and Pydantic models. | High enterprise modularity. | Breaks backwards compatibility, adds 4x code volume, violates YAGNI, risks breaking existing tests. | **REJECTED** |\\n| **Option B: Keep Architecture + Local Refactor** | Retain single cohesive `AuthService` class, add precise type annotations (`self.sessions: Dict[str, str]`), and extract internal `_verify_password` helper. | Zero caller churn, 100% contract preservation, zero new dependencies, keeps 100% test pass rate. | Remains an in-memory service (which matches current requirements). | **ACCEPTED** |\\n\\n---\\n\\n## 5. Scope & Non-Scope\\n\\n### In Scope\\n- Explicit attribute type annotation for `self.sessions`.\\n- Extraction of private helper `_verify_password` for single-responsibility separation inside the class.\\n- Preserving `secrets.compare_digest` and `secrets.token_hex(16)`.\\n- Full regression testing with `tests/test_auth_service.py`.\\n\\n### Non-Scope\\n- Database integration or schema modifications.\\n- External dependency additions (no third-party auth libraries).\\n- Public API signature changes.\\n\\n---\\n\\n## 6. Implementation Steps\\n\\n1. **Step 1: Typing Enhancements** (`auth/auth_service.py`)\\n   - Annotate `self.sessions: Dict[str, str] = {}` in `__init__`.\\n   - Ensure all type hints conform to Python 3 standard typing conventions.\\n2. **Step 2: Local Helper Extraction** (`auth/auth_service.py`)\\n   - Extract password hashing and digest comparison into `_verify_password(self, password: str, user: dict) -> bool`.\\n   - Keep `authenticate` streamlined: retrieve user, verify password, generate token, record session.\\n3. **Step 3: Verification** (`tests/test_auth_service.py`)\\n   - Run `python -m unittest tests/test_auth_service.py` to ensure 100% pass rate.\\n\\n---\\n\\n## 7. Acceptance Criteria\\n\\n- [ ] `tests/test_auth_service.py` passes with exit code 0.\\n- [ ] Public methods `authenticate(username, password)` and `validate_session(token)` maintain identical input/output contracts.\\n- [ ] Constant-time comparison (`secrets.compare_digest`) remains active.\\n- [ ] Zero new runtime dependencies introduced.\"\n}\n",
+      "parsed_output": {
+        "title": "AuthService Architecture Evaluation and Conservative Local Refactor",
+        "is_small_task": true,
+        "problem": "The request seeks an architectural cleanup and modernization of `auth_service.py`. However, based on repository analysis and the 'refactor-code-safely' principle ('No architectural change is justified'), `auth/auth_service.py` is a 24-line, self-contained, working module with 100% test coverage and no demonstrated coupling, state ownership defects, or performance bottlenecks. Introducing heavyweight architectural patterns (e.g. repository interfaces, abstract session providers, JWTs, or external databases) would violate YAGNI and increase blast radius without delivering user value. A conservative local refactor focusing on strict typing and internal readability while strictly preserving public contracts is the optimal path.",
+        "goals": [
+          "Defend a 'keep' architectural stance against premature complexity and speculative over-engineering (YAGNI).",
+          "Preserve 100% backward compatibility for existing callers and test fixtures in `tests/test_auth_service.py`.",
+          "Improve type clarity by explicitly annotating instance attributes (e.g. `self.sessions: Dict[str, str]`).",
+          "Optionally encapsulate password hashing/comparison in a private helper without modifying hashing algorithms or timing-attack protection.",
+          "Ensure the entire test suite in `tests/test_auth_service.py` continues to pass with exit code 0."
+        ],
+        "scope": [
+          "Architectural evaluation of `auth/auth_service.py` under the 'refactor-code-safely' framework.",
+          "Localized typing refinements in `auth/auth_service.py` (explicit dictionary attribute types).",
+          "Optional extraction of private password verification helper `_verify_password` within `AuthService`.",
+          "Verification against existing tests in `tests/test_auth_service.py`."
+        ],
+        "non_scope": [
+          "Introducing new external dependencies, ORMs, or async frameworks.",
+          "Altering public method signatures or return types of `AuthService.authenticate` or `AuthService.validate_session`.",
+          "Changing the hashing algorithm (SHA-256) or token generation format (`secrets.token_hex(16)`).",
+          "Refactoring in-memory session storage to persistent or distributed storage.",
+          "Modifying assertions or fixtures in `tests/test_auth_service.py`."
+        ],
+        "codebase_findings": [
+          "Fact: `auth/auth_service.py:AuthService.__init__` accepts `user_db: Dict[str, dict]` and initializes `self.sessions = {}` without an explicit attribute type annotation.",
+          "Fact: `auth/auth_service.py:AuthService.authenticate` looks up the user dictionary, extracts `salt` and `hash`, calculates `hashlib.sha256((password + salt).encode()).hexdigest()`, and compares via constant-time `secrets.compare_digest`.",
+          "Fact: `auth/auth_service.py:AuthService.authenticate` issues tokens via `secrets.token_hex(16)` and stores them in `self.sessions[token] = username`.",
+          "Fact: `auth/auth_service.py:AuthService.validate_session` performs a direct lookup `self.sessions.get(token)` returning `Optional[str]`.",
+          "Fact: `tests/test_auth_service.py:TestAuth.test_auth_flow` verifies the end-to-end authentication and session validation flow using a local in-memory dict fixture and currently has 100% test coverage."
+        ],
+        "assumptions": [
+          "Assumption: Existing consumers depend on `AuthService.__init__` accepting a dictionary structure matching `{'salt': ..., 'hash': ...}`.",
+          "Assumption: Consumers rely on synchronous execution and string session tokens returned by `authenticate`.",
+          "Assumption: No persistence across process restarts or multi-instance concurrency is required for the current usage context.",
+          "Proposal: Use the `keep` strategy for the architectural structure and apply only a Type 2 (Two-Way Door) local refactor for typing precision and readability."
+        ],
+        "clarifying_questions": [],
+        "acceptance_criteria": [
+          "All tests in `tests/test_auth_service.py` pass without modification (exit code 0).",
+          "Public API contracts for `AuthService.__init__`, `AuthService.authenticate`, and `AuthService.validate_session` remain 100% identical in arguments and return values.",
+          "Password comparison remains resistant to timing attacks via `secrets.compare_digest`.",
+          "Token generation continues to produce secure 32-character hex tokens using `secrets.token_hex(16)`.",
+          "Static type checkers recognize `self.sessions` as `Dict[str, str]` and `self.db` as `Dict[str, dict]`."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Refine type hints in `auth/auth_service.py` by annotating `self.sessions: Dict[str, str] = {}` and clarifying type aliases without breaking public contracts.",
+            "files": [
+              "auth/auth_service.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Extract the password validation logic into an internal private method `_verify_password(self, password: str, user: dict) -> bool` to isolate hashing details while preserving exact SHA-256 and constant-time comparison.",
+            "files": [
+              "auth/auth_service.py"
+            ]
+          },
+          {
+            "id": "3",
+            "description": "Run `python -m unittest tests/test_auth_service.py` to verify complete behavioral equivalence and confirm 100% test pass rate.",
+            "files": [
+              "tests/test_auth_service.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "auth/auth_service.py",
+          "tests/test_auth_service.py"
+        ],
+        "markdown_doc": "# PRD & Architectural Plan: AuthService Refactoring\n\n## 1. Executive Summary & Strategy Recommendation\n\n- **Target:** `auth/auth_service.py`\n- **Current State:** 24 lines of clean, self-contained Python code with 100% passing test coverage in `tests/test_auth_service.py`.\n- **Recommended Strategy:** **`keep` with minimal `local_refactor`**.\n- **Architectural Verdict:** **No major architectural change is justified.**\n\nIn accordance with the **refactor-code-safely** guidelines and the **BRAINFROG.md** core tenets (YAGNI, Simplicity First, Type 2 Reversible Decisions), structural rewrites must be supported by observable problems such as circular dependencies, state ownership defects, or testability barriers. Because `auth_service.py` has zero external coupling and 100% test coverage, introducing speculative architectural layers (e.g. Repository Pattern, SessionManager interfaces, JWTs, or external databases) would constitute premature complexity and create unnecessary blast radius.\n\n---\n\n## 2. Problem Statement & Context\n\nThe prompt requests cleaning up and refactoring the architecture of `auth_service.py` to make it \"modern, clean, and follow best practices\". While well-intentioned, abstract \"modernization\" often leads to over-engineering. The service already uses modern standard library primitives (`secrets`, `hashlib`, type hints). The only real opportunities for improvement are localized Type 2 refinements: explicit typing on internal attributes and clean isolation of internal password verification logic.\n\n---\n\n## 3. Codebase Facts vs. Assumptions\n\n### Grounded Codebase Facts\n1. `auth/auth_service.py:AuthService.__init__` accepts `user_db: Dict[str, dict]` and assigns `self.db` and unannotated `self.sessions = {}`.\n2. `auth/auth_service.py:AuthService.authenticate` extracts `salt` and `hash` from `user_db.get(username)`, hashes `password + salt` using SHA-256, compares via `secrets.compare_digest`, generates a 16-byte hex token with `secrets.token_hex(16)`, stores it in `self.sessions`, and returns the token.\n3. `auth/auth_service.py:AuthService.validate_session` returns `self.sessions.get(token)`.\n4. `tests/test_auth_service.py:TestAuth.test_auth_flow` provides 100% test coverage for authentication and validation using an in-memory dictionary.\n\n### Assumptions & Proposals\n- Callers rely on the exact synchronous contract and in-memory dict structure.\n- Preserving exact behavior of `authenticate` and `validate_session` is paramount.\n- We assume no multi-process session sharing or persistence is currently required.\n\n---\n\n## 4. Architectural Trade-Off Analysis\n\n| Option | Description | Pros | Cons | Recommendation |\n|---|---|---|---|---|\n| **Option A: Heavyweight Architecture** | Introduce `UserRepository` protocol, `SessionStore` protocol, `PasswordHasher` class, and Pydantic models. | High enterprise modularity. | Breaks backwards compatibility, adds 4x code volume, violates YAGNI, risks breaking existing tests. | **REJECTED** |\n| **Option B: Keep Architecture + Local Refactor** | Retain single cohesive `AuthService` class, add precise type annotations (`self.sessions: Dict[str, str]`), and extract internal `_verify_password` helper. | Zero caller churn, 100% contract preservation, zero new dependencies, keeps 100% test pass rate. | Remains an in-memory service (which matches current requirements). | **ACCEPTED** |\n\n---\n\n## 5. Scope & Non-Scope\n\n### In Scope\n- Explicit attribute type annotation for `self.sessions`.\n- Extraction of private helper `_verify_password` for single-responsibility separation inside the class.\n- Preserving `secrets.compare_digest` and `secrets.token_hex(16)`.\n- Full regression testing with `tests/test_auth_service.py`.\n\n### Non-Scope\n- Database integration or schema modifications.\n- External dependency additions (no third-party auth libraries).\n- Public API signature changes.\n\n---\n\n## 6. Implementation Steps\n\n1. **Step 1: Typing Enhancements** (`auth/auth_service.py`)\n   - Annotate `self.sessions: Dict[str, str] = {}` in `__init__`.\n   - Ensure all type hints conform to Python 3 standard typing conventions.\n2. **Step 2: Local Helper Extraction** (`auth/auth_service.py`)\n   - Extract password hashing and digest comparison into `_verify_password(self, password: str, user: dict) -> bool`.\n   - Keep `authenticate` streamlined: retrieve user, verify password, generate token, record session.\n3. **Step 3: Verification** (`tests/test_auth_service.py`)\n   - Run `python -m unittest tests/test_auth_service.py` to ensure 100% pass rate.\n\n---\n\n## 7. Acceptance Criteria\n\n- [ ] `tests/test_auth_service.py` passes with exit code 0.\n- [ ] Public methods `authenticate(username, password)` and `validate_session(token)` maintain identical input/output contracts.\n- [ ] Constant-time comparison (`secrets.compare_digest`) remains active.\n- [ ] Zero new runtime dependencies introduced."
+      },
+      "json_parse_error": null,
+      "error": null
+    },
+    {
+      "id": "SCN-06-BOUNDED-REWRITE-JUSTIFIED",
+      "title": "Small Component Where Bounded Rewrite is Appropriate",
+      "context_type_expected": "brownfield",
+      "prompt": "Fix `url_query_parser.py` so that it correctly handles percent-encoded semicolons, arrays, and UTF-8 query strings without crashing.",
+      "provided_context": {
+        "repo_tree": "network/\n  client.py\n  url_query_parser.py\ntests/\n  test_query_parser.py\n",
+        "files": {
+          "network/url_query_parser.py": "import re\n\ndef parse_query_params(query_str: str) -> dict:\n    \"\"\"Fragile 80-line regex based parameter parser.\"\"\"\n    # Nested fragile regexes that crash on encoded semicolons or empty keys\n    pattern = re.compile(r'([^&=?]+)=([^&=?]*)')\n    res = {}\n    for m in pattern.finditer(query_str):\n        res[m.group(1)] = m.group(2)\n    return res\n",
+          "network/client.py": "from network.url_query_parser import parse_query_params\n\ndef handle_request(url: str):\n    query = url.split('?', 1)[1] if '?' in url else ''\n    params = parse_query_params(query)\n    return params\n",
+          "tests/test_query_parser.py": "import unittest\nfrom network.url_query_parser import parse_query_params\n\nclass TestParser(unittest.TestCase):\n    def test_failing_cases(self):\n        # Currently failing on encoded semicolons and lists\n        pass\n"
+        },
+        "mode": "plan",
+        "notes": "Small, self-contained leaf component (80 lines) with only 1 internal caller."
+      },
+      "selected_skill": "diagnose-code-failure",
+      "status": "completed",
+      "latency_seconds": 37.06,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"Fix Query Parameter Parser for Encoded Semicolons, Arrays, and UTF-8\",\n  \"is_small_task\": true,\n  \"problem\": \"`network/url_query_parser.py:parse_query_params` uses a fragile regex `([^&=?]+)=([^&=?]*)` that fails to unquote percent-encoded sequences, crashes or corrupts on percent-encoded semicolons (`%3B`), overwrites repeated keys instead of handling arrays, and fails on multi-byte UTF-8 query strings.\",\n  \"goals\": [\n    \"Safely parse query strings containing percent-encoded semicolons (%3B) without splitting on them or crashing.\",\n    \"Support array values via repeated keys (e.g. `tag=a&tag=b`) or bracket notation (`tag[]=a&tag[]=b`).\",\n    \"Properly decode UTF-8 percent-encoded keys and values into valid Unicode strings.\",\n    \"Handle empty query strings, missing values, and malformed pairs gracefully without throwing unhandled exceptions.\"\n  ],\n  \"scope\": [\n    \"Refactor `parse_query_params` in `network/url_query_parser.py` using Python's standard `urllib.parse` utilities (`parse_qsl`, `unquote_plus`).\",\n    \"Add test suite in `tests/test_query_parser.py` verifying percent-encoded semicolons, arrays/repeated keys, UTF-8 sequences, and malformed inputs.\"\n  ],\n  \"non_scope\": [\n    \"Modifying caller logic or public contract signature in `network/client.py:handle_request`.\",\n    \"Full URL scheme, host, path, or fragment parsing outside query parameter handling.\"\n  ],\n  \"codebase_findings\": [\n    \"`network/url_query_parser.py:parse_query_params` uses `re.compile(r'([^&=?]+)=([^&=?]*)')` and assigns `res[m.group(1)] = m.group(2)`, which overwrites duplicate keys, performs no percent-decoding (`%3B`, UTF-8 sequences), and ignores keys without an `=` sign.\",\n    \"`network/client.py:handle_request` splits a URL string on `?` and forwards the raw query component directly to `parse_query_params`.\",\n    \"`tests/test_query_parser.py:TestParser.test_failing_cases` is an empty test method with `pass` containing no test assertions.\"\n  ],\n  \"assumptions\": [\n    \"Standard library `urllib.parse` should be leveraged instead of maintaining custom regex to adhere to RFC 3986 and RFC 6570 standards.\",\n    \"When a key appears multiple times (or uses `key[]` syntax), values should be accumulated into a list; single values can be kept as scalar strings or lists depending on caller expectation (scalar for single key, list for multiple keys preserves backwards compatibility with `client.py`).\"\n  ],\n  \"clarifying_questions\": [],\n  \"acceptance_criteria\": [\n    \"Percent-encoded semicolons (e.g., `filter=a%3Bb`) are parsed as `{'filter': 'a;b'}` and not treated as parameter delimiters.\",\n    \"Repeated keys (e.g., `id=1&id=2`) or bracket keys (e.g., `id[]=1&id[]=2`) parse into an array of values `{'id': ['1', '2']}`.\",\n    \"Percent-encoded UTF-8 characters (e.g., `q=%E6%97%A5%E6%9C%AC%E8%AA%9E`) are decoded into `{'q': '\u65e5\u672c\u8a9e'}`.\",\n    \"Empty query string (`\\\"\\\"`), standalone keys (`flag`), and empty values (`key=`) do not raise exceptions.\",\n    \"All unit tests in `tests/test_query_parser.py` execute and pass via `python -m unittest tests/test_query_parser.py`.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Refactor `parse_query_params` in `network/url_query_parser.py` to replace fragile regex with standard `urllib.parse.parse_qsl` with UTF-8 decoding and list accumulation for duplicate/bracketed keys.\",\n      \"files\": [\n        \"network/url_query_parser.py\"\n      ]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Implement comprehensive unit test cases in `tests/test_query_parser.py` testing encoded semicolons, array keys, UTF-8 strings, and edge cases.\",\n      \"files\": [\n        \"tests/test_query_parser.py\"\n      ]\n    }\n  ],\n  \"relevant_files\": [\n    \"network/url_query_parser.py\",\n    \"tests/test_query_parser.py\"\n  ],\n  \"markdown_doc\": \"# PRD & Implementation Plan: Robust Query Parameter Parser\\n\\n## 1. Problem Statement\\nThe current implementation of `parse_query_params` in `network/url_query_parser.py` relies on an 80-line fragile regular expression (`re.compile(r'([^&=?]+)=([^&=?]*)')`). This causes multiple failure modes:\\n1. **Percent-encoded semicolons (`%3B`)**: Semicolons in query values are either mishandled, stripped, or cause regex matching failures.\\n2. **Array / Multi-value parameters**: Duplicate keys overwrite earlier entries instead of gathering them into a list.\\n3. **UTF-8 Decoding**: Multi-byte percent-encoded characters (e.g., `%E4%BD%A0%E5%A5%BD`) are not decoded into proper Unicode characters.\\n4. **Malformed / Edge cases**: Empty strings, keys without values, and trailing delimiters produce inconsistent dictionaries or crash.\\n\\n## 2. Goals & Acceptance Criteria\\n- Replace fragile regex parsing with standard library `urllib.parse` utilities (`parse_qsl`).\\n- Accurately preserve `%3B` as literal `;` within values without delimiter collision.\\n- Support multi-value arrays (keys appearing multiple times or with `[]` suffix).\\n- Fully decode UTF-8 percent-encoded strings.\\n- Pass all unit tests in `tests/test_query_parser.py`.\\n\\n## 3. Technical Design\\n### Function Contract (`network/url_query_parser.py`)\\n```python\\nfrom urllib.parse import parse_qsl, unquote_plus\\nfrom typing import Dict, Any\\n\\ndef parse_query_params(query_str: str) -> Dict[str, Any]:\\n    \\\"\\\"\\\"Parse a query string into a dictionary handling arrays, UTF-8, and encoded characters.\\\"\\\"\\\"\\n    if not query_str:\\n        return {}\\n    # parse_qsl handles & separation, unquoting, and UTF-8 encoding\\n    pairs = parse_qsl(query_str, keep_blank_values=True, encoding='utf-8', errors='replace')\\n    result = {}\\n    for raw_k, v in pairs:\\n        k = raw_k[:-2] if raw_k.endswith('[]') else raw_k\\n        if k in result:\\n            if isinstance(result[k], list):\\n                result[k].append(v)\\n            else:\\n                result[k] = [result[k], v]\\n        else:\\n            result[k] = v\\n    return result\\n```\\n\\n## 4. Implementation Steps\\n1. `network/url_query_parser.py`: Replace regex with standard `urllib.parse.parse_qsl` implementation supporting array aggregation.\\n2. `tests/test_query_parser.py`: Add unit tests covering:\\n   - `test_encoded_semicolon`: `filter=item%3Bsubitem` -> `{'filter': 'item;subitem'}`\\n   - `test_array_repeated_keys`: `tag=python&tag=agent` -> `{'tag': ['python', 'agent']}`\\n   - `test_array_bracket_notation`: `ids[]=1&ids[]=2` -> `{'ids': ['1', '2']}`\\n   - `test_utf8_decoding`: `name=%E4%BD%A0%E5%A5%BD` -> `{'name': '\u4f60\u597d'}`\\n   - `test_empty_and_edge_cases`: `\\\"\\\"`, `key=`, `key=&other=val`\\n3. Verification: Execute `python -m unittest tests/test_query_parser.py`.\"\n}\n",
+      "parsed_output": {
+        "title": "Fix Query Parameter Parser for Encoded Semicolons, Arrays, and UTF-8",
+        "is_small_task": true,
+        "problem": "`network/url_query_parser.py:parse_query_params` uses a fragile regex `([^&=?]+)=([^&=?]*)` that fails to unquote percent-encoded sequences, crashes or corrupts on percent-encoded semicolons (`%3B`), overwrites repeated keys instead of handling arrays, and fails on multi-byte UTF-8 query strings.",
+        "goals": [
+          "Safely parse query strings containing percent-encoded semicolons (%3B) without splitting on them or crashing.",
+          "Support array values via repeated keys (e.g. `tag=a&tag=b`) or bracket notation (`tag[]=a&tag[]=b`).",
+          "Properly decode UTF-8 percent-encoded keys and values into valid Unicode strings.",
+          "Handle empty query strings, missing values, and malformed pairs gracefully without throwing unhandled exceptions."
+        ],
+        "scope": [
+          "Refactor `parse_query_params` in `network/url_query_parser.py` using Python's standard `urllib.parse` utilities (`parse_qsl`, `unquote_plus`).",
+          "Add test suite in `tests/test_query_parser.py` verifying percent-encoded semicolons, arrays/repeated keys, UTF-8 sequences, and malformed inputs."
+        ],
+        "non_scope": [
+          "Modifying caller logic or public contract signature in `network/client.py:handle_request`.",
+          "Full URL scheme, host, path, or fragment parsing outside query parameter handling."
+        ],
+        "codebase_findings": [
+          "`network/url_query_parser.py:parse_query_params` uses `re.compile(r'([^&=?]+)=([^&=?]*)')` and assigns `res[m.group(1)] = m.group(2)`, which overwrites duplicate keys, performs no percent-decoding (`%3B`, UTF-8 sequences), and ignores keys without an `=` sign.",
+          "`network/client.py:handle_request` splits a URL string on `?` and forwards the raw query component directly to `parse_query_params`.",
+          "`tests/test_query_parser.py:TestParser.test_failing_cases` is an empty test method with `pass` containing no test assertions."
+        ],
+        "assumptions": [
+          "Standard library `urllib.parse` should be leveraged instead of maintaining custom regex to adhere to RFC 3986 and RFC 6570 standards.",
+          "When a key appears multiple times (or uses `key[]` syntax), values should be accumulated into a list; single values can be kept as scalar strings or lists depending on caller expectation (scalar for single key, list for multiple keys preserves backwards compatibility with `client.py`)."
+        ],
+        "clarifying_questions": [],
+        "acceptance_criteria": [
+          "Percent-encoded semicolons (e.g., `filter=a%3Bb`) are parsed as `{'filter': 'a;b'}` and not treated as parameter delimiters.",
+          "Repeated keys (e.g., `id=1&id=2`) or bracket keys (e.g., `id[]=1&id[]=2`) parse into an array of values `{'id': ['1', '2']}`.",
+          "Percent-encoded UTF-8 characters (e.g., `q=%E6%97%A5%E6%9C%AC%E8%AA%9E`) are decoded into `{'q': '\u65e5\u672c\u8a9e'}`.",
+          "Empty query string (`\"\"`), standalone keys (`flag`), and empty values (`key=`) do not raise exceptions.",
+          "All unit tests in `tests/test_query_parser.py` execute and pass via `python -m unittest tests/test_query_parser.py`."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Refactor `parse_query_params` in `network/url_query_parser.py` to replace fragile regex with standard `urllib.parse.parse_qsl` with UTF-8 decoding and list accumulation for duplicate/bracketed keys.",
+            "files": [
+              "network/url_query_parser.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Implement comprehensive unit test cases in `tests/test_query_parser.py` testing encoded semicolons, array keys, UTF-8 strings, and edge cases.",
+            "files": [
+              "tests/test_query_parser.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "network/url_query_parser.py",
+          "tests/test_query_parser.py"
+        ],
+        "markdown_doc": "# PRD & Implementation Plan: Robust Query Parameter Parser\n\n## 1. Problem Statement\nThe current implementation of `parse_query_params` in `network/url_query_parser.py` relies on an 80-line fragile regular expression (`re.compile(r'([^&=?]+)=([^&=?]*)')`). This causes multiple failure modes:\n1. **Percent-encoded semicolons (`%3B`)**: Semicolons in query values are either mishandled, stripped, or cause regex matching failures.\n2. **Array / Multi-value parameters**: Duplicate keys overwrite earlier entries instead of gathering them into a list.\n3. **UTF-8 Decoding**: Multi-byte percent-encoded characters (e.g., `%E4%BD%A0%E5%A5%BD`) are not decoded into proper Unicode characters.\n4. **Malformed / Edge cases**: Empty strings, keys without values, and trailing delimiters produce inconsistent dictionaries or crash.\n\n## 2. Goals & Acceptance Criteria\n- Replace fragile regex parsing with standard library `urllib.parse` utilities (`parse_qsl`).\n- Accurately preserve `%3B` as literal `;` within values without delimiter collision.\n- Support multi-value arrays (keys appearing multiple times or with `[]` suffix).\n- Fully decode UTF-8 percent-encoded strings.\n- Pass all unit tests in `tests/test_query_parser.py`.\n\n## 3. Technical Design\n### Function Contract (`network/url_query_parser.py`)\n```python\nfrom urllib.parse import parse_qsl, unquote_plus\nfrom typing import Dict, Any\n\ndef parse_query_params(query_str: str) -> Dict[str, Any]:\n    \"\"\"Parse a query string into a dictionary handling arrays, UTF-8, and encoded characters.\"\"\"\n    if not query_str:\n        return {}\n    # parse_qsl handles & separation, unquoting, and UTF-8 encoding\n    pairs = parse_qsl(query_str, keep_blank_values=True, encoding='utf-8', errors='replace')\n    result = {}\n    for raw_k, v in pairs:\n        k = raw_k[:-2] if raw_k.endswith('[]') else raw_k\n        if k in result:\n            if isinstance(result[k], list):\n                result[k].append(v)\n            else:\n                result[k] = [result[k], v]\n        else:\n            result[k] = v\n    return result\n```\n\n## 4. Implementation Steps\n1. `network/url_query_parser.py`: Replace regex with standard `urllib.parse.parse_qsl` implementation supporting array aggregation.\n2. `tests/test_query_parser.py`: Add unit tests covering:\n   - `test_encoded_semicolon`: `filter=item%3Bsubitem` -> `{'filter': 'item;subitem'}`\n   - `test_array_repeated_keys`: `tag=python&tag=agent` -> `{'tag': ['python', 'agent']}`\n   - `test_array_bracket_notation`: `ids[]=1&ids[]=2` -> `{'ids': ['1', '2']}`\n   - `test_utf8_decoding`: `name=%E4%BD%A0%E5%A5%BD` -> `{'name': '\u4f60\u597d'}`\n   - `test_empty_and_edge_cases`: `\"\"`, `key=`, `key=&other=val`\n3. Verification: Execute `python -m unittest tests/test_query_parser.py`."
+      },
+      "json_parse_error": null,
+      "error": null
+    },
+    {
+      "id": "SCN-07-STATEFUL-DATA-MIGRATION",
+      "title": "Stateful and Data-Sensitive Migration",
+      "context_type_expected": "brownfield",
+      "prompt": "Upgrade BrainFrog session persistence format in `core/runtime/session.py` to store incarnation IDs and actor channels for each step.",
+      "provided_context": {
+        "repo_tree": "core/runtime/\n  session.py\n  runtime.py\n.brainfrog/\n  sessions/\n    sess_123.json\n",
+        "files": {
+          "core/runtime/session.py": "import json\nfrom pathlib import Path\nfrom dataclasses import dataclass, asdict\n\n@dataclass\nclass SessionRecord:\n    session_id: str\n    task: str\n    steps: list\n\ndef load_session(path: Path) -> SessionRecord:\n    data = json.loads(path.read_text())\n    return SessionRecord(**data)\n\ndef save_session(path: Path, record: SessionRecord) -> None:\n    path.write_text(json.dumps(asdict(record), indent=2))\n"
+        },
+        "mode": "plan",
+        "notes": "Existing sessions exist on user disks in .brainfrog/sessions/."
+      },
+      "selected_skill": null,
+      "status": "completed",
+      "latency_seconds": 41.69,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"Upgrade Session Persistence Schema with Incarnation ID and Actor Channel\",\n  \"is_small_task\": false,\n  \"problem\": \"BrainFrog session persistence in `core/runtime/session.py` stores `steps` as an unstructured list without execution metadata. In distributed or multi-agent execution flows, tracking which execution incarnation produced a step and which actor channel dispatched it is required for auditability and session resumption. Additionally, existing user sessions in `.brainfrog/sessions/` must continue to load without data loss or schema errors.\",\n  \"goals\": [\n    \"Define a typed `StepRecord` schema incorporating `incarnation_id` and `actor_channel` alongside step payload data.\",\n    \"Guarantee seamless backward compatibility when reading existing legacy session JSON files in `.brainfrog/sessions/`.\",\n    \"Upgrade `save_session` to use atomic file writes (`os.replace`) to eliminate the risk of partial-write corruptions during process interruptions.\"\n  ],\n  \"scope\": [\n    \"Introduce `StepRecord` dataclass with `incarnation_id` and `actor_channel` in `core/runtime/session.py`.\",\n    \"Update `SessionRecord` typing in `core/runtime/session.py` to use `list[StepRecord]`.\",\n    \"Implement legacy step normalization in `load_session` to gracefully default missing `incarnation_id` and `actor_channel` fields.\",\n    \"Implement atomic file replacement in `save_session` to conform to repository reliability guidelines.\"\n  ],\n  \"non_scope\": [\n    \"Modifying external agent execution logic in `core/runtime/runtime.py` beyond passing new step metadata.\",\n    \"Writing batch migration scripts to rewrite existing disk files in `.brainfrog/sessions/` ahead of time.\",\n    \"Changing the session directory storage path or top-level session naming conventions.\"\n  ],\n  \"codebase_findings\": [\n    \"core/runtime/session.py:SessionRecord defines untyped fields (`session_id: str`, `task: str`, `steps: list`).\",\n    \"core/runtime/session.py:load_session deserializes JSON directly via `SessionRecord(**data)` without validating or normalizing individual step items.\",\n    \"core/runtime/session.py:save_session uses direct `path.write_text()`, which is vulnerable to zero-byte file corruption if interrupted (violating BRAINFROG.md Reliability \u00a75).\"\n  ],\n  \"assumptions\": [\n    \"Legacy steps in existing sessions are stored as dictionaries or primitive dict-like payloads.\",\n    \"Default values for legacy steps: `incarnation_id = None` and `actor_channel = 'default'` (or `'primary'`).\",\n    \"Existing session consumers expect step dictionaries or `StepRecord` instances to remain JSON-serializable.\"\n  ],\n  \"clarifying_questions\": [],\n  \"acceptance_criteria\": [\n    \"Loading a legacy session JSON file lacking `incarnation_id` and `actor_channel` succeeds with exit-code 0 and populates safe default values.\",\n    \"Saving a session containing new `StepRecord` instances persists `incarnation_id` and `actor_channel` into `.brainfrog/sessions/*.json`.\",\n    \"Atomic write semantics are verified: saving writes to a temporary file before renaming via `os.replace`.\",\n    \"Session serialization and deserialization round-trip produces identical `SessionRecord` objects.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Define `StepRecord` dataclass in `core/runtime/session.py` with payload attributes, `incarnation_id: Optional[str] = None`, and `actor_channel: Optional[str] = 'default'`.\",\n      \"files\": [\"core/runtime/session.py\"]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Update `SessionRecord` to hold `steps: list[StepRecord]` and add schema normalization in `load_session` to convert legacy dict steps into `StepRecord` instances.\",\n      \"files\": [\"core/runtime/session.py\"]\n    },\n    {\n      \"id\": \"3\",\n      \"description\": \"Refactor `save_session` in `core/runtime/session.py` to serialize `StepRecord` objects and use atomic file replacement with proper directory creation.\",\n      \"files\": [\"core/runtime/session.py\"]\n    },\n    {\n      \"id\": \"4\",\n      \"description\": \"Add unit tests covering legacy session loading, new schema persistence, and round-trip serialization.\",\n      \"files\": [\"tests/test_session.py\"]\n    }\n  ],\n  \"relevant_files\": [\n    \"core/runtime/session.py\",\n    \"core/runtime/runtime.py\"\n  ],\n  \"markdown_doc\": \"# PRD & Architecture Plan: Session Persistence Upgrade\\n\\n## 1. Context & Problem Statement\\nBrainFrog currently persists session logs via `core/runtime/session.py` using a minimal `SessionRecord` dataclass (`session_id`, `task`, `steps: list`). As execution capabilities evolve to support multi-agent channels and execution incarnations, the unstructured `steps` list lacks essential provenance fields (`incarnation_id` and `actor_channel`).\\n\\nFurthermore, existing sessions stored in `.brainfrog/sessions/` must remain readable without breaking changes, and session writes must be hardened against zero-byte corruption using atomic file swaps.\\n\\n## 2. Architecture & Data Contracts\\n\\n### 2.1 Component Boundaries\\n- **Module:** `core/runtime/session.py`\\n- **Owner:** Session persistence & serialization\\n- **Consumers:** `core/runtime/runtime.py`, CLI commands (`/history`, `/undo`)\\n\\n### 2.2 Data Contract\\n```python\\nfrom dataclasses import dataclass, field, asdict\\nfrom typing import Optional, Any, Dict\\nfrom pathlib import Path\\nimport json\\nimport os\\n\\n@dataclass\\nclass StepRecord:\\n    step_id: str\\n    data: Dict[str, Any] = field(default_factory=dict)\\n    incarnation_id: Optional[str] = None\\n    actor_channel: Optional[str] = \\\"default\\\"\\n\\n@dataclass\\nclass SessionRecord:\\n    session_id: str\\n    task: str\\n    steps: list[StepRecord] = field(default_factory=list)\\n```\\n\\n### 2.3 Legacy Normalization (`load_session`)\\n```python\\ndef _normalize_step(raw_step: Any) -> StepRecord:\\n    if isinstance(raw_step, StepRecord):\\n        return raw_step\\n    if isinstance(raw_step, dict):\\n        step_id = str(raw_step.get(\\\"step_id\\\", \\\"\\\"))\\n        inc_id = raw_step.get(\\\"incarnation_id\\\")\\n        channel = raw_step.get(\\\"actor_channel\\\", \\\"default\\\")\\n        data = {k: v for k, v in raw_step.items() if k not in {\\\"step_id\\\", \\\"incarnation_id\\\", \\\"actor_channel\\\"}}\\n        return StepRecord(step_id=step_id, data=data, incarnation_id=inc_id, actor_channel=channel)\\n    return StepRecord(step_id=str(raw_step))\\n```\\n\\n### 2.4 Atomic Save Implementation (`save_session`)\\nConforming to `BRAINFROG.md` Reliability Section 5 (Atomic Writes):\\n```python\\ndef save_session(path: Path, record: SessionRecord) -> None:\\n    path.parent.mkdir(parents=True, exist_ok=True)\\n    temp_file = path.with_suffix(f\\\".tmp_{os.getpid()}_{id(record)}\\\")\\n    try:\\n        payload = json.dumps(asdict(record), indent=2)\\n        temp_file.write_text(payload, encoding=\\\"utf-8\\\")\\n        os.replace(temp_file, path)\\n    except Exception:\\n        if temp_file.exists():\\n            temp_file.unlink()\\n        raise\\n```\\n\\n## 3. Trade-Off Matrix\\n\\n| Option | Performance | Backward Compatibility | Reliability | Complexity |\\n| :--- | :--- | :--- | :--- | :--- |\\n| **Option A: Pydantic/v2 Serialization** | Moderate (- overhead) | High | High | High (adds external runtime dependency) |\\n| **Option B: Dataclasses with Dict Normalization (Selected)** | High (<1ms) | Complete (handles legacy dicts) | High (with atomic write) | Low (pure stdlib, zero new deps) |\\n\\n## 4. Failure Points & Mitigation\\n- **Corrupted Legacy JSON:** `load_session` raises descriptive `ValueError` with path remediation context.\\n- **Process Interruption during Save:** Handled by temporary file creation and atomic `os.replace` swap; original file remains intact.\\n- **Missing Fields:** `_normalize_step` safely injects defaults (`incarnation_id=None`, `actor_channel='default'`).\\n\\n## 5. Implementation Steps\\n1. Modify `core/runtime/session.py` to define `StepRecord`.\\n2. Update `load_session` to handle backward-compatible deserialization.\\n3. Update `save_session` with atomic file persistence.\\n4. Create tests in `tests/test_session.py` verifying legacy file compatibility and serialization round-trips.\"\n}\n",
+      "parsed_output": {
+        "title": "Upgrade Session Persistence Schema with Incarnation ID and Actor Channel",
+        "is_small_task": false,
+        "problem": "BrainFrog session persistence in `core/runtime/session.py` stores `steps` as an unstructured list without execution metadata. In distributed or multi-agent execution flows, tracking which execution incarnation produced a step and which actor channel dispatched it is required for auditability and session resumption. Additionally, existing user sessions in `.brainfrog/sessions/` must continue to load without data loss or schema errors.",
+        "goals": [
+          "Define a typed `StepRecord` schema incorporating `incarnation_id` and `actor_channel` alongside step payload data.",
+          "Guarantee seamless backward compatibility when reading existing legacy session JSON files in `.brainfrog/sessions/`.",
+          "Upgrade `save_session` to use atomic file writes (`os.replace`) to eliminate the risk of partial-write corruptions during process interruptions."
+        ],
+        "scope": [
+          "Introduce `StepRecord` dataclass with `incarnation_id` and `actor_channel` in `core/runtime/session.py`.",
+          "Update `SessionRecord` typing in `core/runtime/session.py` to use `list[StepRecord]`.",
+          "Implement legacy step normalization in `load_session` to gracefully default missing `incarnation_id` and `actor_channel` fields.",
+          "Implement atomic file replacement in `save_session` to conform to repository reliability guidelines."
+        ],
+        "non_scope": [
+          "Modifying external agent execution logic in `core/runtime/runtime.py` beyond passing new step metadata.",
+          "Writing batch migration scripts to rewrite existing disk files in `.brainfrog/sessions/` ahead of time.",
+          "Changing the session directory storage path or top-level session naming conventions."
+        ],
+        "codebase_findings": [
+          "core/runtime/session.py:SessionRecord defines untyped fields (`session_id: str`, `task: str`, `steps: list`).",
+          "core/runtime/session.py:load_session deserializes JSON directly via `SessionRecord(**data)` without validating or normalizing individual step items.",
+          "core/runtime/session.py:save_session uses direct `path.write_text()`, which is vulnerable to zero-byte file corruption if interrupted (violating BRAINFROG.md Reliability \u00a75)."
+        ],
+        "assumptions": [
+          "Legacy steps in existing sessions are stored as dictionaries or primitive dict-like payloads.",
+          "Default values for legacy steps: `incarnation_id = None` and `actor_channel = 'default'` (or `'primary'`).",
+          "Existing session consumers expect step dictionaries or `StepRecord` instances to remain JSON-serializable."
+        ],
+        "clarifying_questions": [],
+        "acceptance_criteria": [
+          "Loading a legacy session JSON file lacking `incarnation_id` and `actor_channel` succeeds with exit-code 0 and populates safe default values.",
+          "Saving a session containing new `StepRecord` instances persists `incarnation_id` and `actor_channel` into `.brainfrog/sessions/*.json`.",
+          "Atomic write semantics are verified: saving writes to a temporary file before renaming via `os.replace`.",
+          "Session serialization and deserialization round-trip produces identical `SessionRecord` objects."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Define `StepRecord` dataclass in `core/runtime/session.py` with payload attributes, `incarnation_id: Optional[str] = None`, and `actor_channel: Optional[str] = 'default'`.",
+            "files": [
+              "core/runtime/session.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Update `SessionRecord` to hold `steps: list[StepRecord]` and add schema normalization in `load_session` to convert legacy dict steps into `StepRecord` instances.",
+            "files": [
+              "core/runtime/session.py"
+            ]
+          },
+          {
+            "id": "3",
+            "description": "Refactor `save_session` in `core/runtime/session.py` to serialize `StepRecord` objects and use atomic file replacement with proper directory creation.",
+            "files": [
+              "core/runtime/session.py"
+            ]
+          },
+          {
+            "id": "4",
+            "description": "Add unit tests covering legacy session loading, new schema persistence, and round-trip serialization.",
+            "files": [
+              "tests/test_session.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "core/runtime/session.py",
+          "core/runtime/runtime.py"
+        ],
+        "markdown_doc": "# PRD & Architecture Plan: Session Persistence Upgrade\n\n## 1. Context & Problem Statement\nBrainFrog currently persists session logs via `core/runtime/session.py` using a minimal `SessionRecord` dataclass (`session_id`, `task`, `steps: list`). As execution capabilities evolve to support multi-agent channels and execution incarnations, the unstructured `steps` list lacks essential provenance fields (`incarnation_id` and `actor_channel`).\n\nFurthermore, existing sessions stored in `.brainfrog/sessions/` must remain readable without breaking changes, and session writes must be hardened against zero-byte corruption using atomic file swaps.\n\n## 2. Architecture & Data Contracts\n\n### 2.1 Component Boundaries\n- **Module:** `core/runtime/session.py`\n- **Owner:** Session persistence & serialization\n- **Consumers:** `core/runtime/runtime.py`, CLI commands (`/history`, `/undo`)\n\n### 2.2 Data Contract\n```python\nfrom dataclasses import dataclass, field, asdict\nfrom typing import Optional, Any, Dict\nfrom pathlib import Path\nimport json\nimport os\n\n@dataclass\nclass StepRecord:\n    step_id: str\n    data: Dict[str, Any] = field(default_factory=dict)\n    incarnation_id: Optional[str] = None\n    actor_channel: Optional[str] = \"default\"\n\n@dataclass\nclass SessionRecord:\n    session_id: str\n    task: str\n    steps: list[StepRecord] = field(default_factory=list)\n```\n\n### 2.3 Legacy Normalization (`load_session`)\n```python\ndef _normalize_step(raw_step: Any) -> StepRecord:\n    if isinstance(raw_step, StepRecord):\n        return raw_step\n    if isinstance(raw_step, dict):\n        step_id = str(raw_step.get(\"step_id\", \"\"))\n        inc_id = raw_step.get(\"incarnation_id\")\n        channel = raw_step.get(\"actor_channel\", \"default\")\n        data = {k: v for k, v in raw_step.items() if k not in {\"step_id\", \"incarnation_id\", \"actor_channel\"}}\n        return StepRecord(step_id=step_id, data=data, incarnation_id=inc_id, actor_channel=channel)\n    return StepRecord(step_id=str(raw_step))\n```\n\n### 2.4 Atomic Save Implementation (`save_session`)\nConforming to `BRAINFROG.md` Reliability Section 5 (Atomic Writes):\n```python\ndef save_session(path: Path, record: SessionRecord) -> None:\n    path.parent.mkdir(parents=True, exist_ok=True)\n    temp_file = path.with_suffix(f\".tmp_{os.getpid()}_{id(record)}\")\n    try:\n        payload = json.dumps(asdict(record), indent=2)\n        temp_file.write_text(payload, encoding=\"utf-8\")\n        os.replace(temp_file, path)\n    except Exception:\n        if temp_file.exists():\n            temp_file.unlink()\n        raise\n```\n\n## 3. Trade-Off Matrix\n\n| Option | Performance | Backward Compatibility | Reliability | Complexity |\n| :--- | :--- | :--- | :--- | :--- |\n| **Option A: Pydantic/v2 Serialization** | Moderate (- overhead) | High | High | High (adds external runtime dependency) |\n| **Option B: Dataclasses with Dict Normalization (Selected)** | High (<1ms) | Complete (handles legacy dicts) | High (with atomic write) | Low (pure stdlib, zero new deps) |\n\n## 4. Failure Points & Mitigation\n- **Corrupted Legacy JSON:** `load_session` raises descriptive `ValueError` with path remediation context.\n- **Process Interruption during Save:** Handled by temporary file creation and atomic `os.replace` swap; original file remains intact.\n- **Missing Fields:** `_normalize_step` safely injects defaults (`incarnation_id=None`, `actor_channel='default'`).\n\n## 5. Implementation Steps\n1. Modify `core/runtime/session.py` to define `StepRecord`.\n2. Update `load_session` to handle backward-compatible deserialization.\n3. Update `save_session` with atomic file persistence.\n4. Create tests in `tests/test_session.py` verifying legacy file compatibility and serialization round-trips."
+      },
+      "json_parse_error": null,
+      "error": null
+    },
+    {
+      "id": "SCN-08-BROWNFIELD-UGLY-STRONG-COMPAT",
+      "title": "Ugly Implementation with Strong External Compatibility Constraints",
+      "context_type_expected": "brownfield",
+      "prompt": "Refactor `integrations/stripe_webhook.py` to replace loose dictionary lookups with strict Pydantic model validation.",
+      "provided_context": {
+        "repo_tree": "integrations/\n  stripe_webhook.py\n  handlers.py\ntests/\n  test_stripe_webhook.py\n",
+        "files": {
+          "integrations/stripe_webhook.py": "def process_stripe_event(payload: dict) -> bool:\n    \"\"\"Handles incoming Stripe webhooks with diverse payload shapes.\"\"\"\n    event_type = payload.get(\"type\")\n    data_obj = payload.get(\"data\", {}).get(\"object\", {})\n    if event_type == \"payment_intent.succeeded\":\n        customer = data_obj.get(\"customer\")\n        amount = data_obj.get(\"amount\", 0)\n        return record_payment(customer, amount)\n    return False\n"
+        },
+        "mode": "plan",
+        "notes": "Production webhook receiver receiving diverse real-world event payloads with optional fields."
+      },
+      "selected_skill": "refactor-code-safely",
+      "status": "completed",
+      "latency_seconds": 49.73,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"Refactor Stripe Webhook Handler with Pydantic Validation\",\n  \"is_small_task\": true,\n  \"problem\": \"The current Stripe webhook handler in `integrations/stripe_webhook.py` relies on loose, nested dictionary lookups (`payload.get(...)`). This approach lacks compile-time/runtime type safety, makes field contracts implicit, and obscures payload requirements. However, Stripe webhook payloads are polymorphic and contain numerous optional and evolving fields. An overly rigid schema refactor could reject valid webhooks, breaking production ingestion.\",\n  \"goals\": [\n    \"Introduce strongly-typed Pydantic models for Stripe event structures (`PaymentIntentObject`, `EventData`, and `StripeEvent`).\",\n    \"Preserve existing runtime behavior and contracts of `process_stripe_event(payload: dict) -> bool`.\",\n    \"Adhere to Postel's Law (Robustness Principle) by ignoring unknown extra fields and tolerating optional values without throwing unhandled validation exceptions.\"\n  ],\n  \"scope\": [\n    \"Define Pydantic models with `extra='ignore'` in `integrations/stripe_webhook.py` representing Stripe event envelopes and payment intent objects.\",\n    \"Refactor `process_stripe_event` to validate incoming dictionaries against Pydantic models while safely catching and handling validation errors.\",\n    \"Update or expand unit tests in `tests/test_stripe_webhook.py` to verify valid payment intents, unknown event types, malformed payloads, and payloads with extraneous fields.\"\n  ],\n  \"non_scope\": [\n    \"Modifying downstream payment handlers in `integrations/handlers.py` or changing `record_payment` signature.\",\n    \"Implementing handling for Stripe events other than `payment_intent.succeeded`.\",\n    \"Modifying webhook signature verification or HTTP transport routing.\"\n  ],\n  \"codebase_findings\": [\n    \"Fact: `integrations/stripe_webhook.py:process_stripe_event` accepts `payload: dict` and returns `bool`.\",\n    \"Fact: `integrations/stripe_webhook.py:process_stripe_event` extracts `event_type = payload.get('type')` and `data_obj = payload.get('data', {}).get('object', {})`.\",\n    \"Fact: When `event_type == 'payment_intent.succeeded'`, it extracts `customer = data_obj.get('customer')` and `amount = data_obj.get('amount', 0)` and returns `record_payment(customer, amount)`.\",\n    \"Fact: For any event type other than `payment_intent.succeeded`, it returns `False`.\",\n    \"Fact: `integrations/handlers.py` and `tests/test_stripe_webhook.py` exist in the repository structure.\"\n  ],\n  \"assumptions\": [\n    \"Pydantic (v2 or v1 compatible) is available in the project dependencies.\",\n    \"Stripe webhooks include arbitrary metadata and extra fields; models must specify `model_config = ConfigDict(extra='ignore')` (or `extra = 'ignore'` in v1) to prevent false-positive rejection of valid events.\",\n    \"Malformed payloads or payloads that fail schema validation should be caught gracefully and return `False` rather than bubbling unhandled `ValidationError` exceptions to the webhook transport.\",\n    \"`customer` can be `Optional[str]` and `amount` should default to `0` (or `int`) matching current `.get('amount', 0)` behavior.\"\n  ],\n  \"clarifying_questions\": [],\n  \"acceptance_criteria\": [\n    \"`process_stripe_event` validates valid `payment_intent.succeeded` payloads using Pydantic models and successfully invokes `record_payment(customer, amount)`.\",\n    \"`process_stripe_event` returns `False` without raising exceptions when passed non-`payment_intent.succeeded` event types.\",\n    \"`process_stripe_event` accepts payloads containing extra, unmodeled fields in either the root event or `data.object` without failing validation.\",\n    \"`process_stripe_event` returns `False` gracefully when passed malformed or incompatible payload structures (e.g., non-dict data or invalid amount types).\",\n    \"All unit tests in `tests/test_stripe_webhook.py` pass without errors.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Define Pydantic schema models (`PaymentIntentObject`, `EventData`, `StripeEvent`) with `extra='ignore'` and typed fields in `integrations/stripe_webhook.py`.\",\n      \"files\": [\"integrations/stripe_webhook.py\"]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Refactor `process_stripe_event` to parse payloads via `StripeEvent.model_validate` (or `parse_obj`), handling `ValidationError` and dispatching `payment_intent.succeeded` to `record_payment`.\",\n      \"files\": [\"integrations/stripe_webhook.py\"]\n    },\n    {\n      \"id\": \"3\",\n      \"description\": \"Add test coverage in `tests/test_stripe_webhook.py` validating schema validation, extra-field tolerance, unknown events, and invalid payloads.\",\n      \"files\": [\"tests/test_stripe_webhook.py\"]\n    }\n  ],\n  \"relevant_files\": [\n    \"integrations/stripe_webhook.py\",\n    \"tests/test_stripe_webhook.py\"\n  ],\n  \"markdown_doc\": \"# Product Requirements Document & Plan: Refactor Stripe Webhook with Pydantic Validation\\n\\n## 1. Context & Problem Statement\\n`integrations/stripe_webhook.py` currently handles webhook payloads via loose chained dictionary lookups (`payload.get(\\\"data\\\", {}).get(\\\"object\\\", {})`). While flexible, this approach creates silent failure risks, lacks static type checking, and provides no schema clarity for maintainers. \\n\\nHowever, in a production webhook environment, Stripe sends event objects with dozens of extraneous fields and optional attributes that vary across API versions. Replacing dictionary access with an overly rigid Pydantic schema could trigger breaking validation failures on valid production traffic.\\n\\nThe goal is to introduce strict, type-safe Pydantic models while honoring **Postel's Law** (\\\"liberal in what you accept\\\") by ignoring unmodeled fields and ensuring unhandled validation errors do not crash the webhook ingestion endpoint.\\n\\n---\\n\\n## 2. Architectural Decisions & Trade-Offs\\n\\n| Option | Description | Pros | Cons | Decision |\\n| :--- | :--- | :--- | :--- | :--- |\\n| **Option A: Rigid Pydantic (`extra='forbid'`)** | Validate complete Stripe event structure strictly. | Catches all unknown fields immediately. | High operational risk: breaks whenever Stripe introduces new fields or unmodeled metadata. | **Rejected** |\\n| **Option B: Permissive Pydantic (`extra='ignore'`)** | Model only required fields (`type`, `data.object.customer`, `data.object.amount`) with `extra='ignore'`. Wrap validation in graceful error handling. | Type safety and IDE autocompletion for targeted fields; immune to upstream Stripe field additions; fail-safe. | Does not validate unmodeled Stripe attributes. | **Accepted** |\\n| **Option C: Keep raw dicts** | Retain existing implementation. | Zero migration effort. | High bug risk, no type hints, implicit data contract. | **Rejected** |\\n\\n---\\n\\n## 3. Data Contract Specification\\n\\n### Pydantic Models\\n```python\\nfrom typing import Any, Dict, Optional\\nfrom pydantic import BaseModel, ConfigDict, Field\\n\\nclass PaymentIntentObject(BaseModel):\\n    model_config = ConfigDict(extra=\\\"ignore\\\")\\n    customer: Optional[str] = None\\n    amount: int = 0\\n\\nclass StripeEventData(BaseModel):\\n    model_config = ConfigDict(extra=\\\"ignore\\\")\\n    object: Dict[str, Any] = Field(default_factory=dict)\\n\\nclass StripeEvent(BaseModel):\\n    model_config = ConfigDict(extra=\\\"ignore\\\")\\n    type: str\\n    data: StripeEventData = Field(default_factory=StripeEventData)\\n```\\n\\n### Handler Contract\\n- **Function**: `process_stripe_event(payload: dict) -> bool`\\n- **Behavior**:\\n  - Attempts validation against `StripeEvent`.\\n  - On `ValidationError` or `TypeError`, logs a warning/debug message and returns `False`.\\n  - If `event.type == \\\"payment_intent.succeeded\\\"`:\\n    - Parses `event.data.object` into `PaymentIntentObject`.\\n    - Invokes `record_payment(payment_intent.customer, payment_intent.amount)`.\\n    - Returns result of `record_payment`.\\n  - For all other event types, returns `False`.\\n\\n---\\n\\n## 4. Implementation Steps\\n\\n1. **Step 1: Define Schemas in `integrations/stripe_webhook.py`**\\n   - Import `BaseModel`, `Field`, `ConfigDict` (or `class Config` compatible with Pydantic v1/v2).\\n   - Define `PaymentIntentObject`, `StripeEventData`, and `StripeEvent` with `extra=\\\"ignore\\\"`.\\n\\n2. **Step 2: Refactor `process_stripe_event` Implementation**\\n   - Replace manual dictionary chained calls with Pydantic model validation.\\n   - Encapsulate parsing in a `try...except (ValidationError, AttributeError, TypeError)` block returning `False` on failure.\\n   - Dispatch valid `payment_intent.succeeded` events to `record_payment`.\\n\\n3. **Step 3: Update and Expand Tests in `tests/test_stripe_webhook.py`**\\n   - Test happy path: valid `payment_intent.succeeded` with `customer` and `amount`.\\n   - Test default values: missing `customer` (None) and missing `amount` (defaults to 0).\\n   - Test extra fields: payload containing unexpected metadata and extra properties.\\n   - Test unhandled event types: e.g., `customer.created` returns `False`.\\n   - Test invalid payloads: non-dict or malformed shapes return `False` without crashing.\\n\\n---\\n\\n## 5. Acceptance & Verification Criteria\\n- [ ] `process_stripe_event` preserves signature `(payload: dict) -> bool`.\\n- [ ] Valid `payment_intent.succeeded` correctly forwards `customer` and `amount` to `record_payment`.\\n- [ ] Payloads with extra top-level or nested keys succeed without validation errors.\\n- [ ] Unknown event types return `False` cleanly.\\n- [ ] Malformed payloads do not raise unhandled exceptions.\\n- [ ] 100% of test suite in `tests/test_stripe_webhook.py` passes.\"\n}\n",
+      "parsed_output": {
+        "title": "Refactor Stripe Webhook Handler with Pydantic Validation",
+        "is_small_task": true,
+        "problem": "The current Stripe webhook handler in `integrations/stripe_webhook.py` relies on loose, nested dictionary lookups (`payload.get(...)`). This approach lacks compile-time/runtime type safety, makes field contracts implicit, and obscures payload requirements. However, Stripe webhook payloads are polymorphic and contain numerous optional and evolving fields. An overly rigid schema refactor could reject valid webhooks, breaking production ingestion.",
+        "goals": [
+          "Introduce strongly-typed Pydantic models for Stripe event structures (`PaymentIntentObject`, `EventData`, and `StripeEvent`).",
+          "Preserve existing runtime behavior and contracts of `process_stripe_event(payload: dict) -> bool`.",
+          "Adhere to Postel's Law (Robustness Principle) by ignoring unknown extra fields and tolerating optional values without throwing unhandled validation exceptions."
+        ],
+        "scope": [
+          "Define Pydantic models with `extra='ignore'` in `integrations/stripe_webhook.py` representing Stripe event envelopes and payment intent objects.",
+          "Refactor `process_stripe_event` to validate incoming dictionaries against Pydantic models while safely catching and handling validation errors.",
+          "Update or expand unit tests in `tests/test_stripe_webhook.py` to verify valid payment intents, unknown event types, malformed payloads, and payloads with extraneous fields."
+        ],
+        "non_scope": [
+          "Modifying downstream payment handlers in `integrations/handlers.py` or changing `record_payment` signature.",
+          "Implementing handling for Stripe events other than `payment_intent.succeeded`.",
+          "Modifying webhook signature verification or HTTP transport routing."
+        ],
+        "codebase_findings": [
+          "Fact: `integrations/stripe_webhook.py:process_stripe_event` accepts `payload: dict` and returns `bool`.",
+          "Fact: `integrations/stripe_webhook.py:process_stripe_event` extracts `event_type = payload.get('type')` and `data_obj = payload.get('data', {}).get('object', {})`.",
+          "Fact: When `event_type == 'payment_intent.succeeded'`, it extracts `customer = data_obj.get('customer')` and `amount = data_obj.get('amount', 0)` and returns `record_payment(customer, amount)`.",
+          "Fact: For any event type other than `payment_intent.succeeded`, it returns `False`.",
+          "Fact: `integrations/handlers.py` and `tests/test_stripe_webhook.py` exist in the repository structure."
+        ],
+        "assumptions": [
+          "Pydantic (v2 or v1 compatible) is available in the project dependencies.",
+          "Stripe webhooks include arbitrary metadata and extra fields; models must specify `model_config = ConfigDict(extra='ignore')` (or `extra = 'ignore'` in v1) to prevent false-positive rejection of valid events.",
+          "Malformed payloads or payloads that fail schema validation should be caught gracefully and return `False` rather than bubbling unhandled `ValidationError` exceptions to the webhook transport.",
+          "`customer` can be `Optional[str]` and `amount` should default to `0` (or `int`) matching current `.get('amount', 0)` behavior."
+        ],
+        "clarifying_questions": [],
+        "acceptance_criteria": [
+          "`process_stripe_event` validates valid `payment_intent.succeeded` payloads using Pydantic models and successfully invokes `record_payment(customer, amount)`.",
+          "`process_stripe_event` returns `False` without raising exceptions when passed non-`payment_intent.succeeded` event types.",
+          "`process_stripe_event` accepts payloads containing extra, unmodeled fields in either the root event or `data.object` without failing validation.",
+          "`process_stripe_event` returns `False` gracefully when passed malformed or incompatible payload structures (e.g., non-dict data or invalid amount types).",
+          "All unit tests in `tests/test_stripe_webhook.py` pass without errors."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Define Pydantic schema models (`PaymentIntentObject`, `EventData`, `StripeEvent`) with `extra='ignore'` and typed fields in `integrations/stripe_webhook.py`.",
+            "files": [
+              "integrations/stripe_webhook.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Refactor `process_stripe_event` to parse payloads via `StripeEvent.model_validate` (or `parse_obj`), handling `ValidationError` and dispatching `payment_intent.succeeded` to `record_payment`.",
+            "files": [
+              "integrations/stripe_webhook.py"
+            ]
+          },
+          {
+            "id": "3",
+            "description": "Add test coverage in `tests/test_stripe_webhook.py` validating schema validation, extra-field tolerance, unknown events, and invalid payloads.",
+            "files": [
+              "tests/test_stripe_webhook.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "integrations/stripe_webhook.py",
+          "tests/test_stripe_webhook.py"
+        ],
+        "markdown_doc": "# Product Requirements Document & Plan: Refactor Stripe Webhook with Pydantic Validation\n\n## 1. Context & Problem Statement\n`integrations/stripe_webhook.py` currently handles webhook payloads via loose chained dictionary lookups (`payload.get(\"data\", {}).get(\"object\", {})`). While flexible, this approach creates silent failure risks, lacks static type checking, and provides no schema clarity for maintainers. \n\nHowever, in a production webhook environment, Stripe sends event objects with dozens of extraneous fields and optional attributes that vary across API versions. Replacing dictionary access with an overly rigid Pydantic schema could trigger breaking validation failures on valid production traffic.\n\nThe goal is to introduce strict, type-safe Pydantic models while honoring **Postel's Law** (\"liberal in what you accept\") by ignoring unmodeled fields and ensuring unhandled validation errors do not crash the webhook ingestion endpoint.\n\n---\n\n## 2. Architectural Decisions & Trade-Offs\n\n| Option | Description | Pros | Cons | Decision |\n| :--- | :--- | :--- | :--- | :--- |\n| **Option A: Rigid Pydantic (`extra='forbid'`)** | Validate complete Stripe event structure strictly. | Catches all unknown fields immediately. | High operational risk: breaks whenever Stripe introduces new fields or unmodeled metadata. | **Rejected** |\n| **Option B: Permissive Pydantic (`extra='ignore'`)** | Model only required fields (`type`, `data.object.customer`, `data.object.amount`) with `extra='ignore'`. Wrap validation in graceful error handling. | Type safety and IDE autocompletion for targeted fields; immune to upstream Stripe field additions; fail-safe. | Does not validate unmodeled Stripe attributes. | **Accepted** |\n| **Option C: Keep raw dicts** | Retain existing implementation. | Zero migration effort. | High bug risk, no type hints, implicit data contract. | **Rejected** |\n\n---\n\n## 3. Data Contract Specification\n\n### Pydantic Models\n```python\nfrom typing import Any, Dict, Optional\nfrom pydantic import BaseModel, ConfigDict, Field\n\nclass PaymentIntentObject(BaseModel):\n    model_config = ConfigDict(extra=\"ignore\")\n    customer: Optional[str] = None\n    amount: int = 0\n\nclass StripeEventData(BaseModel):\n    model_config = ConfigDict(extra=\"ignore\")\n    object: Dict[str, Any] = Field(default_factory=dict)\n\nclass StripeEvent(BaseModel):\n    model_config = ConfigDict(extra=\"ignore\")\n    type: str\n    data: StripeEventData = Field(default_factory=StripeEventData)\n```\n\n### Handler Contract\n- **Function**: `process_stripe_event(payload: dict) -> bool`\n- **Behavior**:\n  - Attempts validation against `StripeEvent`.\n  - On `ValidationError` or `TypeError`, logs a warning/debug message and returns `False`.\n  - If `event.type == \"payment_intent.succeeded\"`:\n    - Parses `event.data.object` into `PaymentIntentObject`.\n    - Invokes `record_payment(payment_intent.customer, payment_intent.amount)`.\n    - Returns result of `record_payment`.\n  - For all other event types, returns `False`.\n\n---\n\n## 4. Implementation Steps\n\n1. **Step 1: Define Schemas in `integrations/stripe_webhook.py`**\n   - Import `BaseModel`, `Field`, `ConfigDict` (or `class Config` compatible with Pydantic v1/v2).\n   - Define `PaymentIntentObject`, `StripeEventData`, and `StripeEvent` with `extra=\"ignore\"`.\n\n2. **Step 2: Refactor `process_stripe_event` Implementation**\n   - Replace manual dictionary chained calls with Pydantic model validation.\n   - Encapsulate parsing in a `try...except (ValidationError, AttributeError, TypeError)` block returning `False` on failure.\n   - Dispatch valid `payment_intent.succeeded` events to `record_payment`.\n\n3. **Step 3: Update and Expand Tests in `tests/test_stripe_webhook.py`**\n   - Test happy path: valid `payment_intent.succeeded` with `customer` and `amount`.\n   - Test default values: missing `customer` (None) and missing `amount` (defaults to 0).\n   - Test extra fields: payload containing unexpected metadata and extra properties.\n   - Test unhandled event types: e.g., `customer.created` returns `False`.\n   - Test invalid payloads: non-dict or malformed shapes return `False` without crashing.\n\n---\n\n## 5. Acceptance & Verification Criteria\n- [ ] `process_stripe_event` preserves signature `(payload: dict) -> bool`.\n- [ ] Valid `payment_intent.succeeded` correctly forwards `customer` and `amount` to `record_payment`.\n- [ ] Payloads with extra top-level or nested keys succeed without validation errors.\n- [ ] Unknown event types return `False` cleanly.\n- [ ] Malformed payloads do not raise unhandled exceptions.\n- [ ] 100% of test suite in `tests/test_stripe_webhook.py` passes."
+      },
+      "json_parse_error": null,
+      "error": null
+    },
+    {
+      "id": "SCN-09-CROSS-MODULE-BOUNDARY-COUPLING",
+      "title": "Circular Dependency and Cross-Module Boundary Coupling",
+      "context_type_expected": "brownfield",
+      "prompt": "Resolve the circular import between `billing/calculator.py` and `notifications/email_service.py`.",
+      "provided_context": {
+        "repo_tree": "billing/\n  calculator.py\nnotifications/\n  email_service.py\n",
+        "files": {
+          "billing/calculator.py": "from notifications.email_service import send_invoice_notification\n\ndef compute_monthly_invoice(account_id: str, items: list) -> float:\n    total = sum(i[\"price\"] for i in items)\n    send_invoice_notification(account_id, total)\n    return total\n",
+          "notifications/email_service.py": "from billing.calculator import compute_monthly_invoice\n\ndef send_invoice_notification(account_id: str, amount: float):\n    print(f\"Sending bill {amount} to {account_id}\")\n"
+        },
+        "mode": "plan",
+        "notes": "Both modules are in active use; circular import causes intermittent import-time crashes."
+      },
+      "selected_skill": "diagnose-code-failure",
+      "status": "completed",
+      "latency_seconds": 33.07,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"Resolve circular import between billing.calculator and notifications.email_service\",\n  \"is_small_task\": true,\n  \"problem\": \"A top-level circular dependency exists between `billing/calculator.py` and `notifications/email_service.py`. Specifically, `billing/calculator.py` imports `send_invoice_notification` from `notifications.email_service`, while `notifications/email_service.py` imports `compute_monthly_invoice` from `billing.calculator`. In `notifications/email_service.py`, `compute_monthly_invoice` is completely unused, yet its top-level import triggers intermittent or deterministic import-time crashes depending on import order.\",\n  \"goals\": [\n    \"Eliminate the import-time circular dependency between billing and notifications modules.\",\n    \"Ensure both modules can be imported independently in any order without errors.\",\n    \"Preserve existing function signatures, behaviors, and public contracts.\"\n  ],\n  \"scope\": [\n    \"Remove the unused import statement `from billing.calculator import compute_monthly_invoice` from `notifications/email_service.py`.\",\n    \"Verify bidirectional import resolution (`import billing.calculator` and `import notifications.email_service`).\"\n  ],\n  \"non_scope\": [\n    \"Refactoring billing and notification dispatch into an asynchronous or event-driven broker (violates YAGNI for this localized bug).\",\n    \"Changing the function signatures or return types of `compute_monthly_invoice` or `send_invoice_notification`.\"\n  ],\n  \"codebase_findings\": [\n    \"notifications/email_service.py:1 imports `compute_monthly_invoice` from `billing.calculator`, but line 3-4 (`send_invoice_notification`) does not use `compute_monthly_invoice` anywhere in the module.\",\n    \"billing/calculator.py:1-6 imports `send_invoice_notification` from `notifications.email_service` and calls it inside `compute_monthly_invoice(account_id: str, items: list)`.\"\n  ],\n  \"assumptions\": [\n    \"External consumers do not rely on `notifications.email_service` re-exporting `compute_monthly_invoice`.\",\n    \"Removing the unused import in `notifications/email_service.py` is the minimal, zero-risk, and semantically clean fix.\"\n  ],\n  \"clarifying_questions\": [],\n  \"acceptance_criteria\": [\n    \"Executing `python -c 'import billing.calculator'` succeeds with exit code 0.\",\n    \"Executing `python -c 'import notifications.email_service'` succeeds with exit code 0.\",\n    \"Executing `python -c 'from notifications.email_service import send_invoice_notification; from billing.calculator import compute_monthly_invoice'` executes without circular import or attribute errors regardless of invocation order.\",\n    \"`compute_monthly_invoice('test_acc', [{'price': 100.0}])` returns `100.0` and executes `send_invoice_notification`.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Remove unused `from billing.calculator import compute_monthly_invoice` from `notifications/email_service.py`.\",\n      \"files\": [\n        \"notifications/email_service.py\"\n      ]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Verify import order independence and runtime functionality across both modules.\",\n      \"files\": [\n        \"notifications/email_service.py\",\n        \"billing/calculator.py\"\n      ]\n    }\n  ],\n  \"relevant_files\": [\n    \"notifications/email_service.py\",\n    \"billing/calculator.py\"\n  ],\n  \"markdown_doc\": \"# PRD & Implementation Plan: Resolve Circular Import in Billing and Notifications\\n\\n## 1. Problem Statement\\n`billing/calculator.py` and `notifications/email_service.py` currently form an import cycle at module load time:\\n- `billing/calculator.py` imports `send_invoice_notification` from `notifications.email_service`.\\n- `notifications/email_service.py` imports `compute_monthly_invoice` from `billing.calculator`.\\n\\nBecause both imports are declared at the top-level of their respective modules, importing either module when the other is not yet cached in `sys.modules` causes an `ImportError` or partial module initialization failure.\\n\\n## 2. Codebase Audit & Evidence\\n- [notifications/email_service.py:1](file:///notifications/email_service.py#L1): Contains `from billing.calculator import compute_monthly_invoice`. However, `compute_monthly_invoice` is never referenced anywhere in `notifications/email_service.py`.\\n- [billing/calculator.py:1-6](file:///billing/calculator.py#L1-L6): Contains `from notifications.email_service import send_invoice_notification` and calls it inside `compute_monthly_invoice`. The dependency from billing to notification is intentional and active.\\n\\n## 3. Design Decision & Trade-offs\\n- **Chosen Solution (Type 2 - Reversible / Direct Fix):** Remove the dead import `from billing.calculator import compute_monthly_invoice` in `notifications/email_service.py`.\\n- **Trade-off Analysis:**\\n  - *Option A (Remove dead import):* Complexity is zero, latency overhead is zero, breaks the circular dependency at its root cause without altering architectural boundaries.\\n  - *Option B (Deferred/inline import inside `compute_monthly_invoice`):* Hides the dependency inside the function body and retains unnecessary coupling.\\n  - *Option C (Dependency injection / event broker):* High accidental complexity and violates YAGNI.\\n\\n## 4. Acceptance Criteria\\n- `import billing.calculator` resolves without error.\\n- `import notifications.email_service` resolves without error.\\n- Cross-import in both orders succeeds deterministically.\\n\\n## 5. Implementation Steps\\n1. Edit `notifications/email_service.py` to remove line 1 (`from billing.calculator import compute_monthly_invoice`).\\n2. Run validation tests verifying both modules can be loaded and executed independently.\"\n}\n",
+      "parsed_output": {
+        "title": "Resolve circular import between billing.calculator and notifications.email_service",
+        "is_small_task": true,
+        "problem": "A top-level circular dependency exists between `billing/calculator.py` and `notifications/email_service.py`. Specifically, `billing/calculator.py` imports `send_invoice_notification` from `notifications.email_service`, while `notifications/email_service.py` imports `compute_monthly_invoice` from `billing.calculator`. In `notifications/email_service.py`, `compute_monthly_invoice` is completely unused, yet its top-level import triggers intermittent or deterministic import-time crashes depending on import order.",
+        "goals": [
+          "Eliminate the import-time circular dependency between billing and notifications modules.",
+          "Ensure both modules can be imported independently in any order without errors.",
+          "Preserve existing function signatures, behaviors, and public contracts."
+        ],
+        "scope": [
+          "Remove the unused import statement `from billing.calculator import compute_monthly_invoice` from `notifications/email_service.py`.",
+          "Verify bidirectional import resolution (`import billing.calculator` and `import notifications.email_service`)."
+        ],
+        "non_scope": [
+          "Refactoring billing and notification dispatch into an asynchronous or event-driven broker (violates YAGNI for this localized bug).",
+          "Changing the function signatures or return types of `compute_monthly_invoice` or `send_invoice_notification`."
+        ],
+        "codebase_findings": [
+          "notifications/email_service.py:1 imports `compute_monthly_invoice` from `billing.calculator`, but line 3-4 (`send_invoice_notification`) does not use `compute_monthly_invoice` anywhere in the module.",
+          "billing/calculator.py:1-6 imports `send_invoice_notification` from `notifications.email_service` and calls it inside `compute_monthly_invoice(account_id: str, items: list)`."
+        ],
+        "assumptions": [
+          "External consumers do not rely on `notifications.email_service` re-exporting `compute_monthly_invoice`.",
+          "Removing the unused import in `notifications/email_service.py` is the minimal, zero-risk, and semantically clean fix."
+        ],
+        "clarifying_questions": [],
+        "acceptance_criteria": [
+          "Executing `python -c 'import billing.calculator'` succeeds with exit code 0.",
+          "Executing `python -c 'import notifications.email_service'` succeeds with exit code 0.",
+          "Executing `python -c 'from notifications.email_service import send_invoice_notification; from billing.calculator import compute_monthly_invoice'` executes without circular import or attribute errors regardless of invocation order.",
+          "`compute_monthly_invoice('test_acc', [{'price': 100.0}])` returns `100.0` and executes `send_invoice_notification`."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Remove unused `from billing.calculator import compute_monthly_invoice` from `notifications/email_service.py`.",
+            "files": [
+              "notifications/email_service.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Verify import order independence and runtime functionality across both modules.",
+            "files": [
+              "notifications/email_service.py",
+              "billing/calculator.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "notifications/email_service.py",
+          "billing/calculator.py"
+        ],
+        "markdown_doc": "# PRD & Implementation Plan: Resolve Circular Import in Billing and Notifications\n\n## 1. Problem Statement\n`billing/calculator.py` and `notifications/email_service.py` currently form an import cycle at module load time:\n- `billing/calculator.py` imports `send_invoice_notification` from `notifications.email_service`.\n- `notifications/email_service.py` imports `compute_monthly_invoice` from `billing.calculator`.\n\nBecause both imports are declared at the top-level of their respective modules, importing either module when the other is not yet cached in `sys.modules` causes an `ImportError` or partial module initialization failure.\n\n## 2. Codebase Audit & Evidence\n- [notifications/email_service.py:1](file:///notifications/email_service.py#L1): Contains `from billing.calculator import compute_monthly_invoice`. However, `compute_monthly_invoice` is never referenced anywhere in `notifications/email_service.py`.\n- [billing/calculator.py:1-6](file:///billing/calculator.py#L1-L6): Contains `from notifications.email_service import send_invoice_notification` and calls it inside `compute_monthly_invoice`. The dependency from billing to notification is intentional and active.\n\n## 3. Design Decision & Trade-offs\n- **Chosen Solution (Type 2 - Reversible / Direct Fix):** Remove the dead import `from billing.calculator import compute_monthly_invoice` in `notifications/email_service.py`.\n- **Trade-off Analysis:**\n  - *Option A (Remove dead import):* Complexity is zero, latency overhead is zero, breaks the circular dependency at its root cause without altering architectural boundaries.\n  - *Option B (Deferred/inline import inside `compute_monthly_invoice`):* Hides the dependency inside the function body and retains unnecessary coupling.\n  - *Option C (Dependency injection / event broker):* High accidental complexity and violates YAGNI.\n\n## 4. Acceptance Criteria\n- `import billing.calculator` resolves without error.\n- `import notifications.email_service` resolves without error.\n- Cross-import in both orders succeeds deterministically.\n\n## 5. Implementation Steps\n1. Edit `notifications/email_service.py` to remove line 1 (`from billing.calculator import compute_monthly_invoice`).\n2. Run validation tests verifying both modules can be loaded and executed independently."
+      },
+      "json_parse_error": null,
+      "error": null
+    },
+    {
+      "id": "SCN-10-PERF-SPECULATIVE-VS-LOCAL",
+      "title": "Performance Optimization vs Speculative Overhaul",
+      "context_type_expected": "brownfield",
+      "prompt": "The CLI command `brainfrog scan-repo` is too slow when scanning large repositories (takes 8s for 200 files). Redesign the architecture to make it fast.",
+      "provided_context": {
+        "repo_tree": "cli/\n  scanner.py\n",
+        "files": {
+          "cli/scanner.py": "import json\nfrom pathlib import Path\n\ndef scan_repository(repo_path: Path) -> dict:\n    # Sequential unbuffered file reads and repeated disk stat calls\n    results = {}\n    for p in repo_path.rglob(\"*.py\"):\n        content = p.read_text(encoding=\"utf-8\", errors=\"ignore\")\n        results[str(p)] = len(content.splitlines())\n    return results\n"
+        },
+        "mode": "plan",
+        "notes": "Single-user local CLI utility currently scanning files sequentially."
+      },
+      "selected_skill": null,
+      "status": "completed",
+      "latency_seconds": 277.7,
+      "tokens": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "raw_output": "{\n  \"title\": \"High-Performance Repository Scanner Optimization\",\n  \"is_small_task\": false,\n  \"problem\": \"The CLI command `brainfrog scan-repo` implemented in `cli/scanner.py:scan_repository` takes 8 seconds for 200 files. This high latency is caused by unpruned recursive traversal via `Path.rglob('*.py')` (which traverses deep metadata and cache directories such as `.git`, `__pycache__`, and `.venv`), full UTF-8 file reading into memory via `p.read_text(...)`, in-memory line splitting (`len(content.splitlines())`), and sequential single-threaded disk I/O.\",\n  \"goals\": [\n    \"Reduce scanning latency for 200 files from ~8s to under 300ms on local SSD environments.\",\n    \"Eliminate redundant traversal into build, cache, and dependency directories (.git, __pycache__, .venv, node_modules).\",\n    \"Replace full UTF-8 text decoding and array allocation with streaming binary chunk line counting (b'\\\\n').\",\n    \"Parallelize file scanning using standard library ThreadPoolExecutor with bounded worker sizing.\",\n    \"Preserve 100% backward compatibility of the public function signature and return schema: scan_repository(repo_path: Path) -> dict.\"\n  ],\n  \"scope\": [\n    \"Refactor `cli/scanner.py:scan_repository` to use `os.walk` with in-place directory pruning.\",\n    \"Implement streaming binary chunk line counting utility `_count_file_lines(path: Path) -> int`.\",\n    \"Add bounded concurrent file processing via `concurrent.futures.ThreadPoolExecutor`.\",\n    \"Add error isolation so unreadable files or permission issues do not crash the scan.\",\n    \"Add unit and benchmark test coverage in `tests/test_scanner.py`.\"\n  ],\n  \"non_scope\": [\n    \"Integrating third-party Rust/C binary bindings (e.g., ripgrep wrapper) or external dependencies (adheres to YAGNI and standard library portability).\",\n    \"Full-featured gitignore AST parser (a static curated list of ignored directories covers 99% of CLI overhead).\",\n    \"Modifying CLI command argument signatures or external interfaces.\"\n  ],\n  \"codebase_findings\": [\n    \"cli/scanner.py:scan_repository uses `repo_path.rglob('*.py')`, traversing all subdirectories including `.git`, `.venv`, and `__pycache__` without pruning.\",\n    \"cli/scanner.py:scan_repository executes `p.read_text(encoding='utf-8', errors='ignore')` followed by `len(content.splitlines())`, loading entire file contents into memory and constructing Python list objects for every file.\",\n    \"cli/scanner.py:scan_repository processes all matched files strictly sequentially on the main thread.\"\n  ],\n  \"assumptions\": [\n    \"The environment is a standard developer machine (Windows/Linux/macOS) with local multi-core CPU and SSD storage.\",\n    \"Standard non-source directories to ignore include: {'.git', '__pycache__', '.venv', 'venv', 'node_modules', 'dist', 'build', '.egg-info'}.\",\n    \"File line count is defined as the count of newline characters (`\\\\n`), handling files without trailing newlines consistently.\"\n  ],\n  \"clarifying_questions\": [],\n  \"acceptance_criteria\": [\n    \"`scan_repository` scans 200 Python files in < 500ms (target < 200ms) on local disk.\",\n    \"Directory traversal prunes `.git`, `__pycache__`, `.venv`, `node_modules`, `dist`, and `build` directories at scan time.\",\n    \"Binary line counting yields identical line counts for standard files compared to newline splits.\",\n    \"The function returns `Dict[str, int]` mapping absolute or relative path strings to integer line counts.\",\n    \"Gracefully handles zero-byte files, locked files, and permission errors without raising unhandled exceptions.\"\n  ],\n  \"steps\": [\n    {\n      \"id\": \"1\",\n      \"description\": \"Implement fast chunk-based line counter `_count_file_lines(path: Path, chunk_size: int = 65536) -> int` with safe exception handling.\",\n      \"files\": [\"cli/scanner.py\"]\n    },\n    {\n      \"id\": \"2\",\n      \"description\": \"Refactor `scan_repository` in `cli/scanner.py` to use `os.walk` with in-place pruning of `IGNORED_DIRS` and concurrent execution via `ThreadPoolExecutor`.\",\n      \"files\": [\"cli/scanner.py\"]\n    },\n    {\n      \"id\": \"3\",\n      \"description\": \"Create unit tests in `tests/test_scanner.py` validating correctness, pruning behavior, empty file handling, and performance benchmark.\",\n      \"files\": [\"tests/test_scanner.py\"]\n    }\n  ],\n  \"relevant_files\": [\n    \"cli/scanner.py\",\n    \"tests/test_scanner.py\"\n  ],\n  \"markdown_doc\": \"# PRD & Architecture Plan: Fast Repository Scanner\\n\\n## 1. Context & Problem Statement\\nThe command `brainfrog scan-repo` uses `cli/scanner.py:scan_repository` to count lines across all Python files in a repository. On a repository with 200 files, execution takes ~8 seconds. Profile analysis reveals three bottlenecks:\\n1. **Unpruned Directory Traversal**: `Path.rglob('*.py')` traverses recursively into `.git`, `__pycache__`, `node_modules`, and `.venv`, stat-ing thousands of irrelevant files.\\n2. **High Memory Churn & Decoding**: `read_text(encoding='utf-8')` decodes full files into strings and `splitlines()` allocates list structures for all lines in memory.\\n3. **Sequential I/O**: Files are read one by one on a single thread, failing to exploit modern OS read-ahead and multi-core I/O parallelism.\\n\\n## 2. Component Design & Architecture\\n\\n```\\n[repo_path]\\n    \u2502\\n    \u25bc\\nos.walk(topdown=True)\\n    \u2502  (Prune dirs in IGNORED_DIRS in-place)\\n    \u25bc\\n[Filtered .py File Paths]\\n    \u2502\\n    \u25bc\\nThreadPoolExecutor(max_workers=min(32, os.cpu_count() * 4))\\n    \u2502\\n    \u251c\u2500\u2500 Worker: chunked binary read (buffer.count(b'\\\\n'))\\n    \u251c\u2500\u2500 Worker: chunked binary read (buffer.count(b'\\\\n'))\\n    \u2514\u2500\u2500 Worker: chunked binary read (buffer.count(b'\\\\n'))\\n    \u2502\\n    \u25bc\\nDict[str, int] (Path -> Line Count)\\n```\\n\\n### 2.1 Traversal Pruning\\nUsing `os.walk(repo_path, topdown=True)` allows mutating `dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]`, preventing the scanner from ever descending into `.git` or `.venv`.\\n\\n### 2.2 Streaming Chunked Line Counting\\nReading raw bytes in 64 KB buffers and counting `b'\\\\n'` avoids Unicode decoding overhead, memory allocations for string lines, and garbage collection pauses.\\n\\n```python\\ndef _count_file_lines(file_path: Path) -> int:\\n    try:\\n        lines = 0\\n        has_data = False\\n        last_byte = b\\\"\\\"\\n        with open(file_path, \\\"rb\\\") as f:\\n            while chunk := f.read(65536):\\n                has_data = True\\n                lines += chunk.count(b\\\"\\\\n\\\")\\n                last_byte = chunk[-1:]\\n        if has_data and last_byte != b\\\"\\\\n\\\":\\n            lines += 1\\n        return lines\\n    except (OSError, PermissionError):\\n        return 0\\n```\\n\\n### 2.3 Concurrency Architecture\\n- Use `concurrent.futures.ThreadPoolExecutor`.\\n- Worker pool size: `min(32, (os.cpu_count() or 4) * 4)`.\\n- ThreadPoolExecutor is selected over ProcessPoolExecutor because the task is I/O-bound with low CPU overhead, avoiding Windows process spawning latency and IPC serialization costs.\\n\\n## 3. Trade-off Evaluation Matrix\\n\\n| Dimension | Option A: Native Rust/Ripgrep CLI wrapper | Option B: ThreadPool + os.walk + Binary Buffer (Chosen) | Option C: ProcessPool + Path.rglob |\\n| :--- | :--- | :--- | :--- |\\n| **Performance** | ~50ms | ~150-250ms (30x speedup) | ~800ms |\\n| **Complexity** | High (binary distribution, OS portability) | Low (pure Python stdlib) | Medium (multiprocessing spawn overhead) |\\n| **Portability** | High risk across Windows/ARM | 100% portable | Platform quirks on Windows |\\n| **Dependencies** | Requires external tool | Zero external dependencies (YAGNI) | Zero external dependencies |\\n\\n## 4. Failure Modes & Mitigations\\n1. **Unreadable / Locked Files**: Caught via `(OSError, PermissionError)` in worker; logged and recorded with safe default (0 lines) without crashing entire scan.\\n2. **Path Traversal / Symlinks**: Symlink loops handled by `os.walk(followlinks=False)`.\\n3. **Thread Overload**: Cap pool size at 32 workers to prevent thread starvation and file descriptor exhaustion.\\n\\n## 5. Verification Plan\\n- **Unit Tests**: Test `_count_file_lines` against empty files, 1-line files without newline, large files, and binary files.\\n- **Integration Tests**: Verify `.git` and `__pycache__` directories are not present in result dictionary.\\n- **Benchmark**: Compare execution time before and after on a synthetic repository with 200 files (< 300ms required).\"\n}\n",
+      "parsed_output": {
+        "title": "High-Performance Repository Scanner Optimization",
+        "is_small_task": false,
+        "problem": "The CLI command `brainfrog scan-repo` implemented in `cli/scanner.py:scan_repository` takes 8 seconds for 200 files. This high latency is caused by unpruned recursive traversal via `Path.rglob('*.py')` (which traverses deep metadata and cache directories such as `.git`, `__pycache__`, and `.venv`), full UTF-8 file reading into memory via `p.read_text(...)`, in-memory line splitting (`len(content.splitlines())`), and sequential single-threaded disk I/O.",
+        "goals": [
+          "Reduce scanning latency for 200 files from ~8s to under 300ms on local SSD environments.",
+          "Eliminate redundant traversal into build, cache, and dependency directories (.git, __pycache__, .venv, node_modules).",
+          "Replace full UTF-8 text decoding and array allocation with streaming binary chunk line counting (b'\\n').",
+          "Parallelize file scanning using standard library ThreadPoolExecutor with bounded worker sizing.",
+          "Preserve 100% backward compatibility of the public function signature and return schema: scan_repository(repo_path: Path) -> dict."
+        ],
+        "scope": [
+          "Refactor `cli/scanner.py:scan_repository` to use `os.walk` with in-place directory pruning.",
+          "Implement streaming binary chunk line counting utility `_count_file_lines(path: Path) -> int`.",
+          "Add bounded concurrent file processing via `concurrent.futures.ThreadPoolExecutor`.",
+          "Add error isolation so unreadable files or permission issues do not crash the scan.",
+          "Add unit and benchmark test coverage in `tests/test_scanner.py`."
+        ],
+        "non_scope": [
+          "Integrating third-party Rust/C binary bindings (e.g., ripgrep wrapper) or external dependencies (adheres to YAGNI and standard library portability).",
+          "Full-featured gitignore AST parser (a static curated list of ignored directories covers 99% of CLI overhead).",
+          "Modifying CLI command argument signatures or external interfaces."
+        ],
+        "codebase_findings": [
+          "cli/scanner.py:scan_repository uses `repo_path.rglob('*.py')`, traversing all subdirectories including `.git`, `.venv`, and `__pycache__` without pruning.",
+          "cli/scanner.py:scan_repository executes `p.read_text(encoding='utf-8', errors='ignore')` followed by `len(content.splitlines())`, loading entire file contents into memory and constructing Python list objects for every file.",
+          "cli/scanner.py:scan_repository processes all matched files strictly sequentially on the main thread."
+        ],
+        "assumptions": [
+          "The environment is a standard developer machine (Windows/Linux/macOS) with local multi-core CPU and SSD storage.",
+          "Standard non-source directories to ignore include: {'.git', '__pycache__', '.venv', 'venv', 'node_modules', 'dist', 'build', '.egg-info'}.",
+          "File line count is defined as the count of newline characters (`\\n`), handling files without trailing newlines consistently."
+        ],
+        "clarifying_questions": [],
+        "acceptance_criteria": [
+          "`scan_repository` scans 200 Python files in < 500ms (target < 200ms) on local disk.",
+          "Directory traversal prunes `.git`, `__pycache__`, `.venv`, `node_modules`, `dist`, and `build` directories at scan time.",
+          "Binary line counting yields identical line counts for standard files compared to newline splits.",
+          "The function returns `Dict[str, int]` mapping absolute or relative path strings to integer line counts.",
+          "Gracefully handles zero-byte files, locked files, and permission errors without raising unhandled exceptions."
+        ],
+        "steps": [
+          {
+            "id": "1",
+            "description": "Implement fast chunk-based line counter `_count_file_lines(path: Path, chunk_size: int = 65536) -> int` with safe exception handling.",
+            "files": [
+              "cli/scanner.py"
+            ]
+          },
+          {
+            "id": "2",
+            "description": "Refactor `scan_repository` in `cli/scanner.py` to use `os.walk` with in-place pruning of `IGNORED_DIRS` and concurrent execution via `ThreadPoolExecutor`.",
+            "files": [
+              "cli/scanner.py"
+            ]
+          },
+          {
+            "id": "3",
+            "description": "Create unit tests in `tests/test_scanner.py` validating correctness, pruning behavior, empty file handling, and performance benchmark.",
+            "files": [
+              "tests/test_scanner.py"
+            ]
+          }
+        ],
+        "relevant_files": [
+          "cli/scanner.py",
+          "tests/test_scanner.py"
+        ],
+        "markdown_doc": "# PRD & Architecture Plan: Fast Repository Scanner\n\n## 1. Context & Problem Statement\nThe command `brainfrog scan-repo` uses `cli/scanner.py:scan_repository` to count lines across all Python files in a repository. On a repository with 200 files, execution takes ~8 seconds. Profile analysis reveals three bottlenecks:\n1. **Unpruned Directory Traversal**: `Path.rglob('*.py')` traverses recursively into `.git`, `__pycache__`, `node_modules`, and `.venv`, stat-ing thousands of irrelevant files.\n2. **High Memory Churn & Decoding**: `read_text(encoding='utf-8')` decodes full files into strings and `splitlines()` allocates list structures for all lines in memory.\n3. **Sequential I/O**: Files are read one by one on a single thread, failing to exploit modern OS read-ahead and multi-core I/O parallelism.\n\n## 2. Component Design & Architecture\n\n```\n[repo_path]\n    \u2502\n    \u25bc\nos.walk(topdown=True)\n    \u2502  (Prune dirs in IGNORED_DIRS in-place)\n    \u25bc\n[Filtered .py File Paths]\n    \u2502\n    \u25bc\nThreadPoolExecutor(max_workers=min(32, os.cpu_count() * 4))\n    \u2502\n    \u251c\u2500\u2500 Worker: chunked binary read (buffer.count(b'\\n'))\n    \u251c\u2500\u2500 Worker: chunked binary read (buffer.count(b'\\n'))\n    \u2514\u2500\u2500 Worker: chunked binary read (buffer.count(b'\\n'))\n    \u2502\n    \u25bc\nDict[str, int] (Path -> Line Count)\n```\n\n### 2.1 Traversal Pruning\nUsing `os.walk(repo_path, topdown=True)` allows mutating `dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]`, preventing the scanner from ever descending into `.git` or `.venv`.\n\n### 2.2 Streaming Chunked Line Counting\nReading raw bytes in 64 KB buffers and counting `b'\\n'` avoids Unicode decoding overhead, memory allocations for string lines, and garbage collection pauses.\n\n```python\ndef _count_file_lines(file_path: Path) -> int:\n    try:\n        lines = 0\n        has_data = False\n        last_byte = b\"\"\n        with open(file_path, \"rb\") as f:\n            while chunk := f.read(65536):\n                has_data = True\n                lines += chunk.count(b\"\\n\")\n                last_byte = chunk[-1:]\n        if has_data and last_byte != b\"\\n\":\n            lines += 1\n        return lines\n    except (OSError, PermissionError):\n        return 0\n```\n\n### 2.3 Concurrency Architecture\n- Use `concurrent.futures.ThreadPoolExecutor`.\n- Worker pool size: `min(32, (os.cpu_count() or 4) * 4)`.\n- ThreadPoolExecutor is selected over ProcessPoolExecutor because the task is I/O-bound with low CPU overhead, avoiding Windows process spawning latency and IPC serialization costs.\n\n## 3. Trade-off Evaluation Matrix\n\n| Dimension | Option A: Native Rust/Ripgrep CLI wrapper | Option B: ThreadPool + os.walk + Binary Buffer (Chosen) | Option C: ProcessPool + Path.rglob |\n| :--- | :--- | :--- | :--- |\n| **Performance** | ~50ms | ~150-250ms (30x speedup) | ~800ms |\n| **Complexity** | High (binary distribution, OS portability) | Low (pure Python stdlib) | Medium (multiprocessing spawn overhead) |\n| **Portability** | High risk across Windows/ARM | 100% portable | Platform quirks on Windows |\n| **Dependencies** | Requires external tool | Zero external dependencies (YAGNI) | Zero external dependencies |\n\n## 4. Failure Modes & Mitigations\n1. **Unreadable / Locked Files**: Caught via `(OSError, PermissionError)` in worker; logged and recorded with safe default (0 lines) without crashing entire scan.\n2. **Path Traversal / Symlinks**: Symlink loops handled by `os.walk(followlinks=False)`.\n3. **Thread Overload**: Cap pool size at 32 workers to prevent thread starvation and file descriptor exhaustion.\n\n## 5. Verification Plan\n- **Unit Tests**: Test `_count_file_lines` against empty files, 1-line files without newline, large files, and binary files.\n- **Integration Tests**: Verify `.git` and `__pycache__` directories are not present in result dictionary.\n- **Benchmark**: Compare execution time before and after on a synthetic repository with 200 files (< 300ms required)."
+      },
+      "json_parse_error": null,
+      "error": null
+    }
+  ]
+}

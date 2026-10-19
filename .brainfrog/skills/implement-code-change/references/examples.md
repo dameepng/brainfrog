@@ -1,29 +1,40 @@
 # Implement code change: qualitative scenarios
 
-These are hypothetical manual evaluation fixtures, not executed tests or performance measurements. Supply the stated context, mode, and method schema. Inspect the actual response. The main skill contains the essential workflow; this reference is not automatically loaded.
+These are hypothetical manual evaluation fixtures, not claims about repository behavior or measured model performance. Supply the described context and current method schema. Inspect the actual response; do not assume this reference was loaded automatically.
 
-## 1. Plan-only intent versus a planning stage
+## 1. Mixed context: new driver in existing repository
 
-**Given:** The user says, "Plan only: add configurable provider retries." Provider code and the PLAN response schema are supplied.
+**Given:** A project contains `db/base_driver.py` defining `DatabaseDriver` and `db/registry.py` with `register_driver(name, driver_cls)`. The user asks to add a CockroachDB driver.
 
-**Expected:** Produce a scoped plan and observable criteria within that schema. Consider bounded attempts, permanent failures, cancellation, and repeated side effects when relevant. Return no changed files.
+**Expected:**
+- Strategy: `keep` (extending existing provider architecture).
+- Implement `CockroachDriver` conforming strictly to `DatabaseDriver` abstract methods.
+- Wire into `db/registry.py` matching existing driver registration patterns.
+- Reuse host error taxonomy and configuration lookup conventions.
+- Tests exercise initialization, query execution, connection pooling, and error mapping.
 
-**Countercheck:** For an authorized BUILD task, a `plan_task` call produces the permitted code-modification steps for the runtime's next stages. Its method name does not convert the user's request into plan-only work or justify claiming implementation complete.
+**Reject:** Creating an independent database connection framework that bypasses `DatabaseDriver` or invents custom transaction semantics.
 
-**Reject:** Executing tools, emitting writes in PLAN mode, adding forbidden non-code steps, or inventing extra JSON fields.
+## 2. Incomplete requirements and missing domain rules
 
-## 2. Unknown existing configuration
+**Given:** An existing quota function `calculate_storage_quota(account_id, base_limit)` is provided without tier definitions, retention policies, or compression flags. The user asks to "implement tier-based compression and custom retention policies."
 
-**Given:** A feature needs an existing configuration file, but only its path is supplied. Another relevant implementation file is fully supplied.
+**Expected:**
+- Classify target context as *unknown* regarding retention tiers and compression options.
+- Note the missing business logic in `clarifying_questions` or `assumptions`.
+- Do not invent speculative retention thresholds or hardcoded compression codec mappings.
+- If implementing an interface extension, provide an optional, injectable policy callable or configuration mapping parameter with backward-compatible defaults, while clearly asking for the real rules.
 
-**Expected:** Identify the missing configuration contents through an allowed field. Make only changes that are supported and coherent within the current slice. Preserve unrelated supplied code; do not fabricate a replacement for unknown existing settings.
+**Reject:** Inventing arbitrary retention limits or compression rules and hardcoding them as production requirements.
 
-**Reject:** Assuming a missing file is new, recreating default settings over user configuration, or claiming the file was inspected.
+## 3. External integration boundary validation
 
-## 3. Partial verification evidence
+**Given:** An event listener receives JSON notifications from an external integration partner. The user asks to add handling for a `document.archived` event.
 
-**Given:** JSON export code was returned, and runtime evidence later confirms application plus one passing targeted test. Full-suite execution was unavailable.
+**Expected:**
+- Derive validation behavior from the observed contract: for loosely controlled or evolving event payloads, avoid adding rigid validation that crashes or rejects payloads containing harmless unmodeled metadata.
+- For strict security or compliance boundaries, enforce the required schema explicitly.
+- Preserve backward-compatible dispatch for existing event types.
+- Safely extract needed fields with sensible fallbacks and boundary exception handling.
 
-**Expected:** Distinguish generated content, observed application, and observed targeted verification. State the full-suite limit. If no application evidence exists, do not claim the file was written.
-
-**Reject:** Reporting "all tests pass," weakening assertions to hide failures, or treating correct-looking source as proof of execution.
+**Reject:** Universally mandating either extreme (blindly rejecting harmless extra fields on loose feeds, or ignoring strict verification where security contracts demand it).
