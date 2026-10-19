@@ -174,13 +174,141 @@ def _matches_anti_slop(task_lower: str) -> bool:
     return False
 
 
+_ENGINEERING_SKILLS = frozenset({
+    "understand-codebase", "implement-code-change", "refactor-code-safely",
+    "review-code-change", "diagnose-code-failure", "test-code-behavior",
+    "verify-code-result",
+})
+
+# These are request wrappers, not intent keywords. Strip only at the start so
+# instructions and examples later in a task cannot replace its primary action.
+_REQUEST_PREFIX = re.compile(
+    r"^(?:please|kindly|can you|could you|would you|will you|help me|"
+    r"i (?:want|need|would like) (?:you )?to|let us|let's|to|"
+    r"tolong|mohon|bisa(?:kah)?|boleh(?:kah)?|bantu(?:lah)?|"
+    r"saya|aku|gue|gua|gw|kamu|anda|lu|lo|kau|"
+    r"mau|ingin|pengen|harap|untuk|coba|yuk)\b[\s,:-]*",
+    re.IGNORECASE,
+)
+_MODE_PREFIX = re.compile(
+    r"^(?:\[(?:mode\s*[:=]\s*)?(?:plan(?:[- ]only)?|build|read[- ]only)\]|"
+    r"plan[- ]only\s*:|"
+    r"/(?:plan|build)\b|(?:in\s+)?(?:plan|build|read[- ]only)\s+mode\b|"
+    r"mode\s+(?:plan|build)\b)[\s,:-]*",
+    re.IGNORECASE,
+)
+_SOFTWARE_CONTEXT = re.compile(
+    r"\b(?:code|codebase|kode|repo|repository|repositories|software|"
+    r"backend|frontend|api|endpoint|endpoints|parser|function|functions|fungsi|"
+    r"method|methods|module|modules|modul|class|classes|handler|handlers|"
+    r"implementation|implementasi|diff|patch|commit|pr|cli|ui|ux|"
+    r"test|tests|testing|testcase|pytest|unittest|ruff|mypy|pengujian|tes|"
+    r"build|compiler|compilation|lint|typecheck|typescript|javascript|python|"
+    r"rust|html|css|sql|database|schema|migration|migrations|"
+    r"bug|bugs|crash|exception|stacktrace|dependency|dependencies|"
+    r"config|configuration|konfigurasi|script|scripts|command|commands|"
+    r"object|objects|field|fields|project|proyek|runtime|session|storage|provider|providers|json|"
+    r"authentication|authorization|auth|http|https|grpc|websocket|"
+    r"pagination|paginasi|cache|caching|retries|retry|timeout|"
+    r"algorithm|algoritma|binary\s+search|pull\s+request)\b|"
+    r"\b[\w.-]+\.(?:py|js|jsx|ts|tsx|go|rs|java|rb|php|cs|cpp|c|h|sql|html|css)\b",
+    re.IGNORECASE,
+)
+_TARGET_MODIFIERS = (
+    r"(?:(?:a|an|the|some|new|focused|meaningful|existing|current|"
+    r"unit|integration|regression|e2e|acceptance|behavioral|full|entire|relevant|"
+    r"sebuah|beberapa|baru|hasil|ulang)\s+)*"
+)
+_TEST_TARGET = re.compile(r"\b(?:tests?|testcases?|coverage|pengujian|tes)\b")
+_CHECK_TARGET = re.compile(
+    r"^(?:(?:that|whether|apakah|bahwa)\s+)?" + _TARGET_MODIFIERS +
+    r"(?:tests?|build|lint|typecheck|checks?|results?|output|bukti|pengujian|tes)\b|"
+    r"^(?:python3?\s+-m\s+)?(?:pytest|unittest|ruff|mypy)\b|"
+    r"^(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build|lint|typecheck)\b|"
+    r"^go\s+test\b|^cargo\s+(?:test|check|clippy)\b"
+)
+_FAILURE_CONTEXT = re.compile(
+    r"\b(?:bugs?|fail(?:ing|ed|ure|ures)?|errors?|crash(?:es|ing)?|exception|"
+    r"regressions?|broken|gagal|rusak|macet|lambat|stacktrace|leak)\b|"
+    r"\btidak\s+(?:bekerja|berfungsi|jalan)\b"
+)
+
+
+def _select_engineering_intent(task: str) -> Optional[str]:
+    """Route a primary EN/ID software action, not incidental task vocabulary.
+
+    This is deliberately conservative and selects at most one workflow. Mode
+    labels are context wrappers only; selection never changes runtime authority.
+    Unrecognized phrasing remains eligible for explicit/custom skill selection.
+    """
+    request = task.strip().lower()
+    while request:
+        prefix = _REQUEST_PREFIX.match(request) or _MODE_PREFIX.match(request)
+        if not prefix:
+            break
+        request = request[prefix.end():]
+
+    # Secondary instructions, quoted examples on later lines, and conversation
+    # history must not supply a different primary action or software context.
+    primary = re.split(
+        r"[;\n]|(?<=[.!?])\s+|\b(?:then|lalu|kemudian|afterwards)\b",
+        request, maxsplit=1,
+    )[0].strip()
+    match = re.match(r"^([a-z]+)\b[\s,:-]*(.*)$", primary)
+    if not match:
+        return None
+    action, target = match.groups()
+    # A software topic does not make the requested object software work.
+    # Keep context before a topic clause, e.g. "code about request routing".
+    context_target = re.split(r"\b(?:about|tentang|mengenai|perihal)\b", target, maxsplit=1)[0]
+    if not _SOFTWARE_CONTEXT.search(context_target):
+        return None
+
+    if action in {"review", "audit", "tinjau", "meninjau", "ulas", "evaluasi"}:
+        return "review-code-change"
+    if action in {"refactor", "refactorisasi", "restructure", "simplify", "rapikan", "rapihkan", "merapikan", "cleanup"}:
+        return "refactor-code-safely"
+    if action == "clean" and target.startswith("up "):
+        return "refactor-code-safely"
+    if action in {"fix", "debug", "diagnose", "repair", "troubleshoot", "resolve", "perbaiki", "memperbaiki", "benahi", "benerin", "betulin"}:
+        return "diagnose-code-failure"
+    if action in {"investigate", "selidiki", "trace", "telusuri"}:
+        return "diagnose-code-failure" if _FAILURE_CONTEXT.search(target) else "understand-codebase"
+    if action in {"verify", "validate", "verifikasi", "validasi", "confirm", "pastikan", "test", "uji", "tes"}:
+        return "verify-code-result"
+    if action in {"run", "rerun", "execute", "jalankan"}:
+        return "verify-code-result" if _CHECK_TARGET.match(target) else None
+    if action in {"check", "cek", "periksa"}:
+        return "verify-code-result" if _CHECK_TARGET.match(target) else "review-code-change"
+    if action in {"understand", "inspect", "explore", "explain", "map", "analyze", "analyse", "read", "plan", "design", "pahami", "memahami", "pelajari", "mempelajari", "jelaskan", "petakan", "rancang", "rencanakan", "baca", "lihat", "liat"}:
+        return "understand-codebase"
+    if action == "bagaimana" or (action == "how" and re.match(r"(?:does|do|is|are)\b", target)):
+        return "understand-codebase"
+    if action == "apa" and re.match(r"(?:isi|struktur|alur|fungsi)\b", target):
+        return "understand-codebase"
+    if action in {"write", "draft", "tulis", "susun"}:
+        if re.match(r"^(?:(?:a|an|the|sebuah|code|security|architecture)\s+)*review\b", target):
+            return "review-code-change"
+        if re.match(r"^(?:(?:a|an|the|sebuah|implementation|migration)\s+)*plan\b", target):
+            return "understand-codebase"
+    if action in {"implement", "add", "create", "build", "develop", "extend", "change", "update", "replace", "introduce", "write", "draft", "implementasikan", "tambahkan", "menambahkan", "tambah", "tambahin", "buat", "bikin", "bangun", "kembangkan", "ubah", "tulis", "susun"}:
+        # The object of "add parser tests" is tests; "add a parser with tests"
+        # is implementation. Inspect only the initial object phrase.
+        object_phrase = re.split(
+            r"\b(?:for|to|with|using|according|and|into|in|from|that|which|"
+            r"untuk|dengan|di|dari|yang|serta)\b", target, maxsplit=1,
+        )[0]
+        return "test-code-behavior" if _TEST_TARGET.search(object_phrase) else "implement-code-change"
+    return None
+
+
 def select_skill(
     task: str,
     available_skills: Dict[str, SkillMetadata],
     explicit_skill_name: Optional[str] = None,
 ) -> Tuple[Optional[SkillMetadata], str]:
     """Select appropriate skill for the task.
-    
+
     Returns:
         (selected_skill, cleaned_task)
     """
@@ -219,13 +347,20 @@ def select_skill(
     if "audit-anti-slop" in available_skills and _matches_anti_slop(task_lower):
         return available_skills["audit-anti-slop"], task
 
-    # Generic matching: match task against indexed descriptions if strongly relevant
+    # Built-in engineering workflows follow the primary requested action. A
+    # later mention of tests, design, or review must not change that workflow.
+    engineering_name = _select_engineering_intent(task)
+    if engineering_name is not None and engineering_name in available_skills:
+        return available_skills[engineering_name], task
+
+    # Preserve description matching for custom skills. Built-ins are excluded:
+    # otherwise a rejected/secondary intent could re-enter via keyword overlap.
+    task_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", task_lower))
     for s_name, s_meta in available_skills.items():
-        if s_name == "audit-anti-slop":
+        if s_name == "audit-anti-slop" or s_name in _ENGINEERING_SKILLS:
             continue
         # Extract keywords from description
         desc_words = {w for w in re.findall(r"\b[a-zA-Z]{4,}\b", s_meta.description.lower())}
-        task_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", task_lower))
         overlap = desc_words.intersection(task_words)
         if len(overlap) >= 3:
             return s_meta, task
@@ -284,7 +419,7 @@ def validate_skill_script(
     repo_dir: Path,
 ) -> Tuple[bool, str, List[str]]:
     """Validate skill script before execution (Zero Trust on Skill Scripts).
-    
+
     Checks:
     - Script file must exist inside the skill's scripts/ directory.
     - Script path cannot traverse outside the skill folder.

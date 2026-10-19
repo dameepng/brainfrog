@@ -11,8 +11,10 @@ Also tests:
 - Security validation of skill scripts (Zero-Trust sandbox).
 """
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # Ensure UTF-8 on Windows
 if sys.platform == "win32":
@@ -71,8 +73,8 @@ def run_tests():
     ]
     for prompt in irrelevant_prompts:
         selected, _ = select_skill(prompt, skills)
-        assert selected is None, f"Skill should NOT trigger for: {prompt}, but got {selected.name if selected else None}"
-        print(f"  ✓ Ignored: '{prompt[:50]}...' -> None")
+        assert selected is None or selected.name != "audit-anti-slop", f"Anti-slop should NOT trigger for: {prompt}"
+        print(f"  ✓ No anti-slop: '{prompt[:50]}...' -> {selected.name if selected else None}")
     print("✓ Case 2 PASSED: Irrelevant / backend prompts do NOT trigger audit-anti-slop.\n")
 
     print("=== Test 4: Case 3 - Explicit /skill Command Triggers Skill ===")
@@ -142,7 +144,9 @@ def run_tests():
 
 class TestSkills(unittest.TestCase):
     def test_skills_suite(self):
-        run_tests()
+        # Installed personal skills must not influence a bundled-skill test.
+        with tempfile.TemporaryDirectory() as home, patch("pathlib.Path.home", return_value=Path(home)):
+            run_tests()
 
 
 if __name__ == "__main__":
