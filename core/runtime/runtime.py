@@ -1659,7 +1659,7 @@ class BrainFrogRuntime:
                         # User typed `/plan <task>` that does not match an existing plan ID; switch to plan mode and route task to planning
                         if sub_action in ("create", "new", "init", "start"):
                             session.selected_plan_id = None
-                            raw_text = raw_args
+                            raw_text = raw_args.split(maxsplit=1)[1].strip() if len(sub_parts) > 1 else raw_args
                         else:
                             raw_text = raw_args
 
@@ -2393,10 +2393,18 @@ class BrainFrogRuntime:
         if approved_execution:
             effective_mode = "build"
         elif policy.trust_level == ChannelTrustLevel.REMOTE_CHANNEL.value:
-            if not policy.allow_code_edits and requested_mode == "build":
-                # Fallback to plan mode so remote users get safe architectural analysis & PRD
-                effective_mode = "plan"
-                emit("agent.mode.fallback", {"from": "build", "to": "plan", "reason": "remote_channel_read_only"})
+            if requested_mode == "build":
+                # In Phase 1, Build mode is not implemented for remote execution without an approved contract
+                emit("agent.mode.build_unimplemented", {
+                    "session_id": session.session_id,
+                    "channel": effective_channel,
+                })
+                return OutgoingMessage(
+                    text="🔨 Build mode is defined, but plan selection and controlled execution are not implemented yet. Use `/mode plan` to draft an implementation plan or `/mode chat` for conversation.",
+                    events=events,
+                    success=True,
+                    status="completed",
+                )
 
         # 3. Resolve Workspace & Providers
         try:
@@ -2461,7 +2469,7 @@ class BrainFrogRuntime:
             return OutgoingMessage(text=f"❌ {err_msg}", events=events, success=False, error=err_msg)
 
         # 5. Load Domains & Prepare Orchestrator Config
-        can_auto_create = bool(effective_mode == "build" and policy.allow_code_edits)
+        can_auto_create = bool(effective_mode == "build" and policy.allow_code_edits and execution_contract is not None)
         custom_mod_map = message.metadata.get("module_map")
         map_path = Path(custom_mod_map) if custom_mod_map else None
         domains = {} if execution_contract else load_module_map(
