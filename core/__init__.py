@@ -12,6 +12,7 @@ from .plans import (
     is_safe_readonly_command,
     check_plan_staleness,
     compute_file_hash,
+    format_blocking_unknown_explanation,
 )
 from .memory import (
     Learning,
@@ -54,6 +55,7 @@ __all__ = [
     "is_safe_readonly_command",
     "check_plan_staleness",
     "compute_file_hash",
+    "format_blocking_unknown_explanation",
     # Memory
     "Learning",
     "MemoryStore",

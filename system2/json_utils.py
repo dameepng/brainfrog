@@ -87,6 +87,8 @@ def extract_json(text: str) -> Dict[str, Any]:
     Handles free-form thought processes, markdown prose preceding JSON,
     markdown fences (```json ... ```), nested braces, trailing commas,
     unescaped JSX quotes, invalid escape chars, and stream truncation.
+    Prioritizes repairing and auto-closing the outermost root JSON object
+    before scanning for inner nested objects.
     """
     decoder = json.JSONDecoder(strict=False)
     text = text.strip()
@@ -126,7 +128,49 @@ def extract_json(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # Pass 2: Iterate through all '{' occurrences with raw decode
+    # Strip code fences if whole text is wrapped in markdown
+    cleaned_text = text
+    if cleaned_text.startswith("```"):
+        lines = cleaned_text.splitlines()
+        inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
+        if inner and inner[-1].strip() == "```":
+            inner = inner[:-1]
+        cleaned_text = "\n".join(inner).strip()
+
+    start = cleaned_text.find("{")
+    if start == -1:
+        raise ValueError(f"No JSON object found in model output:\n{text[:500]}")
+
+    # Pass 2: Outermost root JSON candidate from first '{'
+    outer_candidate = cleaned_text[start:]
+
+    # 2a. Direct raw_decode of outermost candidate
+    try:
+        obj, _ = decoder.raw_decode(outer_candidate)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    # 2b. Repaired outermost candidate
+    repaired_outer = repair_json_content(outer_candidate)
+    try:
+        obj, _ = decoder.raw_decode(repaired_outer)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    # 2c. Auto-close truncated outermost candidate
+    closed_outer = attempt_close_truncated_json(repaired_outer)
+    try:
+        obj, _ = decoder.raw_decode(closed_outer)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    # Pass 3: Fallback scan for embedded JSON objects in text
     candidates: List[Tuple[int, int, Dict[str, Any]]] = []
     idx = 0
     while True:
@@ -144,56 +188,33 @@ def extract_json(text: str) -> Dict[str, Any]:
             idx = pos + 1
 
     if candidates:
-        expected_keys: Set[str] = {
-            "files", "steps", "plan", "title", "body", "answer",
-            "tasks", "summary", "diagnosis", "learnings",
+        expected_root_keys: Set[str] = {
+            "title", "problem", "goals", "steps", "plan", "body", "answer",
+            "tasks", "summary", "diagnosis", "learnings", "markdown_doc",
         }
-        for _, _, obj in candidates:
-            if any(k in obj for k in expected_keys):
-                return obj
-        candidates.sort(key=lambda c: len(c[2]), reverse=True)
-        return candidates[0][2]
+        # Disqualify or de-prioritize inner step objects: {"id": "...", "description": "...", "files": [...]}
+        def _score_candidate(cand: Tuple[int, int, Dict[str, Any]]) -> Tuple[int, int, int]:
+            d = cand[2]
+            # If it's a step item with list 'files' and 'id', penalize it
+            is_step_item = "id" in d and "description" in d and isinstance(d.get("files"), list)
+            root_matches = sum(1 for k in expected_root_keys if k in d)
+            # For 'files', only count as root key if it is a dict (as in write_code output)
+            if "files" in d and isinstance(d["files"], dict):
+                root_matches += 2
+            penalty = -10 if is_step_item else 0
+            return (root_matches + penalty, len(d), cand[1] - cand[0])
 
-    # Pass 3: Strip code fences if whole text is wrapped in markdown
-    cleaned_text = text
-    if cleaned_text.startswith("```"):
-        lines = cleaned_text.splitlines()
-        inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
-        if inner and inner[-1].strip() == "```":
-            inner = inner[:-1]
-        cleaned_text = "\n".join(inner).strip()
+        candidates.sort(key=_score_candidate, reverse=True)
+        best = candidates[0][2]
+        # Only return candidate if it has meaningful structure
+        if any(k in best for k in expected_root_keys) or len(best) > 1:
+            return best
 
-    start = cleaned_text.find("{")
-    if start == -1:
-        raise ValueError(f"No JSON object found in model output:\n{text[:500]}")
-
-    # Pass 4: Try raw decode from first brace
-    try:
-        obj, _ = decoder.raw_decode(cleaned_text, start)
-        return obj
-    except json.JSONDecodeError:
-        pass
-
-    # Pass 5: Apply repairs to the substring starting from first '{'
-    json_candidate = cleaned_text[start:]
-    repaired = repair_json_content(json_candidate)
-    try:
-        obj, _ = decoder.raw_decode(repaired)
-        return obj
-    except json.JSONDecodeError:
-        pass
-
-    # Pass 6: Try auto-closing truncated JSON on repaired text
-    closed = attempt_close_truncated_json(repaired)
-    try:
-        obj, _ = decoder.raw_decode(closed)
-        return obj
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"JSON parse error at position {exc.pos} in model output (auto-repair attempted).\n"
-            f"Context: ...{cleaned_text[max(0, exc.pos-80):exc.pos+80]}...\n"
-            f"Full output (first 800 chars):\n{cleaned_text[:800]}"
-        ) from exc
+    # If all passes failed, raise actionable ValueError
+    raise ValueError(
+        f"Failed to parse valid JSON from model output (auto-repair and auto-close attempted).\n"
+        f"Full output (first 800 chars):\n{cleaned_text[:800]}"
+    )
 
 
 # Backward compatibility alias

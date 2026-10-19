@@ -292,9 +292,13 @@ class ApprovalRequest:
     authorization_digest: str = ""
     workspace_root: str = ""
     approval_digest: str = ""
+    plan_id: Optional[str] = None
+    plan_revision: Optional[int] = None
+    plan_content_hash: Optional[str] = None
+    plan_metadata_hash: Optional[str] = None
 
     def authorization_payload(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "request_id": self.request_id,
             "session_id": self.session_id,
@@ -311,6 +315,13 @@ class ApprovalRequest:
             "nonce": self.nonce,
             "workspace_root": self.workspace_root,
         }
+        if self.plan_id is not None:
+            payload["plan_id"] = self.plan_id
+            payload["plan_revision"] = self.plan_revision
+            payload["plan_content_hash"] = self.plan_content_hash
+            if self.plan_metadata_hash is not None:
+                payload["plan_metadata_hash"] = self.plan_metadata_hash
+        return payload
 
     def compute_authorization_digest(self) -> str:
         return CanonicalOperation("execution_contract_v2", "", self.authorization_payload()).compute_digest()
@@ -368,6 +379,10 @@ class ApprovalRequest:
             "approved_at": self.approved_at,
             "consumed_at": self.consumed_at,
             "rejection_reason": scrub_secrets(self.rejection_reason) if self.rejection_reason else None,
+            "plan_id": self.plan_id,
+            "plan_revision": self.plan_revision,
+            "plan_content_hash": self.plan_content_hash,
+            "plan_metadata_hash": self.plan_metadata_hash,
         }
 
     @classmethod
@@ -420,6 +435,10 @@ class ApprovalRequest:
             authorization_digest=data.get("authorization_digest", ""),
             workspace_root=data.get("workspace_root", ""),
             approval_digest=data.get("approval_digest", ""),
+            plan_id=data.get("plan_id"),
+            plan_revision=data.get("plan_revision"),
+            plan_content_hash=data.get("plan_content_hash"),
+            plan_metadata_hash=data.get("plan_metadata_hash"),
         )
 
 
@@ -1174,6 +1193,10 @@ class ApprovalService:
         session_incarnation_id: Optional[str] = None,
         capabilities: Optional[Capabilities] = None,
         workspace_root: str = "",
+        plan_id: Optional[str] = None,
+        plan_revision: Optional[int] = None,
+        plan_content_hash: Optional[str] = None,
+        plan_metadata_hash: Optional[str] = None,
     ) -> ApprovalRequest:
         """Create and persist a new PENDING approval request with secure nonce and quota bounds."""
         now = time.time()
@@ -1186,6 +1209,16 @@ class ApprovalService:
         request_id = f"req_{secrets.token_hex(4)}"
         nonce = secrets.token_hex(16)
         digest = canonical_operation.compute_digest()
+
+        ws_resolved = str(Path(workspace_root).resolve()) if workspace_root else ""
+        if plan_id and plan_metadata_hash is None and ws_resolved:
+            try:
+                from core.plans import PlanRegistry
+                p_doc = PlanRegistry(ws_resolved).get_plan(plan_id)
+                if p_doc is not None:
+                    plan_metadata_hash = getattr(p_doc, "metadata_hash", None)
+            except Exception:
+                pass
 
         request = ApprovalRequest(
             request_id=request_id,
@@ -1203,7 +1236,11 @@ class ApprovalService:
             status=ApprovalStatus.PENDING,
             session_incarnation_id=session_incarnation_id,
             capabilities=capabilities if capabilities is not None else Capabilities(),
-            workspace_root=str(Path(workspace_root).resolve()) if workspace_root else "",
+            workspace_root=ws_resolved,
+            plan_id=plan_id,
+            plan_revision=plan_revision,
+            plan_content_hash=plan_content_hash,
+            plan_metadata_hash=plan_metadata_hash,
         )
         if type(request.capabilities) is not Capabilities:
             raise ValueError("Capabilities must be a validated domain type")

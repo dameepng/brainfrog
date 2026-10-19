@@ -393,6 +393,11 @@ class BrainFrogClient:
             for s in allowed_scope:
                 if re.match(r"^[a-zA-Z]:", s):
                     raise InvalidRequestError(f"Scope path traversal forbidden: drive-relative or absolute path '{s}'")
+                # Root-relative ("/x", "\x") and UNC ("\\host\share") paths are
+                # anchored outside the workspace on Windows; ntpath.isabs() no
+                # longer classes single-separator paths as absolute, so fail closed.
+                if s[:1] in ("/", "\\"):
+                    raise InvalidRequestError(f"Scope path traversal forbidden: root-relative or UNC path '{s}'")
                 p = Path(s)
                 if ".." in p.parts or os.path.isabs(s):
                     raise InvalidRequestError(f"Scope path traversal forbidden: '{s}'")
