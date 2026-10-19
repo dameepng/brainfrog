@@ -2274,7 +2274,7 @@ class BrainFrogRuntime:
                 bound_plan_rev = None
                 bound_plan_hash = None
                 bound_plan_meta_hash = None
-                target_plan_id = message.metadata.get("plan_id") or session.selected_plan_id or (pending_remote_plan.id if pending_remote_plan is not None else None)
+                target_plan_id = message.metadata.get("plan_id") or session.selected_plan_id
                 if target_plan_id:
                     try:
                         from core.plans import PlanRegistry
@@ -2527,16 +2527,14 @@ class BrainFrogRuntime:
             session_incarnation_id=session.session_incarnation_id,
             work_id=remote_context.work_id if remote_context else message.metadata.get("work_id"),
             plan_id=(
-                (execution_contract.plan_id if (execution_contract and execution_contract.plan_id) else None)
-                or (remote_context.plan_id if remote_context else None)
-                or message.metadata.get("plan_id")
-                or session.selected_plan_id
+                execution_contract.plan_id
+                if execution_contract is not None
+                else (remote_context.plan_id if remote_context else (message.metadata.get("plan_id") or session.selected_plan_id))
             ),
             task_id=remote_context.work_id if remote_context else (message.metadata.get("task_id") or message.id),
             transaction_store=self.transaction_store,
             transaction_verifier=self.transaction_verifier,
             allowed_scope=message.metadata.get("allowed_scope"),
-            is_autonomous_task=bool(message.metadata.get("is_autonomous_task", False)),
         )
 
         active_log_fn = log_fn or message.metadata.get("log_fn")
@@ -3023,8 +3021,8 @@ class BrainFrogRuntime:
         is_success = True
 
         for r in results:
-            detail_str = str(r.detail) if r.detail is not None else ""
-            desc_str = str(getattr(r.step, "description", "")) if getattr(r, "step", None) else ""
+            detail_str = r.detail or ""
+            desc_str = getattr(r.step, "description", "") if getattr(r, "step", None) else ""
             if r.outcome == "diagnosed" and detail_str:
                 reply_texts.append(detail_str)
             elif r.outcome == "planned" and detail_str:

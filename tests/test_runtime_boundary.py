@@ -55,11 +55,14 @@ class TestRuntimeBoundary(unittest.TestCase):
         mock_orch_cls.return_value = mock_orch
 
         runtime = BrainFrogRuntime(repo_dir=Path.cwd(), persist_sessions=False)
+        # Phase 1.6 (R1): read-only diagnosis runs in plan mode; build mode
+        # fail-closes conversational tasks that lack an approved execution contract.
         msg = IncomingMessage(
             text="How does auth work?",
             channel="cli",
-            user_id="local_dev",
+            user_id="local",
             conversation_id="default",
+            metadata={"mode": "plan"},
         )
         collected_events = []
         out = runtime.handle_message(msg, on_event=lambda ev: collected_events.append(ev))

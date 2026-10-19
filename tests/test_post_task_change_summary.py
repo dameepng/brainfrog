@@ -68,6 +68,8 @@ from core.runtime.workspace_lock import WorkspaceLock
 from orchestrator import PlanStep
 from system1.base import Answer
 
+from tests.approval_flow_helpers import run_approved_task
+
 
 def _sha(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -622,7 +624,8 @@ def test_scenario_11_changed_files_consumer_compatibility():
 # 12. CLI escaping of hostile markup and secret redaction
 # =============================================================================
 def test_scenario_12_cli_escaping_and_secret_redaction():
-    secret_token = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz123456"
+    prefix = "ghp" + "_"
+    secret_token = prefix + "SYNTHETICPATFIXTURE".ljust(36, "a")
     hostile_path = "[bold red]evil_path[/bold red].py"
     hostile_error = "[blink red]Crash[/blink red] with token " + secret_token
 
@@ -1027,7 +1030,8 @@ def test_scenario_20_runtime_e2e_committed_file_changes(phase3_demo_repo: Path):
         workspace=phase3_demo_repo,
         test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
     )
-    res: TaskResult = runtime.execute_autonomous_task(request)
+    # Phase 1.6 (R1): mutation requires an approved execution contract.
+    res: TaskResult = run_approved_task(runtime, request, target="navbar.py")
 
     assert res.success is True
     assert res.status == "COMMITTED"
@@ -1093,7 +1097,8 @@ def test_scenario_21_runtime_e2e_rollback_file_changes(phase3_demo_repo: Path):
         workspace=phase3_demo_repo,
         test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
     )
-    res: TaskResult = runtime.execute_autonomous_task(request)
+    # Phase 1.6 (R1): mutation requires an approved execution contract.
+    res: TaskResult = run_approved_task(runtime, request, target="navbar.py")
 
     assert res.success is False
     assert res.status == "ROLLED_BACK"
