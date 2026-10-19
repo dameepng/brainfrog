@@ -180,11 +180,18 @@ class ApprovedExecutionContract:
         if not target_plan_id:
             return
 
+        import hashlib
+        from core.plans import PlanRegistry
+        reg = PlanRegistry(repo_dir)
+
         if not self.plan_id:
-            raise PermissionError(
-                f"Execution contract (request_id={self.request_id}) is not bound to a plan, "
-                f"but execution requested for plan '{expected_plan_id}'."
-            )
+            plan_doc = reg.get_plan(expected_plan_id)
+            if plan_doc is not None:
+                raise PermissionError(
+                    f"Execution contract (request_id={self.request_id}) is not bound to a plan, "
+                    f"but execution requested for plan '{expected_plan_id}'."
+                )
+            return
 
         if expected_plan_id and self.plan_id != expected_plan_id:
             raise PermissionError(
@@ -192,9 +199,6 @@ class ApprovedExecutionContract:
                 f"but execution requested for plan '{expected_plan_id}'."
             )
 
-        import hashlib
-        from core.plans import PlanRegistry
-        reg = PlanRegistry(repo_dir)
         plan_doc = reg.get_plan(self.plan_id)
         if plan_doc is None:
             raise PermissionError(f"Bound plan '{self.plan_id}' not found on disk in workspace '{repo_dir}'.")
@@ -221,6 +225,19 @@ class ApprovedExecutionContract:
                 f"Contract fingerprint: {self.plan_content_hash[:8]}, disk fingerprint: {actual_hash[:8]}."
             )
 
+        # Invariant: Plan session ownership — unbound legacy plans fail closed; contract session isolation
+        plan_session = plan_doc.session_id or (plan_doc.to_metadata_dict().get("session_id") if hasattr(plan_doc, "to_metadata_dict") else "")
+        if not isinstance(plan_session, str) or not plan_session.strip():
+            raise PermissionError(
+                f"Plan '{self.plan_id}' is an unbound legacy plan without valid session ownership. "
+                f"Execution rejected to prevent unauthorized execution."
+            )
+        if self.session_id and plan_session.strip() != self.session_id.strip():
+            raise PermissionError(
+                f"Contract plan ownership mismatch: plan '{self.plan_id}' belongs to session '{plan_session}', "
+                f"but contract is bound to session '{self.session_id}'."
+            )
+
         has_arch_metadata = bool(
             getattr(plan_doc, "target_context", None)
             or getattr(plan_doc, "architecture_strategy", None)
@@ -229,7 +246,6 @@ class ApprovedExecutionContract:
             or getattr(plan_doc, "behavior_invariants", None)
             or getattr(plan_doc, "migration_constraints", None)
             or getattr(plan_doc, "blocking_unknowns", None)
-            or (isinstance(getattr(plan_doc, "metadata_hash", None), str) and getattr(plan_doc, "metadata_hash", "").strip())
         )
         if has_arch_metadata and not self.plan_metadata_hash:
             raise PermissionError(
@@ -251,20 +267,6 @@ class ApprovedExecutionContract:
                 raise PermissionError(
                     f"Plan revision on disk ({plan_doc.revision}) does not match approved revision ({self.plan_revision})."
                 )
-
-        # Invariant: Plan session ownership — unbound legacy plans fail closed; contract session isolation
-        plan_session = plan_doc.session_id or (plan_doc.to_metadata_dict().get("session_id") if hasattr(plan_doc, "to_metadata_dict") else "")
-        if not isinstance(plan_session, str) or not plan_session.strip():
-            raise PermissionError(
-                f"Plan '{self.plan_id}' is an unbound legacy plan without valid session ownership. "
-                f"Execution rejected to prevent unauthorized execution."
-            )
-        if self.session_id and plan_session.strip() != self.session_id.strip():
-            raise PermissionError(
-                f"Contract plan ownership mismatch: plan '{self.plan_id}' belongs to session '{plan_session}', "
-                f"but contract is bound to session '{self.session_id}'."
-            )
-
     def validate(self, *, actor: str, channel: str, session_id: str,
                  session_incarnation_id: str, repo_dir: Path,
                  expected_plan_id: Optional[str] = None):
