@@ -1,0 +1,29 @@
+#!/bin/sh
+# BrainFrog Git Secret Guard — Pre-Push Hook
+# Automatically scans outgoing commit range for credentials before pushing.
+
+if command -v python >/dev/null 2>&1; then
+    PY_BIN="python"
+elif command -v python3 >/dev/null 2>&1; then
+    PY_BIN="python3"
+else
+    echo "[GitGuard] Warning: Python not found in PATH; skipping pre-push secret scan." >&2
+    exit 0
+fi
+
+# Locate git_guard.py relative to the hook directory
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Run pre-push scan conforming to Git's stdin protocol:
+# Git sends "<local ref> <local sha> <remote ref> <remote sha>" lines via stdin.
+"$PY_BIN" "$SCRIPT_DIR/git_guard.py" --pre-push "$1" "$2"
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "" >&2
+    echo "❌ [GitGuard] Push blocked: credential-like pattern detected in outgoing commit history." >&2
+    echo "   See BrainFrog Safe Test Fixtures & Git Hygiene rules in AGENTS.md." >&2
+    exit 1
+fi
+
+exit 0

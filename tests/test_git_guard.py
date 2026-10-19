@@ -165,6 +165,330 @@ class TestGitGuard(unittest.TestCase):
             tracked_after = subprocess.run(["git", "ls-files", ".next"], cwd=repo_path, capture_output=True, text=True)
             self.assertEqual(tracked_after.stdout.strip(), "")
 
+    def test_scan_commit_range(self):
+        from security.git_guard import scan_commit_range
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_path = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_path, check=True)
+
+            # 1. Clean commit
+            f1 = repo_path / "app.py"
+            f1.write_text("print('hello')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo_path, check=True)
+            subprocess.run(["git", "commit", "-m", "initial clean commit"], cwd=repo_path, check=True)
+
+            # 2. Secret commit
+            f2 = repo_path / "secret.py"
+            f2.write_text(f"{_VAR_GH} = '{_DUMMY_GITHUB}'\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo_path, check=True)
+            subprocess.run(["git", "commit", "-m", "secret commit"], cwd=repo_path, check=True)
+
+            # Scan clean range
+            res_clean = scan_commit_range(repo_path, "HEAD~1..HEAD~1")
+            self.assertTrue(res_clean.is_clean)
+
+            # Scan dirty range
+            res_dirty = scan_commit_range(repo_path, "HEAD~1..HEAD")
+            self.assertFalse(res_dirty.is_clean)
+            self.assertEqual(len(res_dirty.findings), 1)
+            self.assertEqual(res_dirty.findings[0].rule, "GitHub Personal Access Token")
+
+    def test_cli_main_entrypoint(self):
+        from security.git_guard import main
+        # Running on current clean repo should return 0
+        code = main(["--staged"])
+        self.assertEqual(code, 0)
+
+    def test_scan_pre_push_clean_push_allowed(self):
+        from security.git_guard import scan_pre_push
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            remote_dir = tmp_path / "remote.git"
+            local_dir = tmp_path / "local"
+
+            subprocess.run(["git", "init", "--bare", str(remote_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "init", str(local_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=local_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=local_dir, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_dir)], cwd=local_dir, check=True)
+
+            (local_dir / "README.md").write_text("# Repo\n", encoding="utf-8")
+            subprocess.run(["git", "checkout", "-B", "main"], cwd=local_dir, check=True, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "-u", "origin", "main"], cwd=local_dir, check=True, capture_output=True)
+
+            # Add clean commit
+            (local_dir / "clean.py").write_text("print('clean')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "clean commit"], cwd=local_dir, check=True)
+
+            local_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=local_dir, text=True).strip()
+            remote_sha = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=local_dir, text=True).strip()
+
+            stdin_input = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+            res = scan_pre_push(local_dir, "origin", str(remote_dir), stdin_content=stdin_input)
+            self.assertTrue(res.is_clean)
+            self.assertEqual(len(res.findings), 0)
+
+    def test_scan_pre_push_outgoing_secret_blocked(self):
+        from security.git_guard import scan_pre_push
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            remote_dir = tmp_path / "remote.git"
+            local_dir = tmp_path / "local"
+
+            subprocess.run(["git", "init", "--bare", str(remote_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "init", str(local_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=local_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=local_dir, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_dir)], cwd=local_dir, check=True)
+
+            (local_dir / "README.md").write_text("# Repo\n", encoding="utf-8")
+            subprocess.run(["git", "checkout", "-B", "main"], cwd=local_dir, check=True, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "-u", "origin", "main"], cwd=local_dir, check=True, capture_output=True)
+
+            # Add secret commit
+            (local_dir / "secret.py").write_text(f"{_VAR_GH} = '{_DUMMY_GITHUB}'\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "secret commit"], cwd=local_dir, check=True)
+
+            local_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=local_dir, text=True).strip()
+            remote_sha = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=local_dir, text=True).strip()
+
+            stdin_input = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+            res = scan_pre_push(local_dir, "origin", str(remote_dir), stdin_content=stdin_input)
+            self.assertFalse(res.is_clean)
+            self.assertEqual(len(res.findings), 1)
+            self.assertEqual(res.findings[0].rule, "GitHub Personal Access Token")
+
+    def test_scan_pre_push_historical_findings_outside_range_do_not_block(self):
+        from security.git_guard import scan_pre_push
+        zero_sha = "0000000000000000000000000000000000000000"
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            remote_dir = tmp_path / "remote.git"
+            local_dir = tmp_path / "local"
+
+            subprocess.run(["git", "init", "--bare", str(remote_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "init", str(local_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=local_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=local_dir, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_dir)], cwd=local_dir, check=True)
+
+            (local_dir / "README.md").write_text("# Repo\n", encoding="utf-8")
+            subprocess.run(["git", "checkout", "-B", "main"], cwd=local_dir, check=True, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "-u", "origin", "main"], cwd=local_dir, check=True, capture_output=True)
+
+            # Push a historical fixture commit to origin/main
+            (local_dir / "historical.py").write_text(f"{_VAR_GH} = '{_DUMMY_GITHUB}'\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "historical secret"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "origin", "main"], cwd=local_dir, check=True, capture_output=True)
+
+            # Create clean feature branch
+            subprocess.run(["git", "checkout", "-b", "feat/clean-branch"], cwd=local_dir, check=True)
+            (local_dir / "feature.py").write_text("def run(): pass\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "clean feature commit"], cwd=local_dir, check=True)
+
+            local_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=local_dir, text=True).strip()
+            stdin_input = f"refs/heads/feat/clean-branch {local_sha} refs/heads/feat/clean-branch {zero_sha}\n"
+
+            res = scan_pre_push(local_dir, "origin", str(remote_dir), stdin_content=stdin_input)
+            self.assertTrue(res.is_clean)
+            self.assertEqual(len(res.findings), 0)
+
+    def test_scan_pre_push_deletion_and_errors_fail_closed(self):
+        from security.git_guard import scan_pre_push
+        zero_sha = "0000000000000000000000000000000000000000"
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            remote_dir = tmp_path / "remote.git"
+            local_dir = tmp_path / "local"
+
+            subprocess.run(["git", "init", "--bare", str(remote_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "init", str(local_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=local_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=local_dir, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_dir)], cwd=local_dir, check=True)
+
+            (local_dir / "README.md").write_text("# Repo\n", encoding="utf-8")
+            subprocess.run(["git", "checkout", "-B", "main"], cwd=local_dir, check=True, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "-u", "origin", "main"], cwd=local_dir, check=True, capture_output=True)
+
+            # Deletion: local sha is zero -> clean
+            remote_sha = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=local_dir, text=True).strip()
+            stdin_del = f"(delete) {zero_sha} refs/heads/main {remote_sha}\n"
+            res_del = scan_pre_push(local_dir, "origin", str(remote_dir), stdin_content=stdin_del)
+            self.assertTrue(res_del.is_clean)
+
+            # Invalid sha: must fail closed
+            stdin_err = f"refs/heads/main deadbeefdeadbeefdeadbeefdeadbeefdeadbeef refs/heads/main {remote_sha}\n"
+            res_err = scan_pre_push(local_dir, "origin", str(remote_dir), stdin_content=stdin_err)
+            self.assertFalse(res_err.is_clean)
+            self.assertTrue(any("Error" in f.rule for f in res_err.findings))
+
+    def test_pre_push_zero_leakage_in_terminal_output(self):
+        import sys
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            remote_dir = tmp_path / "remote.git"
+            local_dir = tmp_path / "local"
+
+            subprocess.run(["git", "init", "--bare", str(remote_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "init", str(local_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=local_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=local_dir, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_dir)], cwd=local_dir, check=True)
+
+            (local_dir / "README.md").write_text("# Repo\n", encoding="utf-8")
+            subprocess.run(["git", "checkout", "-B", "main"], cwd=local_dir, check=True, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "-u", "origin", "main"], cwd=local_dir, check=True, capture_output=True)
+
+            (local_dir / "secret.py").write_text(f"{_VAR_GH} = '{_DUMMY_GITHUB}'\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "leak"], cwd=local_dir, check=True)
+
+            local_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=local_dir, text=True).strip()
+            remote_sha = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=local_dir, text=True).strip()
+            stdin_input = f"refs/heads/main {local_sha} refs/heads/main {remote_sha}\n"
+
+            guard_script = str(Path(__file__).resolve().parent.parent / "git_guard.py")
+            proc = subprocess.run(
+                [sys.executable, guard_script, "--pre-push", "origin", str(remote_dir)],
+                cwd=local_dir,
+                input=stdin_input,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            self.assertEqual(proc.returncode, 1)
+            output = proc.stdout + proc.stderr
+            self.assertNotIn(_DUMMY_GITHUB, output)
+            self.assertTrue("ghp_...3456" in output or "ghp_..." in output)
+
+    def test_scan_pre_push_merge_commit_with_secret(self):
+        from security.git_guard import scan_pre_push
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            remote_dir = tmp_path / "remote.git"
+            local_dir = tmp_path / "local"
+
+            subprocess.run(["git", "init", "--bare", str(remote_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "init", str(local_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=local_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=local_dir, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_dir)], cwd=local_dir, check=True)
+
+            # Base commit
+            (local_dir / "file.txt").write_text("line 1\n", encoding="utf-8")
+            subprocess.run(["git", "checkout", "-B", "main"], cwd=local_dir, check=True, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "-u", "origin", "main"], cwd=local_dir, check=True, capture_output=True)
+
+            # Branch A
+            subprocess.run(["git", "checkout", "-b", "branch-a"], cwd=local_dir, check=True)
+            (local_dir / "file.txt").write_text("line 1\nfrom branch a\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "commit-a"], cwd=local_dir, check=True)
+
+            # Branch B
+            subprocess.run(["git", "checkout", "main"], cwd=local_dir, check=True)
+            subprocess.run(["git", "checkout", "-b", "branch-b"], cwd=local_dir, check=True)
+            (local_dir / "file.txt").write_text("line 1\nfrom branch b\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "commit-b"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "-u", "origin", "branch-b"], cwd=local_dir, check=True, capture_output=True)
+            remote_sha = subprocess.check_output(["git", "rev-parse", "origin/branch-b"], cwd=local_dir, text=True).strip()
+
+            # Merge with conflict, resolved with secret
+            subprocess.run(["git", "merge", "branch-a"], cwd=local_dir, capture_output=True)
+            (local_dir / "file.txt").write_text(f"line 1\nSECRET = '{_DUMMY_GITHUB}'\n", encoding="utf-8")
+            subprocess.run(["git", "add", "file.txt"], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "resolved merge with secret"], cwd=local_dir, check=True)
+            local_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=local_dir, text=True).strip()
+
+            # Push branch-b
+            stdin_input = f"refs/heads/branch-b {local_sha} refs/heads/branch-b {remote_sha}\n"
+            res = scan_pre_push(local_dir, "origin", str(remote_dir), stdin_content=stdin_input)
+            self.assertFalse(res.is_clean)
+            self.assertEqual(len(res.findings), 1)
+            self.assertEqual(res.findings[0].rule, "GitHub Personal Access Token")
+
+    def test_scan_pre_push_multiple_refs_in_single_push(self):
+        from security.git_guard import scan_pre_push
+        zero_sha = "0000000000000000000000000000000000000000"
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            remote_dir = tmp_path / "remote.git"
+            local_dir = tmp_path / "local"
+
+            subprocess.run(["git", "init", "--bare", str(remote_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "init", str(local_dir)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=local_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=local_dir, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_dir)], cwd=local_dir, check=True)
+
+            # Base commit on main
+            (local_dir / "README.md").write_text("# Repo\n", encoding="utf-8")
+            subprocess.run(["git", "checkout", "-B", "main"], cwd=local_dir, check=True, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "-u", "origin", "main"], cwd=local_dir, check=True, capture_output=True)
+            main_sha = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=local_dir, text=True).strip()
+
+            # Ref 1: Clean feature branch
+            subprocess.run(["git", "checkout", "-b", "feat/clean"], cwd=local_dir, check=True)
+            (local_dir / "clean.py").write_text("print('clean')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "clean.py"], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "clean feat"], cwd=local_dir, check=True)
+            clean_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=local_dir, text=True).strip()
+
+            # Ref 2: Branch to delete
+            subprocess.run(["git", "checkout", "-b", "feat/to-delete"], cwd=local_dir, check=True)
+            (local_dir / "temp.txt").write_text("temp\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "temp"], cwd=local_dir, check=True)
+            subprocess.run(["git", "push", "-u", "origin", "feat/to-delete"], cwd=local_dir, check=True, capture_output=True)
+            del_sha = subprocess.check_output(["git", "rev-parse", "origin/feat/to-delete"], cwd=local_dir, text=True).strip()
+
+            # Ref 3: Leaky feature branch
+            subprocess.run(["git", "checkout", "main"], cwd=local_dir, check=True)
+            subprocess.run(["git", "checkout", "-b", "feat/leaky"], cwd=local_dir, check=True)
+            (local_dir / "leak.py").write_text(f"{_VAR_GH} = '{_DUMMY_GITHUB}'\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "leak commit"], cwd=local_dir, check=True)
+            leak_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=local_dir, text=True).strip()
+
+            # Case A: Multi-ref push where all pushed refs are clean (main up-to-date, feat/clean new, feat/to-delete deleted)
+            stdin_all_clean = (
+                f"refs/heads/main {main_sha} refs/heads/main {main_sha}\n"
+                f"refs/heads/feat/clean {clean_sha} refs/heads/feat/clean {zero_sha}\n"
+                f"(delete) {zero_sha} refs/heads/feat/to-delete {del_sha}\n"
+            )
+            res_clean = scan_pre_push(local_dir, "origin", str(remote_dir), stdin_content=stdin_all_clean)
+            self.assertTrue(res_clean.is_clean)
+            self.assertEqual(len(res_clean.findings), 0)
+
+            # Case B: Multi-ref push including the leaky ref
+            stdin_mixed = stdin_all_clean + f"refs/heads/feat/leaky {leak_sha} refs/heads/feat/leaky {zero_sha}\n"
+            res_mixed = scan_pre_push(local_dir, "origin", str(remote_dir), stdin_content=stdin_mixed)
+            self.assertFalse(res_mixed.is_clean)
+            self.assertEqual(len(res_mixed.findings), 1)
+            self.assertEqual(res_mixed.findings[0].rule, "GitHub Personal Access Token")
+
 
 if __name__ == "__main__":
     unittest.main()

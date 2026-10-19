@@ -233,7 +233,21 @@ def scan_staged_changes(repo_dir: Path) -> ScanResult:
         encoding="utf-8",
         errors="replace",
     )
-    if proc_files.returncode == 0 and proc_files.stdout:
+    if proc_files.returncode != 0:
+        return ScanResult(
+            is_clean=False,
+            findings=[
+                SecretFinding(
+                    rule="Git Execution Error",
+                    file_path="git diff --cached --name-only",
+                    line_number=None,
+                    redacted_snippet=f"git diff failed: {proc_files.stderr.strip()[:140]}",
+                    severity="CRITICAL",
+                )
+            ],
+            summary="Git execution error while inspecting staged files.",
+        )
+    if proc_files.stdout:
         staged_files = [f.strip() for f in proc_files.stdout.splitlines() if f.strip()]
         for file_path in staged_files:
             finding = scan_file_path(file_path)
@@ -248,7 +262,21 @@ def scan_staged_changes(repo_dir: Path) -> ScanResult:
         encoding="utf-8",
         errors="replace",
     )
-    if proc_diff.returncode == 0 and proc_diff.stdout and proc_diff.stdout.strip():
+    if proc_diff.returncode != 0:
+        return ScanResult(
+            is_clean=False,
+            findings=[
+                SecretFinding(
+                    rule="Git Execution Error",
+                    file_path="git diff --cached -U0",
+                    line_number=None,
+                    redacted_snippet=f"git diff failed: {proc_diff.stderr.strip()[:140]}",
+                    severity="CRITICAL",
+                )
+            ],
+            summary="Git execution error while inspecting staged diff.",
+        )
+    if proc_diff.stdout and proc_diff.stdout.strip():
         current_file = ""
         line_num = 0
         for line in proc_diff.stdout.splitlines():
@@ -387,4 +415,353 @@ def purge_tracked_sensitive_files(repo_dir: Path) -> List[str]:
             if rm_proc.returncode == 0:
                 untracked.append(pattern)
     return untracked
+
+
+def scan_commit_range(repo_dir: Path, rev_range: str) -> ScanResult:
+    """Scan all files and diff lines across a Git revision range (e.g. origin/main..HEAD).
+
+    Returns ScanResult with is_clean=True if safe, or is_clean=False with findings.
+    """
+    findings: List[SecretFinding] = []
+
+    # 1. Check touched file paths for sensitive file names
+    proc_files = subprocess.run(
+        ["git", "diff", rev_range, "--name-only", "--diff-filter=AMCR"],
+        cwd=repo_dir,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if proc_files.returncode != 0:
+        return ScanResult(
+            is_clean=False,
+            findings=[
+                SecretFinding(
+                    rule="Git Execution Error",
+                    file_path=rev_range,
+                    line_number=None,
+                    redacted_snippet=f"git diff --name-only failed: {proc_files.stderr.strip()[:140]}",
+                    severity="CRITICAL",
+                )
+            ],
+            summary=f"Git execution error while scanning revision range {rev_range}",
+        )
+    if proc_files.stdout:
+        touched_files = [f.strip() for f in proc_files.stdout.splitlines() if f.strip()]
+        for file_path in touched_files:
+            finding = scan_file_path(file_path)
+            if finding:
+                findings.append(finding)
+
+    # 2. Check added lines in diff
+    proc_diff = subprocess.run(
+        ["git", "diff", rev_range, "-U0"],
+        cwd=repo_dir,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if proc_diff.returncode != 0:
+        return ScanResult(
+            is_clean=False,
+            findings=[
+                SecretFinding(
+                    rule="Git Execution Error",
+                    file_path=rev_range,
+                    line_number=None,
+                    redacted_snippet=f"git diff failed: {proc_diff.stderr.strip()[:140]}",
+                    severity="CRITICAL",
+                )
+            ],
+            summary=f"Git execution error while scanning revision range {rev_range}",
+        )
+    if proc_diff.stdout and proc_diff.stdout.strip():
+        current_file = ""
+        line_num = 0
+        for line in proc_diff.stdout.splitlines():
+            if line.startswith("+++ b/"):
+                current_file = line[6:].strip()
+                line_num = 0
+                continue
+            if line.startswith("@@"):
+                m = re.search(r"\+(\d+)", line)
+                if m:
+                    line_num = int(m.group(1)) - 1
+                continue
+            if line.startswith("+") and not line.startswith("+++"):
+                line_num += 1
+                added_content = line[1:].strip()
+                if not added_content:
+                    continue
+                if added_content.startswith(("#", "//", "/*", "*")):
+                    continue
+                if any(p.search(current_file) for p in SAFE_FILE_EXCLUSIONS):
+                    continue
+
+                for rule_name, pattern in SECRET_PATTERNS:
+                    match = pattern.search(added_content)
+                    if match:
+                        matched_val = match.group(1) if match.groups() else match.group(0)
+                        if is_safe_value(matched_val):
+                            continue
+                        redacted_line = added_content.replace(matched_val, redact(matched_val))
+                        findings.append(
+                            SecretFinding(
+                                rule=rule_name,
+                                file_path=current_file,
+                                line_number=line_num if line_num > 0 else None,
+                                redacted_snippet=redacted_line[:140],
+                            )
+                        )
+                        break
+
+    if findings:
+        summary = f"{len(findings)} secret incident(s) detected in range {rev_range}: " + ", ".join(
+            f"{f.rule} in {f.file_path}" for f in findings[:3]
+        )
+        if len(findings) > 3:
+            summary += f" and {len(findings) - 3} more"
+        return ScanResult(is_clean=False, findings=findings, summary=summary)
+
+    return ScanResult(is_clean=True, findings=[], summary=f"No secrets detected in revision range {rev_range}.")
+
+
+def scan_pre_push(
+    repo_dir: Path,
+    remote_name: str,
+    remote_url: str,
+    stdin_content: Optional[str] = None,
+) -> ScanResult:
+    """Scan outgoing refs and commits according to Git's pre-push hook stdin protocol.
+
+    Git provides stdin lines of the format:
+        <local ref> <local sha> <remote ref> <remote sha>
+    """
+    import sys
+
+    if stdin_content is None:
+        if sys.stdin.isatty():
+            return ScanResult(is_clean=True, findings=[], summary="Interactive terminal: no push stdin provided.")
+        try:
+            stdin_content = sys.stdin.read()
+        except Exception as e:
+            return ScanResult(
+                is_clean=False,
+                findings=[
+                    SecretFinding(
+                        rule="Pre-Push Hook Read Error",
+                        file_path="stdin",
+                        line_number=None,
+                        redacted_snippet=f"Failed to read pre-push stdin: {str(e)[:140]}",
+                        severity="CRITICAL",
+                    )
+                ],
+                summary="Pre-push hook stdin read error (failing closed).",
+            )
+
+    lines = [ln.strip() for ln in (stdin_content or "").splitlines() if ln.strip()]
+    if not lines:
+        return ScanResult(is_clean=True, findings=[], summary="No refs pushed; scan skipped.")
+
+    is_zero = lambda sha: not sha or set(sha) == {"0"}
+    all_findings: List[SecretFinding] = []
+
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        local_ref, local_sha, remote_ref, remote_sha = parts
+
+        # 1. Ref deletion: local_sha is all zeros (e.g. git push origin --delete branch)
+        if is_zero(local_sha):
+            continue
+
+        # 2. Existing branch update: remote_sha is non-zero
+        if not is_zero(remote_sha):
+            if local_sha == remote_sha:
+                continue
+            rev_range = f"{remote_sha}..{local_sha}"
+            res = scan_commit_range(repo_dir, rev_range)
+            if not res.is_clean:
+                all_findings.extend(res.findings)
+            continue
+
+        # 3. New branch or ref creation: remote_sha is all zeros
+        # Inspect commits reachable from local_sha not already present on remote
+        has_remotes_proc = subprocess.run(
+            ["git", "for-each-ref", "--count=1", f"refs/remotes/{remote_name}"],
+            cwd=repo_dir,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if has_remotes_proc.returncode != 0:
+            return ScanResult(
+                is_clean=False,
+                findings=[
+                    SecretFinding(
+                        rule="Git Inspection Error",
+                        file_path=remote_name,
+                        line_number=None,
+                        redacted_snippet=f"git for-each-ref failed: {has_remotes_proc.stderr.strip()[:140]}",
+                        severity="CRITICAL",
+                    )
+                ],
+                summary=f"Failed to inspect remotes for {remote_name} (failing closed).",
+            )
+
+        if has_remotes_proc.stdout.strip():
+            rev_list_cmd = ["git", "rev-list", local_sha, "--not", f"--remotes={remote_name}"]
+        else:
+            rev_list_cmd = ["git", "rev-list", local_sha]
+
+        proc_revs = subprocess.run(
+            rev_list_cmd,
+            cwd=repo_dir,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if proc_revs.returncode != 0:
+            return ScanResult(
+                is_clean=False,
+                findings=[
+                    SecretFinding(
+                        rule="Git Revision List Error",
+                        file_path=local_ref,
+                        line_number=None,
+                        redacted_snippet=f"git rev-list failed: {proc_revs.stderr.strip()[:140]}",
+                        severity="CRITICAL",
+                    )
+                ],
+                summary=f"Failed to list outgoing commits for {local_ref} (failing closed).",
+            )
+
+        new_commits = [c.strip() for c in proc_revs.stdout.splitlines() if c.strip()]
+        for commit in new_commits:
+            # Check commit parents
+            proc_p = subprocess.run(
+                ["git", "rev-parse", f"{commit}^@"],
+                cwd=repo_dir,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if proc_p.returncode != 0:
+                return ScanResult(
+                    is_clean=False,
+                    findings=[
+                        SecretFinding(
+                            rule="Git Commit Inspection Error",
+                            file_path=commit,
+                            line_number=None,
+                            redacted_snippet=f"git rev-parse failed for {commit}: {proc_p.stderr.strip()[:140]}",
+                            severity="CRITICAL",
+                        )
+                    ],
+                    summary=f"Failed to inspect commit {commit} (failing closed).",
+                )
+
+            parents = [p.strip() for p in proc_p.stdout.splitlines() if p.strip()]
+            if not parents:
+                c_range = f"4b825dc642cb6eb9a060e54bf8d69288fbee4904..{commit}"
+            else:
+                c_range = f"{commit}^!"
+
+            c_scan = scan_commit_range(repo_dir, c_range)
+            if not c_scan.is_clean:
+                all_findings.extend(c_scan.findings)
+
+    if all_findings:
+        summary = f"{len(all_findings)} secret incident(s) detected in outgoing push: " + ", ".join(
+            f"{f.rule} in {f.file_path}" for f in all_findings[:3]
+        )
+        if len(all_findings) > 3:
+            summary += f" and {len(all_findings) - 3} more"
+        return ScanResult(is_clean=False, findings=all_findings, summary=summary)
+
+    return ScanResult(is_clean=True, findings=[], summary="Outgoing push is clean.")
+
+
+def _safe_print(msg: str, file=None) -> None:
+    """Print message safely across all platforms and console encodings (e.g. Windows cp1252)."""
+    import sys
+    target = file or sys.stdout
+    try:
+        target.write(msg + "\n")
+        target.flush()
+    except UnicodeEncodeError:
+        safe_msg = msg.encode("ascii", errors="replace").decode("ascii")
+        target.write(safe_msg + "\n")
+        target.flush()
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entrypoint for git-guard pre-commit, pre-push, and revision range scanning."""
+    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Git Secret Guard — pre-commit and pre-push secret scanner")
+    parser.add_argument("--staged", action="store_true", help="Scan staged changes (default mode)")
+    parser.add_argument("--range", dest="rev_range", type=str, default=None, help="Scan a git revision range (e.g. origin/main..HEAD)")
+    parser.add_argument("--file", dest="file_path", type=str, default=None, help="Scan a single file on disk")
+    parser.add_argument("--pre-push", nargs=2, metavar=("REMOTE", "URL"), help="Scan outgoing push commits via pre-push stdin")
+    parser.add_argument("--install-hook", action="store_true", help="Configure Git to use .githooks directory")
+
+    args = parser.parse_args(argv)
+    repo_dir = Path.cwd()
+
+    if args.install_hook:
+        hooks_dir = repo_dir / ".githooks"
+        if not hooks_dir.exists():
+            _safe_print("[GitGuard] Error: .githooks directory not found in current repository.", file=sys.stderr)
+            return 1
+        res = subprocess.run(["git", "config", "core.hooksPath", ".githooks"], cwd=repo_dir)
+        if res.returncode == 0:
+            _safe_print("[GitGuard] Successfully configured git core.hooksPath to .githooks")
+            return 0
+        _safe_print("[GitGuard] Error: Failed to set git config core.hooksPath.", file=sys.stderr)
+        return 1
+
+    if args.file_path:
+        fpath = Path(args.file_path)
+        if not fpath.exists():
+            _safe_print(f"[GitGuard] Error: File not found: {args.file_path}", file=sys.stderr)
+            return 1
+        content = fpath.read_text(encoding="utf-8", errors="replace")
+        findings = scan_text_content(str(fpath), content)
+        if findings:
+            _safe_print(f"[GitGuard] 🚨 Found {len(findings)} secret incident(s) in {args.file_path}:", file=sys.stderr)
+            for f in findings:
+                loc = f"{f.file_path}:{f.line_number}" if f.line_number else f.file_path
+                _safe_print(f"  • [{f.severity}] {f.rule} at {loc}", file=sys.stderr)
+                _safe_print(f"    Snippet: {f.redacted_snippet}", file=sys.stderr)
+            return 1
+        _safe_print(f"[GitGuard] ✅ File {args.file_path} is clean of secrets.")
+        return 0
+
+    if args.pre_push:
+        remote_name, remote_url = args.pre_push
+        scan = scan_pre_push(repo_dir, remote_name, remote_url)
+    elif args.rev_range:
+        scan = scan_commit_range(repo_dir, args.rev_range)
+    else:
+        # Default is --staged
+        scan = scan_staged_changes(repo_dir)
+
+    if not scan.is_clean:
+        _safe_print(f"[GitGuard] 🚨 Secret leak detected: {scan.summary}", file=sys.stderr)
+        for finding in scan.findings:
+            loc = f"{finding.file_path}:{finding.line_number}" if finding.line_number else finding.file_path
+            _safe_print(f"  • [{finding.severity}] {finding.rule} in {loc}", file=sys.stderr)
+            _safe_print(f"    Snippet: {finding.redacted_snippet}", file=sys.stderr)
+        return 1
+
+    _safe_print(f"[GitGuard] ✅ {scan.summary}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
 

@@ -1,0 +1,26 @@
+#!/bin/sh
+# BrainFrog Git Secret Guard — Pre-Commit Hook
+# Automatically scans staged changes for credentials before committing.
+
+# Resolve Python interpreter
+if command -v python >/dev/null 2>&1; then
+    PY_BIN="python"
+elif command -v python3 >/dev/null 2>&1; then
+    PY_BIN="python3"
+else
+    echo "[GitGuard] Warning: Python not found in PATH; skipping pre-commit secret scan." >&2
+    exit 0
+fi
+
+# Run GitGuard on staged changes
+$PY_BIN git_guard.py --staged
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "" >&2
+    echo "❌ [GitGuard] Commit blocked: credential-like pattern detected in staged changes." >&2
+    echo "   See BrainFrog Safe Test Fixtures & Git Hygiene rules in AGENTS.md." >&2
+    exit 1
+fi
+
+exit 0
