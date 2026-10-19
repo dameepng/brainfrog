@@ -1255,9 +1255,11 @@ class StructuredStepRunner:
         reg = PlanRegistry(self.workspace_dir)
         plan_doc = reg.get_plan(target_plan_id)
         if plan_doc is None:
-            raise StaleExecutionAuthorizationError(
-                f"Bound plan '{target_plan_id}' vanished from workspace during execution."
-            )
+            if self.contract.plan_id:
+                raise StaleExecutionAuthorizationError(
+                    f"Bound plan '{target_plan_id}' vanished from workspace during execution."
+                )
+            return
 
         if not plan_doc.path.exists():
             raise StaleExecutionAuthorizationError(
@@ -1276,6 +1278,15 @@ class StructuredStepRunner:
         if getattr(plan_doc, "metadata_malformed", False):
             raise StaleExecutionAuthorizationError(
                 f"Plan metadata on disk is malformed or corrupted! Active authorization invalidated."
+            )
+
+        # 4. Check revision matches approved execution revision
+        # Note: Upon READY -> IN_PROGRESS transition, revision advances to contract.plan_revision + 1
+        expected_rev = self.contract.plan_revision + 1 if self.contract.plan_revision is not None else None
+        if expected_rev is not None and plan_doc.revision != expected_rev and plan_doc.revision != self.contract.plan_revision:
+            raise StaleExecutionAuthorizationError(
+                f"Plan revision on disk ({plan_doc.revision}) changed during execution "
+                f"(expected {expected_rev}). Active authorization invalidated."
             )
 
         contract_meta_hash = getattr(self.contract, "plan_metadata_hash", None)
@@ -1305,15 +1316,6 @@ class StructuredStepRunner:
                 f"Plan content on disk was modified during execution! "
                 f"Contract hash: {self.contract.plan_content_hash[:8]}, disk hash: {actual_hash[:8]}. "
                 "Authorization invalidated."
-            )
-
-        # 4. Check revision matches approved execution revision
-        # Note: Upon READY -> IN_PROGRESS transition, revision advances to contract.plan_revision + 1
-        expected_rev = self.contract.plan_revision + 1 if self.contract.plan_revision is not None else None
-        if expected_rev is not None and plan_doc.revision != expected_rev and plan_doc.revision != self.contract.plan_revision:
-            raise StaleExecutionAuthorizationError(
-                f"Plan revision on disk ({plan_doc.revision}) changed during execution "
-                f"(expected {expected_rev}). Active authorization invalidated."
             )
 
         # 5. Check status is strictly executable (READY or IN_PROGRESS)

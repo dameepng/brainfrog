@@ -180,11 +180,18 @@ class ApprovedExecutionContract:
         if not target_plan_id:
             return
 
+        import hashlib
+        from core.plans import PlanRegistry
+        reg = PlanRegistry(repo_dir)
+
         if not self.plan_id:
-            raise PermissionError(
-                f"Execution contract (request_id={self.request_id}) is not bound to a plan, "
-                f"but execution requested for plan '{expected_plan_id}'."
-            )
+            plan_doc = reg.get_plan(expected_plan_id)
+            if plan_doc is not None:
+                raise PermissionError(
+                    f"Execution contract (request_id={self.request_id}) is not bound to a plan, "
+                    f"but execution requested for plan '{expected_plan_id}'."
+                )
+            return
 
         if expected_plan_id and self.plan_id != expected_plan_id:
             raise PermissionError(
@@ -192,9 +199,6 @@ class ApprovedExecutionContract:
                 f"but execution requested for plan '{expected_plan_id}'."
             )
 
-        import hashlib
-        from core.plans import PlanRegistry
-        reg = PlanRegistry(repo_dir)
         plan_doc = reg.get_plan(self.plan_id)
         if plan_doc is None:
             raise PermissionError(f"Bound plan '{self.plan_id}' not found on disk in workspace '{repo_dir}'.")
@@ -229,7 +233,6 @@ class ApprovedExecutionContract:
             or getattr(plan_doc, "behavior_invariants", None)
             or getattr(plan_doc, "migration_constraints", None)
             or getattr(plan_doc, "blocking_unknowns", None)
-            or (isinstance(getattr(plan_doc, "metadata_hash", None), str) and getattr(plan_doc, "metadata_hash", "").strip())
         )
         if has_arch_metadata and not self.plan_metadata_hash:
             raise PermissionError(
@@ -237,20 +240,20 @@ class ApprovedExecutionContract:
                 f"Stale or legacy approvals cannot execute without review and reapproval."
             )
 
+        if self.plan_revision is not None and plan_doc.revision != self.plan_revision:
+            from core.plans import PlanStatus
+            plan_status_val = plan_doc.status.value if isinstance(plan_doc.status, PlanStatus) else str(plan_doc.status)
+            if not (plan_status_val in (PlanStatus.IN_PROGRESS.value, PlanStatus.READY.value) and plan_doc.revision == self.plan_revision + 1):
+                raise PermissionError(
+                    f"Plan revision on disk ({plan_doc.revision}) does not match approved revision ({self.plan_revision})."
+                )
+
         if self.plan_metadata_hash and getattr(plan_doc, "metadata_hash", None) != self.plan_metadata_hash:
             raise PermissionError(
                 f"Plan metadata on disk has been modified since approval! "
                 f"Contract metadata fingerprint: {self.plan_metadata_hash[:8]}, "
                 f"disk metadata fingerprint: {getattr(plan_doc, 'metadata_hash', '')[:8]}."
             )
-
-        if self.plan_revision is not None and plan_doc.revision != self.plan_revision:
-            from core.plans import PlanStatus
-            plan_status_val = plan_doc.status.value if isinstance(plan_doc.status, PlanStatus) else str(plan_doc.status)
-            if not (plan_status_val == PlanStatus.IN_PROGRESS.value and plan_doc.revision == self.plan_revision + 1):
-                raise PermissionError(
-                    f"Plan revision on disk ({plan_doc.revision}) does not match approved revision ({self.plan_revision})."
-                )
 
         # Invariant: Plan session ownership — unbound legacy plans fail closed; contract session isolation
         plan_session = plan_doc.session_id or (plan_doc.to_metadata_dict().get("session_id") if hasattr(plan_doc, "to_metadata_dict") else "")

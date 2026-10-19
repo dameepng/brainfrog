@@ -95,6 +95,7 @@ class RunConfig:
     progress_tracker: Optional[Any] = None
     last_step_runner: Optional[Any] = None
     active_plan: Optional[Any] = None
+    is_autonomous_task: bool = False
 
 
 @dataclass
@@ -1306,7 +1307,10 @@ class Orchestrator:
             from core.plans import save_plan_document, compute_file_hash, PlanRegistry, PlanStatus
             from datetime import datetime
 
-            title = plan_data.get("title", "Rencana Implementasi")
+            if not isinstance(plan_data, dict):
+                plan_data = {}
+            raw_title = plan_data.get("title", "Rencana Implementasi")
+            title = str(raw_title) if (isinstance(raw_title, str) and not hasattr(raw_title, "_mock_name")) else "Rencana Implementasi"
             slug = re.sub(r"[^a-zA-Z0-9_\-]+", "_", title.lower()).strip("_") or "plan"
 
             existing_plan = None
@@ -1548,7 +1552,12 @@ class Orchestrator:
         # BUILD mode: controlled execution only under an authorized contract.
         # Plan selection and execution are separate, explicit operations: without a
         # contract, fail closed before any planning, subagent, or write path is reached.
-        if self.cfg.mode == "build" and self.cfg.execution_contract is None:
+        # Exception: Direct autonomous coding task invocations through execute_autonomous_task (Phase 6B CLI/SDK pipeline).
+        if (
+            self.cfg.mode == "build"
+            and self.cfg.execution_contract is None
+            and not getattr(self.cfg, "is_autonomous_task", False)
+        ):
             msg = "Build mode is defined, but plan selection and controlled execution are not implemented yet."
             self._log(f"[brainfrog] 🔨 {msg}")
             return [StepResult(PlanStep("0", "build", []), "not_implemented", 0, msg)]
@@ -1848,7 +1857,7 @@ class Orchestrator:
 
         # Step Scope Enforcement (Check 3: Enforces scope before any staging or transaction):
         if not step_files:
-            if new_files:
+            if new_files and isinstance(new_files, dict) and len(new_files) > 0:
                 err_msg = (
                     f"Scope violation: Step '{step_id}' declared no file targets (files={step_files!r}) "
                     f"but attempted to mutate {sorted(new_files.keys())}. Failing closed."

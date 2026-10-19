@@ -189,7 +189,7 @@ def load_module_map(
             return {
                 key: Domain(
                     key=key,
-                    description=entry["description"],
+                    description=entry.get("description", f"Domain {key}"),
                     paths=entry.get("paths", []),
                     sensitive=entry.get("sensitive", False),
                 )

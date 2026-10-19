@@ -480,6 +480,7 @@ def execute_autonomous_task(
         "max_retries": request.max_retries,
         "catch_cancellation": True,
         "task_id": request.task_id,
+        "is_autonomous_task": True,
     }
     if request.allowed_scope:
         msg_metadata["allowed_scope"] = list(request.allowed_scope)

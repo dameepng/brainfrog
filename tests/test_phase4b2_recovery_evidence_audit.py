@@ -36,7 +36,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from core.plans import (
     InvalidPlanTransitionError,
@@ -464,7 +464,9 @@ class TestPhase4B2RecoveryEvidenceAudit(unittest.TestCase):
             def create_time(self) -> float:
                 return 2000.0  # 1000 seconds later
 
-        with patch("core.runtime.step_runner.psutil.Process", return_value=MockProc()):
+        mock_psutil = MagicMock()
+        mock_psutil.Process.return_value = MockProc()
+        with patch("core.runtime.step_runner.psutil", mock_psutil), patch("core.runtime.step_runner._HAS_PSUTIL", True):
             audit_reused = tracker.audit_step_recovery("1")
             self.assertTrue(audit_reused.pid_reused)
             self.assertFalse(audit_reused.is_owner_alive)

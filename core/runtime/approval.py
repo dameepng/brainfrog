@@ -355,7 +355,7 @@ class ApprovalRequest:
         """Serialize state to a JSON-safe dictionary with secret scrubbing."""
         from core.runtime.contract import reject_secrets
         reject_secrets(self.authorization_payload())
-        return {
+        d = {
             "schema_version": self.schema_version,
             "capabilities": self.capabilities.to_dict(),
             "authorization_digest": self.authorization_digest,
@@ -379,11 +379,14 @@ class ApprovalRequest:
             "approved_at": self.approved_at,
             "consumed_at": self.consumed_at,
             "rejection_reason": scrub_secrets(self.rejection_reason) if self.rejection_reason else None,
-            "plan_id": self.plan_id,
-            "plan_revision": self.plan_revision,
-            "plan_content_hash": self.plan_content_hash,
-            "plan_metadata_hash": self.plan_metadata_hash,
         }
+        if self.plan_id is not None:
+            d["plan_id"] = self.plan_id
+            d["plan_revision"] = self.plan_revision
+            d["plan_content_hash"] = self.plan_content_hash
+            if self.plan_metadata_hash is not None:
+                d["plan_metadata_hash"] = self.plan_metadata_hash
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ApprovalRequest:
