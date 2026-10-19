@@ -1,0 +1,372 @@
+{
+  "version": "1.0.0",
+  "suite": "brainfrog-architecture-reasoning-baseline",
+  "description": "Evaluation cases measuring agent reasoning across greenfield, brownfield, mixed, and unknown architecture contexts.",
+  "cases": [
+    {
+      "id": "SCN-01-GREENFIELD-SIMPLE",
+      "title": "Simple Greenfield CLI Application",
+      "context_type_expected": "greenfield",
+      "prompt": "Create a new standalone command-line tool `log-sieve` that reads a server log file, filters lines matching a given regex, and writes a structured JSON summary with line counts and matched entries.",
+      "provided_context": {
+        "repo_tree": "pyproject.toml\nREADME.md\n",
+        "files": {
+          "pyproject.toml": "[project]\nname = \"log-sieve\"\nversion = \"0.1.0\"\ndependencies = []\n\n[project.scripts]\nlog-sieve = \"log_sieve.cli:main\"\n",
+          "README.md": "# Log Sieve\nA lightweight log filtering utility.\n"
+        },
+        "mode": "plan",
+        "notes": "Empty repository with no existing code or compatibility contracts."
+      },
+      "expected_reasoning_properties": [
+        "Identifies pure greenfield context with no existing callers or backwards compatibility constraints",
+        "Proposes minimalist, focused architecture (e.g. single module or cli + core parser)",
+        "Avoids speculative microservices, ORMs, plugins, or distributed workers",
+        "Specifies concrete unit test verifying regex filtering and JSON structure"
+      ],
+      "acceptable_strategies": ["keep", "local_refactor"],
+      "disallowed_behaviors": [
+        "Introducing unnecessary third-party dependencies when standard library suffices",
+        "Designing speculative plugin frameworks or abstract factory layers",
+        "Conflating PLAN mode with executing file writes"
+      ],
+      "critical_failures": [
+        "CF4: Treating PLAN mode as authorization to modify",
+        "CF3: Inventing repository facts or dependencies"
+      ],
+      "rubric_focus": [
+        "Context classification",
+        "Architecture proportionality",
+        "Scope discipline",
+        "Execution-boundary awareness"
+      ]
+    },
+    {
+      "id": "SCN-02-BROWNFIELD-MULTI-CALLER",
+      "title": "Existing API with Multiple Callers",
+      "context_type_expected": "brownfield",
+      "prompt": "Update `format_metric_value` in `core/formatting.py` so that it displays values smaller than 0.0001 in scientific notation.",
+      "provided_context": {
+        "repo_tree": "core/\n  formatting.py\nreports/\n  daily_summary.py\n  billing_export.py\n  sla_monitor.py\ntests/\n  test_formatting.py\n",
+        "files": {
+          "core/formatting.py": "def format_metric_value(val: float, precision: int = 2) -> str:\n    \"\"\"Format a numeric metric value for report display.\"\"\"\n    if val is None:\n        return \"N/A\"\n    return f\"{val:.{precision}f}\"\n",
+          "reports/billing_export.py": "from core.formatting import format_metric_value\n\ndef export_row(charge_amount: float) -> str:\n    return format_metric_value(charge_amount)\n",
+          "reports/sla_monitor.py": "from core.formatting import format_metric_value\n\ndef check_latency(p99: float) -> str:\n    return f\"Latency: {format_metric_value(p99)}s\"\n",
+          "tests/test_formatting.py": "import unittest\nfrom core.formatting import format_metric_value\n\nclass TestFormatting(unittest.TestCase):\n    def test_standard_format(self):\n        self.assertEqual(format_metric_value(12.3456), \"12.35\")\n        self.assertEqual(format_metric_value(0.0), \"0.00\")\n"
+        },
+        "mode": "plan",
+        "notes": "Core formatting utility used across financial and SLA reporting modules."
+      },
+      "expected_reasoning_properties": [
+        "Classifies context as brownfield due to existing callers and tests",
+        "Identifies that callers rely on default precision and standard formatting",
+        "Preserves backward compatibility for existing callers (e.g. values >= 0.0001 retain standard formatting)",
+        "Rejects rewriting formatting module or modifying all caller signatures simultaneously"
+      ],
+      "acceptable_strategies": ["keep", "local_refactor"],
+      "disallowed_behaviors": [
+        "Altering return type (e.g. returning dict or tuple)",
+        "Making precision a mandatory positional parameter",
+        "Rewriting core/formatting.py into an object-oriented class hierarchy without justification"
+      ],
+      "critical_failures": [
+        "CF2: Claiming compatibility without inspecting relevant contracts",
+        "CF1: Destructive rewrite without evidence"
+      ],
+      "rubric_focus": [
+        "Compatibility reasoning",
+        "Context classification",
+        "Scope discipline",
+        "Verification quality"
+      ]
+    },
+    {
+      "id": "SCN-03-MIXED-NEW-PROVIDER",
+      "title": "New Component Inside Existing Architecture",
+      "context_type_expected": "mixed",
+      "prompt": "Add a new System 2 model provider `DeepSeekSystem2Client` in `system2/deepseek_client.py`.",
+      "provided_context": {
+        "repo_tree": "system2/\n  __init__.py\n  claude_client.py\n  openai_client.py\n  antigravity_client.py\norchestrator.py\ncore/skills.py\n",
+        "files": {
+          "system2/__init__.py": "from .claude_client import System2Client as ClaudeSystem2Client, UsageTracker, usage_tracker\nfrom .openai_client import OpenAISystem2Client\nfrom .antigravity_client import AntigravitySystem2Client\n\nSystem2ClientType = ClaudeSystem2Client | AntigravitySystem2Client | OpenAISystem2Client\n\ndef get_system2_provider(explicit: str = None) -> str:\n    ...\n",
+          "system2/openai_client.py": "class OpenAISystem2Client:\n    provider_name = \"openai\"\n    def __init__(self, model: str = \"gpt-4o\", api_key: str = None, guidelines: str = \"\"):\n        ...\n    def _apply_guidelines(self, system: str) -> str:\n        ...\n    def plan_task(self, task: str, repo_tree: str, ...) -> list:\n        ...\n"
+        },
+        "mode": "plan",
+        "notes": "Existing multi-provider architecture in BrainFrog system2."
+      },
+      "expected_reasoning_properties": [
+        "Identifies context as mixed: new provider file internally, but heavily constrained by host System2Client conventions",
+        "Conforms to established System2Client interface (plan_task, write_code, guidelines injection, usage_tracker)",
+        "Integrates with system2/__init__.py provider registry and get_system2_provider resolution",
+        "Reuses existing error handling and token budget tracking patterns"
+      ],
+      "acceptable_strategies": ["keep"],
+      "disallowed_behaviors": [
+        "Treating provider addition as pure greenfield with custom orchestration protocol",
+        "Proposing changes to orchestrator.py execution loop solely to accommodate DeepSeek",
+        "Inventing custom response schemas that violate PlanStep contracts"
+      ],
+      "critical_failures": [
+        "CF2: Claiming compatibility without inspecting relevant contracts"
+      ],
+      "rubric_focus": [
+        "Context classification",
+        "Compatibility reasoning",
+        "Evidence grounding",
+        "Architecture proportionality"
+      ]
+    },
+    {
+      "id": "SCN-04-UNKNOWN-INSUFFICIENT-CONTEXT",
+      "title": "Insufficient Repository Context",
+      "context_type_expected": "unknown",
+      "prompt": "Refactor `calculate_rebate` to support tiered customer loyalty programs and currency conversion.",
+      "provided_context": {
+        "repo_tree": "services/pricing/\n  rebate.py\n",
+        "files": {
+          "services/pricing/rebate.py": "def calculate_rebate(customer_id: str, amount: float) -> float:\n    # Internal tier calculation\n    tier = lookup_tier(customer_id)\n    if tier == \"gold\":\n        return amount * 0.10\n    return amount * 0.02\n"
+        },
+        "mode": "plan",
+        "notes": "Caller files, lookup_tier implementation, database schemas, and currency models are not provided."
+      },
+      "expected_reasoning_properties": [
+        "Classifies context as unknown due to absent caller context and missing tier/currency definitions",
+        "Identifies exact missing evidence (implementation of lookup_tier, caller call sites, currency precision specs)",
+        "Refrains from proposing concrete architectural overhauls based on speculation",
+        "Defines bounded clarifying questions or proposes a minimal non-breaking contract extension"
+      ],
+      "acceptable_strategies": ["keep"],
+      "disallowed_behaviors": [
+        "Asserting certainty about caller requirements or customer database structure",
+        "Inventing a foreign currency exchange API client without evidence",
+        "Rewriting the function signature without knowing who calls it"
+      ],
+      "critical_failures": [
+        "CF3: Inventing repository facts or hallucinating external APIs",
+        "CF1: Destructive rewrite without evidence"
+      ],
+      "rubric_focus": [
+        "Context classification",
+        "Uncertainty handling",
+        "Evidence grounding",
+        "Scope discipline"
+      ]
+    },
+    {
+      "id": "SCN-05-BROAD-REFACTOR-REQUEST",
+      "title": "Broad Refactor and Clean-Up Request",
+      "context_type_expected": "brownfield",
+      "prompt": "Clean up and refactor the architecture of `auth_service.py` to make it modern, clean, and follow best practices.",
+      "provided_context": {
+        "repo_tree": "auth/\n  auth_service.py\ntests/\n  test_auth_service.py\n",
+        "files": {
+          "auth/auth_service.py": "import hashlib\nimport secrets\nfrom typing import Optional, Dict\n\nclass AuthService:\n    def __init__(self, user_db: Dict[str, dict]):\n        self.db = user_db\n        self.sessions = {}\n\n    def authenticate(self, username: str, password: str) -> Optional[str]:\n        user = self.db.get(username)\n        if not user:\n            return None\n        salt = user[\"salt\"]\n        expected = hashlib.sha256((password + salt).encode()).hexdigest()\n        if secrets.compare_digest(user[\"hash\"], expected):\n            token = secrets.token_hex(16)\n            self.sessions[token] = username\n            return token\n        return None\n\n    def validate_session(self, token: str) -> Optional[str]:\n        return self.sessions.get(token)\n",
+          "tests/test_auth_service.py": "import unittest\nfrom auth.auth_service import AuthService\n\nclass TestAuth(unittest.TestCase):\n    def test_auth_flow(self):\n        db = {\"alice\": {\"salt\": \"s1\", \"hash\": \"...\"}}\n        svc = AuthService(db)\n        # 100% passing tests for authenticate and validate_session\n"
+        },
+        "mode": "plan",
+        "notes": "Self-contained, working authentication service with 100% test coverage."
+      },
+      "expected_reasoning_properties": [
+        "Identifies that existing implementation is functional, tested, and satisfies current requirements",
+        "Explicitly evaluates whether an architectural restructuring is justified",
+        "Defends 'No architectural change is justified' or limits suggestions to minor non-breaking readability improvements",
+        "Rejects speculative redesigns (e.g. splitting into Controller/Service/Repository, introducing JWTs or microservices)"
+      ],
+      "acceptable_strategies": ["keep", "local_refactor"],
+      "disallowed_behaviors": [
+        "Proposing multi-file enterprise overhaul without functional or security defects",
+        "Rewriting state management from in-memory dict to external Redis without requirement",
+        "Breaking existing authenticate and validate_session method signatures"
+      ],
+      "critical_failures": [
+        "CF1: Destructive rewrite without evidence"
+      ],
+      "rubric_focus": [
+        "Strategy quality",
+        "Architecture proportionality",
+        "Scope discipline",
+        "Evidence grounding"
+      ]
+    },
+    {
+      "id": "SCN-06-BOUNDED-REWRITE-JUSTIFIED",
+      "title": "Small Component Where Bounded Rewrite is Appropriate",
+      "context_type_expected": "brownfield",
+      "prompt": "Fix `url_query_parser.py` so that it correctly handles percent-encoded semicolons, arrays, and UTF-8 query strings without crashing.",
+      "provided_context": {
+        "repo_tree": "network/\n  client.py\n  url_query_parser.py\ntests/\n  test_query_parser.py\n",
+        "files": {
+          "network/url_query_parser.py": "import re\n\ndef parse_query_params(query_str: str) -> dict:\n    \"\"\"Fragile 80-line regex based parameter parser.\"\"\"\n    # Nested fragile regexes that crash on encoded semicolons or empty keys\n    pattern = re.compile(r'([^&=?]+)=([^&=?]*)')\n    res = {}\n    for m in pattern.finditer(query_str):\n        res[m.group(1)] = m.group(2)\n    return res\n",
+          "network/client.py": "from network.url_query_parser import parse_query_params\n\ndef handle_request(url: str):\n    query = url.split('?', 1)[1] if '?' in url else ''\n    params = parse_query_params(query)\n    return params\n",
+          "tests/test_query_parser.py": "import unittest\nfrom network.url_query_parser import parse_query_params\n\nclass TestParser(unittest.TestCase):\n    def test_failing_cases(self):\n        # Currently failing on encoded semicolons and lists\n        pass\n"
+        },
+        "mode": "plan",
+        "notes": "Small, self-contained leaf component (80 lines) with only 1 internal caller."
+      },
+      "expected_reasoning_properties": [
+        "Recognizes bounded scope: component is small, internal, has 1 known caller, and behavior is enumerated",
+        "Evaluates that replacing fragile regex logic with standard library urllib.parse is simpler, safer, and cleaner than patching regexes",
+        "Formulates a bounded rewrite strategy while strictly preserving the parse_query_params public signature",
+        "Specifies characterization and regression tests for UTF-8 and edge case query strings"
+      ],
+      "acceptable_strategies": ["bounded_rewrite"],
+      "disallowed_behaviors": [
+        "Dogmatically refusing to rewrite despite clear criteria favoring replacement",
+        "Adding multiple layers of regex monkey-patches on top of the fragile regex engine",
+        "Changing the function signature or return format in a way that breaks client.py"
+      ],
+      "critical_failures": [
+        "CF2: Claiming compatibility without inspecting relevant contracts"
+      ],
+      "rubric_focus": [
+        "Strategy quality",
+        "Architecture proportionality",
+        "Verification quality",
+        "Evidence grounding"
+      ]
+    },
+    {
+      "id": "SCN-07-STATEFUL-DATA-MIGRATION",
+      "title": "Stateful and Data-Sensitive Migration",
+      "context_type_expected": "brownfield",
+      "prompt": "Upgrade BrainFrog session persistence format in `core/runtime/session.py` to store incarnation IDs and actor channels for each step.",
+      "provided_context": {
+        "repo_tree": "core/runtime/\n  session.py\n  runtime.py\n.brainfrog/\n  sessions/\n    sess_123.json\n",
+        "files": {
+          "core/runtime/session.py": "import json\nfrom pathlib import Path\nfrom dataclasses import dataclass, asdict\n\n@dataclass\nclass SessionRecord:\n    session_id: str\n    task: str\n    steps: list\n\ndef load_session(path: Path) -> SessionRecord:\n    data = json.loads(path.read_text())\n    return SessionRecord(**data)\n\ndef save_session(path: Path, record: SessionRecord) -> None:\n    path.write_text(json.dumps(asdict(record), indent=2))\n"
+        },
+        "mode": "plan",
+        "notes": "Existing sessions exist on user disks in .brainfrog/sessions/."
+      },
+      "expected_reasoning_properties": [
+        "Recognizes that state is persisted to disk and code rollback will not restore corrupted files",
+        "Designs an incremental migration strategy: backward-compatible deserialization for legacy session files",
+        "Includes schema versioning or optional default fields (e.g. incarnation_id=None, actor_channel='cli')",
+        "Specifies verification testing with both legacy session JSON files and new format files"
+      ],
+      "acceptable_strategies": ["incremental_migration", "local_refactor"],
+      "disallowed_behaviors": [
+        "Overwriting session schema without backward compatibility, causing crashes on existing session files",
+        "Assuming that a fresh git commit eliminates the need to handle existing on-disk session files",
+        "Omitting atomic write or backup precautions for state mutation"
+      ],
+      "critical_failures": [
+        "CF5: Silently ignoring state/data migration risk",
+        "CF2: Claiming compatibility without inspecting relevant contracts"
+      ],
+      "rubric_focus": [
+        "Strategy quality",
+        "Compatibility reasoning",
+        "Verification quality",
+        "Evidence grounding"
+      ]
+    },
+    {
+      "id": "SCN-08-BROWNFIELD-UGLY-STRONG-COMPAT",
+      "title": "Ugly Implementation with Strong External Compatibility Constraints",
+      "context_type_expected": "brownfield",
+      "prompt": "Refactor `integrations/stripe_webhook.py` to replace loose dictionary lookups with strict Pydantic model validation.",
+      "provided_context": {
+        "repo_tree": "integrations/\n  stripe_webhook.py\n  handlers.py\ntests/\n  test_stripe_webhook.py\n",
+        "files": {
+          "integrations/stripe_webhook.py": "def process_stripe_event(payload: dict) -> bool:\n    \"\"\"Handles incoming Stripe webhooks with diverse payload shapes.\"\"\"\n    event_type = payload.get(\"type\")\n    data_obj = payload.get(\"data\", {}).get(\"object\", {})\n    if event_type == \"payment_intent.succeeded\":\n        customer = data_obj.get(\"customer\")\n        amount = data_obj.get(\"amount\", 0)\n        return record_payment(customer, amount)\n    return False\n"
+        },
+        "mode": "plan",
+        "notes": "Production webhook receiver receiving diverse real-world event payloads with optional fields."
+      },
+      "expected_reasoning_properties": [
+        "Identifies that external webhook payloads vary across Stripe API versions and undocumented attributes",
+        "Recognizes the severe operational risk: strict schema parsing could drop live payments with HTTP 400 errors",
+        "Prioritizes operational resilience over aesthetic code modernization",
+        "Recommends keeping flexible dictionary parsing or using non-strict, extra='allow' models with graceful fallbacks"
+      ],
+      "acceptable_strategies": ["keep", "local_refactor"],
+      "disallowed_behaviors": [
+        "Introducing strict, closed Pydantic models that throw ValidationError on unknown webhook attributes",
+        "Claiming that modernization is risk-free without integration testing against real payload fixtures",
+        "Rewriting the payment processing contract"
+      ],
+      "critical_failures": [
+        "CF1: Destructive rewrite without evidence",
+        "CF2: Claiming compatibility without inspecting relevant contracts"
+      ],
+      "rubric_focus": [
+        "Compatibility reasoning",
+        "Strategy quality",
+        "Architecture proportionality",
+        "Scope discipline"
+      ]
+    },
+    {
+      "id": "SCN-09-CROSS-MODULE-BOUNDARY-COUPLING",
+      "title": "Circular Dependency and Cross-Module Boundary Coupling",
+      "context_type_expected": "brownfield",
+      "prompt": "Resolve the circular import between `billing/calculator.py` and `notifications/email_service.py`.",
+      "provided_context": {
+        "repo_tree": "billing/\n  calculator.py\nnotifications/\n  email_service.py\n",
+        "files": {
+          "billing/calculator.py": "from notifications.email_service import send_invoice_notification\n\ndef compute_monthly_invoice(account_id: str, items: list) -> float:\n    total = sum(i[\"price\"] for i in items)\n    send_invoice_notification(account_id, total)\n    return total\n",
+          "notifications/email_service.py": "from billing.calculator import compute_monthly_invoice\n\ndef send_invoice_notification(account_id: str, amount: float):\n    print(f\"Sending bill {amount} to {account_id}\")\n"
+        },
+        "mode": "plan",
+        "notes": "Both modules are in active use; circular import causes intermittent import-time crashes."
+      },
+      "expected_reasoning_properties": [
+        "Identifies the root cause: cross-subsystem circular dependency and violation of unidirectional data flow",
+        "Proposes extracting a clean shared boundary (e.g. an event, callback, or caller orchestration layer)",
+        "Decouples calculation from notification dispatch without rewriting either entire subsystem",
+        "Preserves existing function signatures and testing coverage"
+      ],
+      "acceptable_strategies": ["local_refactor", "incremental_migration"],
+      "disallowed_behaviors": [
+        "Merging billing and notifications into a single bloated god-module",
+        "Rewriting both subsystems completely from scratch",
+        "Using lazy inside-function imports (`import ...` inside function body) as a permanent architecture solution"
+      ],
+      "critical_failures": [
+        "CF1: Destructive rewrite without evidence"
+      ],
+      "rubric_focus": [
+        "Strategy quality",
+        "Architecture proportionality",
+        "Scope discipline",
+        "Evidence grounding"
+      ]
+    },
+    {
+      "id": "SCN-10-PERF-SPECULATIVE-VS-LOCAL",
+      "title": "Performance Optimization vs Speculative Overhaul",
+      "context_type_expected": "brownfield",
+      "prompt": "The CLI command `brainfrog scan-repo` is too slow when scanning large repositories (takes 8s for 200 files). Redesign the architecture to make it fast.",
+      "provided_context": {
+        "repo_tree": "cli/\n  scanner.py\n",
+        "files": {
+          "cli/scanner.py": "import json\nfrom pathlib import Path\n\ndef scan_repository(repo_path: Path) -> dict:\n    # Sequential unbuffered file reads and repeated disk stat calls\n    results = {}\n    for p in repo_path.rglob(\"*.py\"):\n        content = p.read_text(encoding=\"utf-8\", errors=\"ignore\")\n        results[str(p)] = len(content.splitlines())\n    return results\n"
+        },
+        "mode": "plan",
+        "notes": "Single-user local CLI utility currently scanning files sequentially."
+      },
+      "expected_reasoning_properties": [
+        "Identifies that the bottleneck is sequential file I/O within a single process",
+        "Recommends local, bounded optimization: concurrent file reads (ThreadPoolExecutor) or directory traversal pruning",
+        "Firmly rejects speculative enterprise architecture (e.g. Redis caching, Celery workers, background daemon services)",
+        "Considers operability: BrainFrog is a local CLI tool, and external service dependencies violate zero-dependency principles"
+      ],
+      "acceptable_strategies": ["keep", "local_refactor"],
+      "disallowed_behaviors": [
+        "Proposing distributed job queues, external databases, or message brokers for a local CLI scanner",
+        "Rewriting the scanner in a different language (e.g. Rust/C) without proving Python concurrency is insufficient",
+        "Breaking the dictionary return format expected by downstream CLI formatters"
+      ],
+      "critical_failures": [
+        "CF1: Destructive rewrite without evidence",
+        "CF3: Inventing repository scale requirements (e.g. claiming millions of RPS)"
+      ],
+      "rubric_focus": [
+        "Architecture proportionality",
+        "Strategy quality",
+        "Evidence grounding",
+        "Scope discipline"
+      ]
+    }
+  ]
+}
