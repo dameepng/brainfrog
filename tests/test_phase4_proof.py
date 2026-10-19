@@ -58,6 +58,27 @@ from core.runtime.transaction import Transaction, TransactionOperation, Operatio
 from orchestrator import PlanStep, StepResult
 from system1.base import Answer
 
+
+def _synthetic_github_token() -> str:
+    """Deterministic, synthetic GitHub-style token fixture (obviously fake)."""
+    prefix = "ghp" + "_"
+    return prefix + "SYNTHETICPATFIXTURE".ljust(36, "a")
+
+
+def _synthetic_google_key() -> str:
+    """Deterministic, synthetic Google-style API key fixture (obviously fake)."""
+    prefix = "".join(["A", "I", "z", "a"])
+    return prefix + "SYNTHETICGOOGLEFIXTURE".ljust(35, "a")
+
+
+def _synthetic_openai_key() -> str:
+    """Deterministic, synthetic OpenAI-style key fixture (obviously fake)."""
+    prefix = "sk" + "-"
+    return prefix + "SYNTHETICOPENAIKEYFIXTURE".ljust(32, "a")
+
+
+from tests.approval_flow_helpers import run_approved_task
+
 FIXTURE_SRC = Path(__file__).resolve().parent / "fixtures" / "phase3_demo"
 
 
@@ -156,7 +177,8 @@ class TestPhase4ProofArtifact:
             test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
         )
 
-        res: TaskResult = runtime.execute_autonomous_task(request)
+        # Phase 1.6 (R1): mutation requires an approved execution contract.
+        res: TaskResult = run_approved_task(runtime, request, target="navbar.py")
 
         # 1. Authoritative TaskResult
         assert res.success is True
@@ -242,7 +264,8 @@ class TestPhase4ProofArtifact:
             max_retries=1,
         )
 
-        res: TaskResult = runtime.execute_autonomous_task(request)
+        # Phase 1.6 (R1): mutation requires an approved execution contract.
+        res: TaskResult = run_approved_task(runtime, request, target="navbar.py")
 
         assert res.success is False
         assert res.verified is False
@@ -353,20 +376,23 @@ class TestPhase4ProofArtifact:
 
     def test_secret_redaction_in_proof(self):
         """Verify API keys, passwords, and tokens are scrubbed before persistence."""
+        gh_token = _synthetic_github_token()
+        google_key = _synthetic_google_key()
+        openai_key = _synthetic_openai_key()
         dirty_output = (
             "Running tests...\n"
             "Connecting to https://api.service.com with Bearer eyJhbGciOiJIUzI1NiJ9.test\n"
-            "Using token ghp_123456789012345678901234567890123456\n"
-            "Google key AIzaSyD1234567890123456789012345678901\n"
-            "OpenAI sk-abcdefghijklmnopqrstuvwxyz123456\n"
+            f"Using token {gh_token}\n"
+            f"Google key {google_key}\n"
+            f"OpenAI {openai_key}\n"
             "Config: password=supersecretpassword and api_key=topsecretkey\n"
         )
 
         clean, _ = capture_bounded_output(dirty_output)
 
-        assert "ghp_123456789012345678901234567890123456" not in clean
-        assert "AIzaSyD1234567890123456789012345678901" not in clean
-        assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in clean
+        assert gh_token not in clean
+        assert google_key not in clean
+        assert openai_key not in clean
         assert "supersecretpassword" not in clean
         assert "topsecretkey" not in clean
         assert "[REDACTED_SECRET]" in clean
@@ -572,10 +598,11 @@ class TestPhase4ProofArtifact:
 
     def test_adversarial_malicious_secret_in_stdout(self):
         """Malicious bearer tokens and secrets embedded in stdout are redacted."""
-        stdout = "Dumping test env: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy and sk-123456789012345678901234"
+        openai_key = _synthetic_openai_key()
+        stdout = f"Dumping test env: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy and {openai_key}"
         clean, _ = capture_bounded_output(stdout)
         assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in clean
-        assert "sk-123456789012345678901234" not in clean
+        assert openai_key not in clean
         assert "[REDACTED_SECRET]" in clean
 
     def test_adversarial_secret_in_stderr(self):

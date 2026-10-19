@@ -247,11 +247,12 @@ class SessionState:
     revision: int = 1
     created_at: float = field(default_factory=time.time)
     last_active_at: float = field(default_factory=time.time)
-    active_mode: str = "build"
+    active_mode: str = "plan"
     active_skill: Optional[str] = None
     active_model: Optional[str] = None
     active_provider: Optional[str] = None
     active_workspace: Optional[str] = None
+    selected_plan_id: Optional[str] = None
     plan_context: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     history: List[Dict[str, Any]] = field(default_factory=list)
@@ -340,6 +341,7 @@ class SessionState:
         """Clear conversation history and ephemeral context and allocate a new incarnation."""
         self.history.clear()
         self.plan_context = None
+        self.selected_plan_id = None
         self.metadata.clear()
         self.last_active_at = time.time()
         self.session_incarnation_id = secrets.token_hex(16)
@@ -365,6 +367,7 @@ class SessionState:
             "active_model": self.active_model,
             "active_provider": self.active_provider,
             "active_workspace": self.active_workspace,
+            "selected_plan_id": self.selected_plan_id,
             "plan_context": self.plan_context,
             "metadata": dict(self.metadata),
             "history": list(self.history),
@@ -416,6 +419,14 @@ class SessionState:
                 norm_entry["assistant"] = bound_message_text(str(norm_entry.get("assistant", "")), max_msg_bytes)
                 normalized_history.append(norm_entry)
 
+        raw_mode = data.get("active_mode")
+        channel_name = str(data.get("channel", "cli")).lower()
+        from core.plans import normalize_mode, DEFAULT_MODE_REMOTE, DEFAULT_MODE_LOCAL
+        eff_mode = normalize_mode(raw_mode) if raw_mode is not None else None
+        if not eff_mode:
+            # Migration for legacy sessions without active_mode or with invalid mode:
+            eff_mode = DEFAULT_MODE_REMOTE if channel_name in ("telegram", "whatsapp") else DEFAULT_MODE_LOCAL
+
         session = cls(
             session_id=str(data["session_id"]),
             session_incarnation_id=str(incarnation),
@@ -425,11 +436,12 @@ class SessionState:
             conversation_id=str(data.get("conversation_id", "default")),
             created_at=float(data.get("created_at", time.time())),
             last_active_at=float(data.get("last_active_at", time.time())),
-            active_mode=str(data.get("active_mode", "build")),
+            active_mode=eff_mode,
             active_skill=data.get("active_skill"),
             active_model=data.get("active_model"),
             active_provider=data.get("active_provider"),
             active_workspace=data.get("active_workspace"),
+            selected_plan_id=data.get("selected_plan_id"),
             plan_context=data.get("plan_context"),
             metadata=dict(data.get("metadata", {})),
             history=normalized_history,
@@ -967,7 +979,7 @@ class SessionManager:
         channel: str,
         user_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
-        default_mode: str = "build",
+        default_mode: Optional[str] = None,
     ) -> SessionState:
         if user_id is None and conversation_id is None and ":" in channel:
             parts = channel.split(":", 2)
@@ -996,12 +1008,17 @@ class SessionManager:
                     self._sessions[session_id] = loaded
                     return loaded
 
+            from core.plans import normalize_mode, DEFAULT_MODE_REMOTE, DEFAULT_MODE_LOCAL
+            resolved_default = normalize_mode(default_mode) if default_mode is not None else None
+            if not resolved_default:
+                resolved_default = DEFAULT_MODE_REMOTE if c.lower() in ("telegram", "whatsapp") else DEFAULT_MODE_LOCAL
+
             session = SessionState(
                 session_id=session_id,
                 channel=c,
                 user_id=u,
                 conversation_id=conv,
-                active_mode=default_mode,
+                active_mode=resolved_default,
                 max_history_entries=self.max_history_entries,
                 max_history_bytes=self.max_history_bytes,
                 max_message_bytes=self.max_message_bytes,

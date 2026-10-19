@@ -44,6 +44,8 @@ from core.runtime import (
 from orchestrator import Orchestrator, PlanStep, RunConfig, StepResult
 from system1.base import Answer
 
+from tests.approval_flow_helpers import run_approved_task
+
 
 FIXTURE_SRC = Path(__file__).resolve().parent / "fixtures" / "phase3_demo"
 
@@ -152,7 +154,8 @@ class TestPhase3AutonomousWorkflowE2E:
             workspace=phase3_repo,
             test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
         )
-        res: TaskResult = runtime.execute_autonomous_task(request)
+        # Phase 1.6 (R1): mutation requires an approved execution contract.
+        res: TaskResult = run_approved_task(runtime, request, target="navbar.py")
 
         # 1. Verification & Outcome assertions
         assert res.success is True
@@ -181,7 +184,10 @@ class TestPhase3AutonomousWorkflowE2E:
         assert "Plan:" in report
         assert "Changed:" in report
         assert "navbar.py" in report
-        assert "Transaction:\ncommitted" in report or "Transaction:\nCOMMITTED" in report
+        # Phase 1.6 (R1): approved execution terminates the transaction as
+        # VERIFIED (contract path); plain "committed" remains acceptable.
+        tx_line = report.split("Transaction:\n", 1)[1].splitlines()[0].strip().lower()
+        assert tx_line in ("committed", "verified")
 
     def test_e2e_autonomous_failure_rolls_back(self, phase3_repo: Path):
         """Scenario 2: When tests fail and retries exhaust, changes roll back cleanly to ROLLED_BACK."""
@@ -238,7 +244,8 @@ class TestPhase3AutonomousWorkflowE2E:
             test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
             max_retries=1,
         )
-        res: TaskResult = runtime.execute_autonomous_task(request)
+        # Phase 1.6 (R1): mutation requires an approved execution contract.
+        res: TaskResult = run_approved_task(runtime, request, target="navbar.py")
 
         # Assertions
         assert res.success is False
@@ -295,7 +302,8 @@ class TestPhase3AutonomousWorkflowE2E:
             test_command=[sys.executable, "-m", "pytest", "tests/test_navbar.py", "-q"],
             max_retries=1,
         )
-        res: TaskResult = runtime.execute_autonomous_task(request)
+        # Phase 1.6 (R1): mutation requires an approved execution contract.
+        res: TaskResult = run_approved_task(runtime, request, target="navbar.py")
 
         assert res.success is False
         assert res.status == "ROLLED_BACK"
@@ -434,7 +442,8 @@ class TestPhase3AutonomousWorkflowE2E:
                 user_request="Fix navbar",
                 workspace=phase3_repo,
             )
-            res = runtime.execute_autonomous_task(request)
+            # Phase 1.6 (R1): mutation requires an approved execution contract.
+            res = run_approved_task(runtime, request, target="navbar.py")
 
         assert res.success is False
         assert res.verified is False

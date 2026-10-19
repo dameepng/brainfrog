@@ -270,6 +270,81 @@ class EngineeringSkillTests(unittest.TestCase):
         self.assertFalse(engine.available_skills)
         self.assertEqual(provider.guidelines, "")
 
+    def test_phase2_architecture_reasoning_invariants(self):
+        """Phase 2: Verify architecture reasoning principles, generalizations, and invariants."""
+        package_root = Path(__file__).resolve().parents[1]
+        benchmark_leak_terms = [
+            "scn-", "scn_0", "scn-01", "scn-04", "scn-05", "scn-06", "scn-08",
+            "stripe", "rebate", "loyalty tier", "customer tier", "log-sieve", "log_sieve",
+            "url_query_parser", "auth_handler", "path_query_matcher",
+        ]
+        for name in NEW_SKILLS:
+            skill = self.skills[name]
+            content = load_skill_content(skill, include_references=False)
+            skill_text_lower = content.lower()
+
+            # Anti-overfitting: zero benchmark-specific terms in main body
+            for leak in benchmark_leak_terms:
+                self.assertNotIn(
+                    leak,
+                    skill_text_lower,
+                    f"Skill '{name}' main body must not leak benchmark-specific term '{leak}'",
+                )
+
+            # Check references as well if they exist
+            ref_path = skill.skill_file.parent / "references" / "examples.md"
+            if ref_path.exists():
+                ref_text_lower = ref_path.read_text(encoding="utf-8").lower()
+                for leak in benchmark_leak_terms:
+                    self.assertNotIn(
+                        leak,
+                        ref_text_lower,
+                        f"Skill '{name}' reference examples must not leak benchmark term '{leak}'",
+                    )
+
+            # Invariant: Skill text must reinforce that it grants no runtime authority
+            self.assertTrue(
+                "grant no additional authority" in skill_text_lower
+                or "grants no additional authority" in skill_text_lower
+                or "neither authorizes nor proves" in skill_text_lower
+                or "supplies no new permissions" in skill_text_lower,
+                f"Skill '{name}' must maintain execution authority boundaries",
+            )
+
+            # Invariant: References are not loaded in main body
+            self.assertNotIn("## Reference Document:", content)
+
+            # Invariant: Does not mandate universal os.replace for all code tasks
+            self.assertNotIn("os.replace is required for every", skill_text_lower)
+            self.assertNotIn("always use os.replace", skill_text_lower)
+
+            # Invariant: Does not mandate extra='ignore' universally
+            self.assertNotIn("must specify model_config = configdict(extra='ignore')", skill_text_lower)
+
+    def test_canonical_eval_fixtures_hash_unmodified(self):
+        """Phase 2B: Confirm canonical evaluation fixtures and baseline artifacts remain frozen."""
+        import hashlib
+        package_root = Path(__file__).resolve().parents[1]
+        fixture_path = package_root / "tests" / "fixtures" / "evals" / "architecture_cases.json"
+        baseline_raw = package_root / "evals" / "results" / "architecture-baseline-gemini-3.8-flash-high.json"
+        baseline_scored = package_root / "evals" / "results" / "architecture-baseline-gemini-3.8-flash-high-scored.json"
+
+        expected = {
+            fixture_path: "813352473cc4662d583270387e924bb3de60bc4f5fb144a545357cc3159d069b",
+            baseline_raw: "4a45a67b1ee5627d3e8a7db1b54624fa0c3067592e62c0249e82173b28ac02e3",
+            baseline_scored: "4aa78ed2dbdd5c783da9dcc9e85d0329c05d039d676395b84cbfa5dfa656d5dd",
+        }
+        for path, exp_sha in expected.items():
+            if path.exists():
+                raw_bytes = path.read_bytes()
+                actual_sha = hashlib.sha256(raw_bytes).hexdigest()
+                # Normalize line endings to LF to remain deterministic across platforms
+                lf_sha = hashlib.sha256(raw_bytes.replace(b"\r\n", b"\n")).hexdigest()
+                self.assertTrue(
+                    actual_sha == exp_sha or lf_sha in (exp_sha, "93f979b5ee3411bc862a8366dcc2a89e28419d9a83077718e7608b803ac75253", "d93c883a667b17f94e3706307b8e3a292406c6d84b7fef39226b0c00c4b26b3c"),
+                    f"Canonical eval fixture or baseline artifact {path.name} was modified! Expected {exp_sha}, got actual={actual_sha}, lf={lf_sha}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

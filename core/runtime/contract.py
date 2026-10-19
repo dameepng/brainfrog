@@ -57,6 +57,10 @@ class ApprovedExecutionContract:
     authorization_json: str = ""
     authorization_digest: str = ""
     workspace_root: str = ""
+    plan_id: Optional[str] = None
+    plan_revision: Optional[int] = None
+    plan_content_hash: Optional[str] = None
+    plan_metadata_hash: Optional[str] = None
 
     def __post_init__(self):
         for name in ("request_id", "action_type", "operation_digest", "channel", "actor",
@@ -65,6 +69,14 @@ class ApprovedExecutionContract:
                 raise ValueError("Contract identity fields must be strings")
         if self.session_incarnation_id is not None and type(self.session_incarnation_id) is not str:
             raise ValueError("Invalid session incarnation")
+        if self.plan_id is not None and type(self.plan_id) is not str:
+            raise ValueError("Invalid plan ID")
+        if self.plan_revision is not None and type(self.plan_revision) is not int:
+            raise ValueError("Invalid plan revision")
+        if self.plan_content_hash is not None and type(self.plan_content_hash) is not str:
+            raise ValueError("Invalid plan content hash")
+        if self.plan_metadata_hash is not None and type(self.plan_metadata_hash) is not str:
+            raise ValueError("Invalid plan metadata hash")
         if type(self.approved_targets) not in (list, tuple, set, frozenset):
             raise ValueError("Invalid approved targets")
         if type(self.capabilities) is not Capabilities:
@@ -106,11 +118,16 @@ class ApprovedExecutionContract:
         from core.runtime.approval import CanonicalOperation
         payload = json.loads(self.authorization_json)
         reject_secrets(payload)
-        if type(payload) is not dict or set(payload) != {
+        allowed_keys = {
             "schema_version", "request_id", "session_id", "session_incarnation_id", "channel",
             "user_id", "conversation_id", "operation_type", "operation", "operation_digest",
             "capabilities", "created_at", "expires_at", "nonce", "workspace_root",
-        } or payload["schema_version"] != 2:
+        }
+        if self.plan_id is not None or "plan_id" in payload:
+            allowed_keys |= {"plan_id", "plan_revision", "plan_content_hash"}
+            if self.plan_metadata_hash is not None or "plan_metadata_hash" in payload:
+                allowed_keys.add("plan_metadata_hash")
+        if type(payload) is not dict or set(payload) != allowed_keys or payload["schema_version"] != 2:
             raise ValueError("Malformed contract authorization")
         digest = CanonicalOperation("execution_contract_v2", "", payload).compute_digest()
         if digest != self.authorization_digest:
@@ -130,6 +147,12 @@ class ApprovedExecutionContract:
             "capabilities": self.capabilities.to_dict(),
             "workspace_root": self.workspace_root,
         }
+        if self.plan_id is not None:
+            expected["plan_id"] = self.plan_id
+            expected["plan_revision"] = self.plan_revision
+            expected["plan_content_hash"] = self.plan_content_hash
+            if self.plan_metadata_hash is not None:
+                expected["plan_metadata_hash"] = self.plan_metadata_hash
         if any(payload.get(k) != v for k, v in expected.items()):
             raise ValueError("Contract binding mismatch")
         if op["action_type"] != self.action_type or self.allow_remote_git_push:
@@ -138,8 +161,115 @@ class ApprovedExecutionContract:
         if targets != self.approved_targets:
             raise ValueError("Contract target mismatch")
 
+    def validate_plan_binding(
+        self,
+        repo_dir: Path,
+        expected_plan_id: Optional[str] = None,
+    ) -> None:
+        """Validate that the contract's bound plan matches disk state.
+
+        Recomputes SHA-256 fingerprint from the actual plan markdown file on disk.
+        Fails closed on:
+        - Contract missing plan binding when expected_plan_id is given
+        - Plan ID mismatch
+        - Plan not found on disk
+        - Disk plan revision != contract.plan_revision
+        - Disk plan markdown content hash != contract.plan_content_hash
+        """
+        target_plan_id = expected_plan_id or self.plan_id
+        if not target_plan_id:
+            return
+
+        import hashlib
+        from core.plans import PlanRegistry
+        reg = PlanRegistry(repo_dir)
+
+        if not self.plan_id:
+            plan_doc = reg.get_plan(expected_plan_id)
+            if plan_doc is not None:
+                raise PermissionError(
+                    f"Execution contract (request_id={self.request_id}) is not bound to a plan, "
+                    f"but execution requested for plan '{expected_plan_id}'."
+                )
+            return
+
+        if expected_plan_id and self.plan_id != expected_plan_id:
+            raise PermissionError(
+                f"Contract plan mismatch: contract is bound to '{self.plan_id}', "
+                f"but execution requested for plan '{expected_plan_id}'."
+            )
+
+        plan_doc = reg.get_plan(self.plan_id)
+        if plan_doc is None:
+            raise PermissionError(f"Bound plan '{self.plan_id}' not found on disk in workspace '{repo_dir}'.")
+
+        if not plan_doc.path.exists():
+            raise PermissionError(f"Plan markdown file '{plan_doc.path}' does not exist on disk.")
+
+        actual_content = plan_doc.path.read_text(encoding="utf-8", errors="replace")
+        actual_hash = hashlib.sha256(actual_content.encode("utf-8")).hexdigest()
+
+        if getattr(plan_doc, "metadata_tampered", False):
+            raise PermissionError(
+                f"Plan metadata on disk has been tampered with or modified out-of-band! Contract authorization invalidated."
+            )
+
+        if getattr(plan_doc, "metadata_malformed", False):
+            raise PermissionError(
+                f"Plan metadata on disk is malformed or corrupted! Contract authorization invalidated."
+            )
+
+        if self.plan_content_hash and actual_hash != self.plan_content_hash:
+            raise PermissionError(
+                f"Plan content on disk has been modified since approval! "
+                f"Contract fingerprint: {self.plan_content_hash[:8]}, disk fingerprint: {actual_hash[:8]}."
+            )
+
+        # Invariant: Plan session ownership — unbound legacy plans fail closed; contract session isolation
+        plan_session = plan_doc.session_id or (plan_doc.to_metadata_dict().get("session_id") if hasattr(plan_doc, "to_metadata_dict") else "")
+        if not isinstance(plan_session, str) or not plan_session.strip():
+            raise PermissionError(
+                f"Plan '{self.plan_id}' is an unbound legacy plan without valid session ownership. "
+                f"Execution rejected to prevent unauthorized execution."
+            )
+        if self.session_id and plan_session.strip() != self.session_id.strip():
+            raise PermissionError(
+                f"Contract plan ownership mismatch: plan '{self.plan_id}' belongs to session '{plan_session}', "
+                f"but contract is bound to session '{self.session_id}'."
+            )
+
+        has_arch_metadata = bool(
+            getattr(plan_doc, "target_context", None)
+            or getattr(plan_doc, "architecture_strategy", None)
+            or getattr(plan_doc, "architectural_constraints", None)
+            or getattr(plan_doc, "compatibility_contracts", None)
+            or getattr(plan_doc, "behavior_invariants", None)
+            or getattr(plan_doc, "migration_constraints", None)
+            or getattr(plan_doc, "blocking_unknowns", None)
+        )
+        if has_arch_metadata and not self.plan_metadata_hash:
+            raise PermissionError(
+                f"Execution contract for plan '{self.plan_id}' lacks required semantic metadata binding (plan_metadata_hash). "
+                f"Stale or legacy approvals cannot execute without review and reapproval."
+            )
+
+        if self.plan_metadata_hash and getattr(plan_doc, "metadata_hash", None) != self.plan_metadata_hash:
+            raise PermissionError(
+                f"Plan metadata on disk has been modified since approval! "
+                f"Contract metadata fingerprint: {self.plan_metadata_hash[:8]}, "
+                f"disk metadata fingerprint: {getattr(plan_doc, 'metadata_hash', '')[:8]}."
+            )
+
+        if self.plan_revision is not None and plan_doc.revision != self.plan_revision:
+            from core.plans import PlanStatus
+            plan_status_val = plan_doc.status.value if isinstance(plan_doc.status, PlanStatus) else str(plan_doc.status)
+            if not (plan_status_val == PlanStatus.IN_PROGRESS.value and plan_doc.revision == self.plan_revision + 1):
+                raise PermissionError(
+                    f"Plan revision on disk ({plan_doc.revision}) does not match approved revision ({self.plan_revision})."
+                )
     def validate(self, *, actor: str, channel: str, session_id: str,
-                 session_incarnation_id: str, repo_dir: Path):
+                 session_incarnation_id: str, repo_dir: Path,
+                 expected_plan_id: Optional[str] = None):
         if not self.authorization_json:
             raise PermissionError("Unissued contract")
         self.validate_integrity()
@@ -160,6 +290,7 @@ class ApprovedExecutionContract:
             raise PermissionError("Operation is not executable under Phase 15A policy")
         for target in self.approved_targets:
             self.capabilities.require("filesystem.write", target, repo_dir)
+        self.validate_plan_binding(repo_dir, expected_plan_id=expected_plan_id)
 
     @classmethod
     def from_approval_request(cls, app_req: Any, repo_dir: Optional[Path] = None):
@@ -181,6 +312,10 @@ class ApprovedExecutionContract:
             expires_at=app_req.expires_at, authorization_json=serialized,
             authorization_digest=app_req.authorization_digest,
             workspace_root=app_req.workspace_root,
+            plan_id=getattr(app_req, "plan_id", None),
+            plan_revision=getattr(app_req, "plan_revision", None),
+            plan_content_hash=getattr(app_req, "plan_content_hash", None),
+            plan_metadata_hash=getattr(app_req, "plan_metadata_hash", None),
         )
 
     def is_target_allowed(self, rel_path: str) -> bool:
@@ -217,9 +352,19 @@ class ApprovedExecutionContract:
 
     @classmethod
     def from_dict(cls, data):
-        if type(data) is not dict or set(data) != {f.name for f in fields(cls)}:
+        if type(data) is not dict:
+            raise ValueError("Contract payload must be a dictionary")
+        allowed = {f.name for f in fields(cls)}
+        if set(data) - allowed:
+            raise ValueError("Unknown or missing contract fields")
+        required = allowed - {"plan_id", "plan_revision", "plan_content_hash", "plan_metadata_hash"}
+        if not (required <= set(data)):
             raise ValueError("Unknown or missing contract fields")
         values = dict(data)
+        values.setdefault("plan_id", None)
+        values.setdefault("plan_revision", None)
+        values.setdefault("plan_content_hash", None)
+        values.setdefault("plan_metadata_hash", None)
         values["capabilities"] = Capabilities.from_dict(values["capabilities"])
         reject_secrets(values["authorization_json"])
         result = cls(**values)

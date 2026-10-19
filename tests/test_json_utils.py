@@ -79,6 +79,35 @@ Hope this helps!"""
         self.assertIn("index.ts", res["files"])
         self.assertEqual(res["files"]["index.ts"], "console.log('partial stream done');")
 
+    def test_truncated_plan_json_with_nested_step_returns_root_not_step(self):
+        """When plan JSON stream truncates, extract_json must auto-close the root plan object
+
+        instead of mistakenly extracting an inner step dictionary that happens to contain 'files'.
+        """
+        raw_truncated_plan = """{
+  "title": "Migrasi Database ke PostgreSQL",
+  "is_small_task": false,
+  "problem": "Database saat ini adalah SQLite. Perlu migrasi ke PostgreSQL.",
+  "goals": ["Menyiapkan skema", "Migrasi data"],
+  "steps": [
+    {
+      "id": "1",
+      "description": "Buat file konfigurasi PostgreSQL",
+      "files": ["config.py"]
+    },
+    {
+      "id": "2",
+      "description": "Tulis skrip migrasi data yang berjalan bertahap
+"""
+        res = extract_json(raw_truncated_plan)
+        self.assertIn("title", res)
+        self.assertEqual(res["title"], "Migrasi Database ke PostgreSQL")
+        self.assertIn("steps", res)
+        self.assertEqual(len(res["steps"]), 2)
+        self.assertEqual(res["steps"][0]["id"], "1")
+        # Invariant: Must not return the child step dict as the root object
+        self.assertNotEqual(res.get("id"), "1")
+
     def test_no_json_raises_value_error(self):
         with self.assertRaises(ValueError):
             extract_json("Just plain conversational text with no braces.")

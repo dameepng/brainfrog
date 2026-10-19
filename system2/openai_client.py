@@ -149,6 +149,7 @@ class OpenAISystem2Client:
         }
 
         endpoint = f"{self.base_url}/chat/completions"
+        resp: Optional[requests.Response] = None
         try:
             resp = requests.post(
                 endpoint, headers=headers, json=payload, timeout=120, allow_redirects=False,
@@ -161,12 +162,18 @@ class OpenAISystem2Client:
                 )
             resp.raise_for_status()
         except requests.exceptions.HTTPError as exc:
-            try:
-                err_detail = resp.json()
-            except Exception:
-                err_detail = resp.text
+            err_resp = exc.response if exc.response is not None else resp
+            err_detail = ""
+            status_code = getattr(err_resp, "status_code", "unknown")
+            if err_resp is not None:
+                try:
+                    err_detail = err_resp.json()
+                except Exception:
+                    err_detail = err_resp.text
+            else:
+                err_detail = str(exc)
             raise RuntimeError(
-                f"OpenAI-compatible provider error ({resp.status_code}): {err_detail}"
+                f"OpenAI-compatible provider error ({status_code}): {err_detail}"
             ) from exc
 
         data = resp.json()
@@ -208,6 +215,7 @@ class OpenAISystem2Client:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        resp: Optional[requests.Response] = None
         try:
             resp = requests.get(
                 endpoint,
@@ -228,12 +236,18 @@ class OpenAISystem2Client:
                 return data
             return []
         except requests.exceptions.HTTPError as exc:
-            try:
-                err_detail = resp.json()
-            except Exception:
-                err_detail = resp.text
+            err_resp = exc.response if exc.response is not None else resp
+            err_detail = ""
+            status_code = getattr(err_resp, "status_code", "unknown")
+            if err_resp is not None:
+                try:
+                    err_detail = err_resp.json()
+                except Exception:
+                    err_detail = err_resp.text
+            else:
+                err_detail = str(exc)
             raise RuntimeError(
-                f"Model list error ({resp.status_code}): {err_detail}"
+                f"Model list error ({status_code}): {err_detail}"
             ) from exc
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch model list from '{endpoint}': {exc}") from exc
@@ -284,20 +298,29 @@ class OpenAISystem2Client:
             "- For small, obvious tasks: keep it concise with 1-3 direct steps.\n"
             "- For large or ambiguous tasks: construct a practical, rigorous PRD.\n"
             "- Separate inspected codebase FACTS (citing specific files/functions) from your technical ASSUMPTIONS and PROPOSALS.\n"
+            "- Identify architectural context, strategy, and invariants.\n"
+            "- Differentiate BLOCKING unknowns from non-blocking questions: use `blocking_unknowns` for critical architectural decisions or missing prerequisites that must be resolved before BUILD execution begins. Use `clarifying_questions` only for non-blocking inquiries.\n"
+            "- Explicitly declare `architectural_constraints`, `compatibility_contracts`, and `behavior_invariants` to preserve safety boundaries.\n"
             "- Define concrete, testable acceptance criteria.\n"
-            "- Identify risks or trade-offs.\n"
-            "- Ask clarifying questions ONLY if there are material, critical decisions not answered in the repo or prompt.\n\n"
+            "- Identify risks or trade-offs.\n\n"
             "Respond with ONLY a JSON object formatted as:\n"
             "{\n"
             '  "title": "Short descriptive title of the change",\n'
             '  "is_small_task": true,\n'
             '  "problem": "Problem statement and context",\n'
             '  "goals": ["Goal 1", "Goal 2"],\n'
+            '  "target_context": "Target architectural context (e.g., Core Engine, API, CLI)",\n'
+            '  "architecture_strategy": "High-level architecture approach (e.g., Strangler Fig, In-Place Refactoring)",\n'
             '  "scope": ["Included item 1"],\n'
             '  "non_scope": ["Excluded item 1"],\n'
+            '  "architectural_constraints": ["Constraint 1 (e.g., must preserve existing contract)"],\n'
+            '  "compatibility_contracts": ["Contract 1 (e.g., API backward compatibility)"],\n'
+            '  "behavior_invariants": ["Invariant 1 (e.g., idempotency, atomic rollback)"],\n'
+            '  "migration_constraints": ["Migration requirement 1"],\n'
             '  "codebase_findings": ["Fact 1 (citing file.py:function)", "Fact 2"],\n'
             '  "assumptions": ["Assumption/Proposal 1"],\n'
-            '  "clarifying_questions": [],\n'
+            '  "blocking_unknowns": [{"id": "unk_1", "decision": "Decision required before execution", "affected_steps": ["1"], "affected_files": ["path/a.py"], "resolved": false}],\n'
+            '  "clarifying_questions": ["Non-blocking question 1"],\n'
             '  "acceptance_criteria": ["Testable criterion 1", "Testable criterion 2"],\n'
             '  "steps": [{"id": "1", "description": "Step 1", "files": ["path/a.py"]}],\n'
             '  "relevant_files": ["path/a.py"],\n'
@@ -313,7 +336,7 @@ class OpenAISystem2Client:
         if pinned_files:
             user_parts.append(f"User pinned files:\n{json.dumps(pinned_files, indent=2)}")
 
-        raw = self._call(system, "\n\n".join(user_parts), max_tokens=4000, images=images)
+        raw = self._call(system, "\n\n".join(user_parts), max_tokens=8192, images=images)
         return _extract_json(raw)
 
     # -- 2. writing code ------------------------------------------------

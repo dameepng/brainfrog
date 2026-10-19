@@ -351,20 +351,29 @@ class AntigravitySystem2Client:
             "- For small, obvious tasks: keep it concise with 1-3 direct steps.\n"
             "- For large or ambiguous tasks: construct a practical, rigorous PRD.\n"
             "- Separate inspected codebase FACTS (citing specific files/functions) from your technical ASSUMPTIONS and PROPOSALS.\n"
+            "- Identify architectural context, strategy, and invariants.\n"
+            "- Differentiate BLOCKING unknowns from non-blocking questions: use `blocking_unknowns` for critical architectural decisions or missing prerequisites that must be resolved before BUILD execution begins. Use `clarifying_questions` only for non-blocking inquiries.\n"
+            "- Explicitly declare `architectural_constraints`, `compatibility_contracts`, and `behavior_invariants` to preserve safety boundaries.\n"
             "- Define concrete, testable acceptance criteria.\n"
-            "- Identify risks or trade-offs.\n"
-            "- Ask clarifying questions ONLY if there are material, critical decisions not answered in the repo or prompt.\n\n"
+            "- Identify risks or trade-offs.\n\n"
             "Respond with ONLY a JSON object formatted as:\n"
             "{\n"
             '  "title": "Short descriptive title of the change",\n'
             '  "is_small_task": true,\n'
             '  "problem": "Problem statement and context",\n'
             '  "goals": ["Goal 1", "Goal 2"],\n'
+            '  "target_context": "Target architectural context (e.g., Core Engine, API, CLI)",\n'
+            '  "architecture_strategy": "High-level architecture approach (e.g., Strangler Fig, In-Place Refactoring)",\n'
             '  "scope": ["Included item 1"],\n'
             '  "non_scope": ["Excluded item 1"],\n'
+            '  "architectural_constraints": ["Constraint 1 (e.g., must preserve existing contract)"],\n'
+            '  "compatibility_contracts": ["Contract 1 (e.g., API backward compatibility)"],\n'
+            '  "behavior_invariants": ["Invariant 1 (e.g., idempotency, atomic rollback)"],\n'
+            '  "migration_constraints": ["Migration requirement 1"],\n'
             '  "codebase_findings": ["Fact 1 (citing file.py:function)", "Fact 2"],\n'
             '  "assumptions": ["Assumption/Proposal 1"],\n'
-            '  "clarifying_questions": [],\n'
+            '  "blocking_unknowns": [{"id": "unk_1", "decision": "Decision required before execution", "affected_steps": ["1"], "affected_files": ["path/a.py"], "resolved": false}],\n'
+            '  "clarifying_questions": ["Non-blocking question 1"],\n'
             '  "acceptance_criteria": ["Testable criterion 1", "Testable criterion 2"],\n'
             '  "steps": [{"id": "1", "description": "Step 1", "files": ["path/a.py"]}],\n'
             '  "relevant_files": ["path/a.py"],\n'

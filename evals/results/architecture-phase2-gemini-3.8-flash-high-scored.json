@@ -1,0 +1,529 @@
+{
+  "suite": "brainfrog-architecture-phase2-scored",
+  "version": "1.0.0",
+  "model": "gemini-3.8-flash-high",
+  "provider": "antigravity",
+  "run_timestamp": "2026-10-19T03:38:05Z",
+  "git_commit": "2d63615eab817cdd6b9ca69ce805c69621176bd1",
+  "git_branch": "feat/trustworthy-verification-workflow",
+  "aggregate": {
+    "total_scenarios": 10,
+    "passed_count": 9,
+    "failed_count": 1,
+    "pass_rate_pct": 90.0,
+    "critical_failures_count": 0,
+    "mean_score": 24.5,
+    "median_score": 25.0,
+    "min_score": 17,
+    "max_score": 26,
+    "mean_percentage": 90.7,
+    "dimension_averages": {
+      "context_classification": 2.4,
+      "evidence_grounding": 2.9,
+      "compatibility_reasoning": 2.9,
+      "scope_discipline": 2.9,
+      "strategy_quality": 2.9,
+      "uncertainty_handling": 2.0,
+      "verification_quality": 2.9,
+      "architecture_proportionality": 2.7,
+      "execution_boundary_awareness": 2.9
+    },
+    "context_accuracy_pct": 100.0,
+    "strategy_distribution": {
+      "keep": 4,
+      "local_refactor": 4,
+      "incremental_migration": 1,
+      "bounded_rewrite": 1,
+      "unclear": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "SCN-01-GREENFIELD-SIMPLE",
+      "title": "Simple Greenfield CLI Application",
+      "expected_context": "greenfield",
+      "inferred_context": "greenfield",
+      "expected_strategies": [
+        "keep",
+        "local_refactor"
+      ],
+      "inferred_strategy": "keep",
+      "rubric_scores": {
+        "context_classification": 2,
+        "evidence_grounding": 3,
+        "compatibility_reasoning": 3,
+        "scope_discipline": 3,
+        "strategy_quality": 3,
+        "uncertainty_handling": 2,
+        "verification_quality": 3,
+        "architecture_proportionality": 3,
+        "execution_boundary_awareness": 3
+      },
+      "total_score": 25,
+      "max_score": 27,
+      "percentage": 92.6,
+      "passed": true,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Identified fresh package with zero existing Python source or test files, correctly recognizing greenfield scope.",
+        "evidence_grounding": "Directly grounded in pyproject.toml dependencies and entrypoint declaration log-sieve = 'log_sieve.cli:main'.",
+        "compatibility_reasoning": "Adhered to standard CLI exit codes (0, 1, 2) and atomic write semantics for output files.",
+        "scope_discipline": "Strictly limited to Python standard library modules (argparse, re, json, sys, pathlib); explicitly rejected external packages.",
+        "strategy_quality": "Proposed clean two-module design (log_sieve/core.py + log_sieve/cli.py); minimal viable structure.",
+        "uncertainty_handling": "Reasonable defaults for CLI flags, JSON output schema, and regex compilation.",
+        "verification_quality": "Detailed test suite for regex matching, empty inputs, malformed patterns, atomic writing, and JSON output structure.",
+        "architecture_proportionality": "Zero speculative frameworks; strictly adheres to YAGNI.",
+        "execution_boundary_awareness": "Remained strictly in PLAN mode, outputting structured PRD without file mutations."
+      },
+      "evidence_notes": {
+        "context_classification": "Identified fresh package with zero existing Python source or test files, correctly recognizing greenfield scope.",
+        "evidence_grounding": "Directly grounded in pyproject.toml dependencies and entrypoint declaration log-sieve = 'log_sieve.cli:main'.",
+        "compatibility_reasoning": "Adhered to standard CLI exit codes (0, 1, 2) and atomic write semantics for output files.",
+        "scope_discipline": "Strictly limited to Python standard library modules (argparse, re, json, sys, pathlib); explicitly rejected external packages.",
+        "strategy_quality": "Proposed clean two-module design (log_sieve/core.py + log_sieve/cli.py); minimal viable structure.",
+        "uncertainty_handling": "Reasonable defaults for CLI flags, JSON output schema, and regex compilation.",
+        "verification_quality": "Detailed test suite for regex matching, empty inputs, malformed patterns, atomic writing, and JSON output structure.",
+        "architecture_proportionality": "Zero speculative frameworks; strictly adheres to YAGNI.",
+        "execution_boundary_awareness": "Remained strictly in PLAN mode, outputting structured PRD without file mutations."
+      }
+    },
+    {
+      "id": "SCN-02-BROWNFIELD-MULTI-CALLER",
+      "title": "Existing API with Multiple Callers",
+      "expected_context": "brownfield",
+      "inferred_context": "brownfield",
+      "expected_strategies": [
+        "keep",
+        "local_refactor"
+      ],
+      "inferred_strategy": "local_refactor",
+      "rubric_scores": {
+        "context_classification": 3,
+        "evidence_grounding": 3,
+        "compatibility_reasoning": 3,
+        "scope_discipline": 3,
+        "strategy_quality": 3,
+        "uncertainty_handling": 2,
+        "verification_quality": 3,
+        "architecture_proportionality": 3,
+        "execution_boundary_awareness": 3
+      },
+      "total_score": 26,
+      "max_score": 27,
+      "percentage": 96.3,
+      "passed": true,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Identified brownfield scope with existing 14 callers and downstream consumers.",
+        "evidence_grounding": "Exact file and line symbol citations: core/formatting.py:format_metric_value, tests/test_formatting.py, reports/billing_export.py, reports/sla_monitor.py.",
+        "compatibility_reasoning": "Preserves existing formatting for 0.0 ('0.00'), None ('N/A'), and values >= 0.0001; non-breaking conditional extension.",
+        "scope_discipline": "Confined strictly to core/formatting.py and tests/test_formatting.py; non-scope explicitly rejects changing call sites.",
+        "strategy_quality": "Local conditional formatting (0 < abs(val) < 0.0001) preserving existing signature and defaults.",
+        "uncertainty_handling": "Sensible magnitude threshold and lowercase exponential notation matching standard conventions.",
+        "verification_quality": "Comprehensive test cases covering scientific notation, negative numbers, boundary 0.0001, zero, and None.",
+        "architecture_proportionality": "Zero architectural sprawl; exact minimal code modification.",
+        "execution_boundary_awareness": "Strict PLAN mode adherence with no unauthorized edits."
+      },
+      "evidence_notes": {
+        "context_classification": "Identified brownfield scope with existing 14 callers and downstream consumers.",
+        "evidence_grounding": "Exact file and line symbol citations: core/formatting.py:format_metric_value, tests/test_formatting.py, reports/billing_export.py, reports/sla_monitor.py.",
+        "compatibility_reasoning": "Preserves existing formatting for 0.0 ('0.00'), None ('N/A'), and values >= 0.0001; non-breaking conditional extension.",
+        "scope_discipline": "Confined strictly to core/formatting.py and tests/test_formatting.py; non-scope explicitly rejects changing call sites.",
+        "strategy_quality": "Local conditional formatting (0 < abs(val) < 0.0001) preserving existing signature and defaults.",
+        "uncertainty_handling": "Sensible magnitude threshold and lowercase exponential notation matching standard conventions.",
+        "verification_quality": "Comprehensive test cases covering scientific notation, negative numbers, boundary 0.0001, zero, and None.",
+        "architecture_proportionality": "Zero architectural sprawl; exact minimal code modification.",
+        "execution_boundary_awareness": "Strict PLAN mode adherence with no unauthorized edits."
+      }
+    },
+    {
+      "id": "SCN-03-MIXED-NEW-PROVIDER",
+      "title": "New Component Inside Existing Architecture",
+      "expected_context": "mixed",
+      "inferred_context": "mixed",
+      "expected_strategies": [
+        "keep"
+      ],
+      "inferred_strategy": "keep",
+      "rubric_scores": {
+        "context_classification": 3,
+        "evidence_grounding": 3,
+        "compatibility_reasoning": 3,
+        "scope_discipline": 3,
+        "strategy_quality": 3,
+        "uncertainty_handling": 2,
+        "verification_quality": 3,
+        "architecture_proportionality": 3,
+        "execution_boundary_awareness": 3
+      },
+      "total_score": 26,
+      "max_score": 27,
+      "percentage": 96.3,
+      "passed": true,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Recognized mixed context: new component implementation inside existing host architecture conforming to host interfaces.",
+        "evidence_grounding": "Cites system2/__init__.py, System2ClientType, get_system2_provider, and token tracking contracts.",
+        "compatibility_reasoning": "Conforms to System 2 client interface, integrates with UsageTracker, and mandates safe synthetic test fixtures.",
+        "scope_discipline": "Confined strictly to system2/deepseek_client.py, system2/__init__.py wiring, and unit tests.",
+        "strategy_quality": "Follows standard provider extension pattern leveraging OpenAI-compatible base URL.",
+        "uncertainty_handling": "Sensible defaults for default model (deepseek-chat) and API base URL.",
+        "verification_quality": "Unit test suite using safe synthetic fixtures adhering to safe test fixture rules with 0 secret scanner violations.",
+        "architecture_proportionality": "Matches existing provider structure without extra layers or orchestrator bypasses.",
+        "execution_boundary_awareness": "Strict PLAN mode compliance."
+      },
+      "evidence_notes": {
+        "context_classification": "Recognized mixed context: new component implementation inside existing host architecture conforming to host interfaces.",
+        "evidence_grounding": "Cites system2/__init__.py, System2ClientType, get_system2_provider, and token tracking contracts.",
+        "compatibility_reasoning": "Conforms to System 2 client interface, integrates with UsageTracker, and mandates safe synthetic test fixtures.",
+        "scope_discipline": "Confined strictly to system2/deepseek_client.py, system2/__init__.py wiring, and unit tests.",
+        "strategy_quality": "Follows standard provider extension pattern leveraging OpenAI-compatible base URL.",
+        "uncertainty_handling": "Sensible defaults for default model (deepseek-chat) and API base URL.",
+        "verification_quality": "Unit test suite using safe synthetic fixtures adhering to safe test fixture rules with 0 secret scanner violations.",
+        "architecture_proportionality": "Matches existing provider structure without extra layers or orchestrator bypasses.",
+        "execution_boundary_awareness": "Strict PLAN mode compliance."
+      }
+    },
+    {
+      "id": "SCN-04-UNKNOWN-INSUFFICIENT-CONTEXT",
+      "title": "Insufficient Repository Context",
+      "expected_context": "unknown",
+      "inferred_context": "unknown",
+      "expected_strategies": [
+        "keep"
+      ],
+      "inferred_strategy": "keep",
+      "rubric_scores": {
+        "context_classification": 2,
+        "evidence_grounding": 2,
+        "compatibility_reasoning": 2,
+        "scope_discipline": 2,
+        "strategy_quality": 2,
+        "uncertainty_handling": 2,
+        "verification_quality": 2,
+        "architecture_proportionality": 1,
+        "execution_boundary_awareness": 2
+      },
+      "total_score": 17,
+      "max_score": 27,
+      "percentage": 63.0,
+      "passed": false,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Identified that caller context, customer tier data models, and currency rules are external/unimported.",
+        "evidence_grounding": "Identifies supplied function behavior and lack of tier definitions in services/pricing/rebate.py.",
+        "compatibility_reasoning": "Maintains default arguments for existing callers to preserve backward compatibility.",
+        "scope_discipline": "Confines changes to rebate module and tests; explicitly avoids modifying database schemas or live forex APIs.",
+        "strategy_quality": "Proposes bounded extension with safe defaults.",
+        "uncertainty_handling": "Frames 2 explicit, highly targeted clarifying questions regarding official tier names and exchange rate mechanisms.",
+        "verification_quality": "Defines test cases covering tier rates, backward compatibility, and validation error paths.",
+        "architecture_proportionality": "Still introduces speculative multi-tier mappings and exchange rate dictionaries ahead of user confirmation.",
+        "execution_boundary_awareness": "Maintains read-only plan mode without file mutations."
+      },
+      "evidence_notes": {
+        "context_classification": "Identified that caller context, customer tier data models, and currency rules are external/unimported.",
+        "evidence_grounding": "Identifies supplied function behavior and lack of tier definitions in services/pricing/rebate.py.",
+        "compatibility_reasoning": "Maintains default arguments for existing callers to preserve backward compatibility.",
+        "scope_discipline": "Confines changes to rebate module and tests; explicitly avoids modifying database schemas or live forex APIs.",
+        "strategy_quality": "Proposes bounded extension with safe defaults.",
+        "uncertainty_handling": "Frames 2 explicit, highly targeted clarifying questions regarding official tier names and exchange rate mechanisms.",
+        "verification_quality": "Defines test cases covering tier rates, backward compatibility, and validation error paths.",
+        "architecture_proportionality": "Still introduces speculative multi-tier mappings and exchange rate dictionaries ahead of user confirmation.",
+        "execution_boundary_awareness": "Maintains read-only plan mode without file mutations."
+      }
+    },
+    {
+      "id": "SCN-05-BROAD-REFACTOR-REQUEST",
+      "title": "Broad Refactor and Clean-Up Request",
+      "expected_context": "brownfield",
+      "inferred_context": "brownfield",
+      "expected_strategies": [
+        "keep",
+        "local_refactor"
+      ],
+      "inferred_strategy": "keep",
+      "rubric_scores": {
+        "context_classification": 3,
+        "evidence_grounding": 3,
+        "compatibility_reasoning": 3,
+        "scope_discipline": 3,
+        "strategy_quality": 3,
+        "uncertainty_handling": 2,
+        "verification_quality": 3,
+        "architecture_proportionality": 3,
+        "execution_boundary_awareness": 3
+      },
+      "total_score": 26,
+      "max_score": 27,
+      "percentage": 96.3,
+      "passed": true,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Identified brownfield context with verified 100% passing tests and intact contracts.",
+        "evidence_grounding": "Directly quotes and cites lines, methods, SHA-256 implementation, secrets.compare_digest, and test fixtures.",
+        "compatibility_reasoning": "Guarantees 100% behavioral and contract equivalence; no changes to public API arguments or returns.",
+        "scope_discipline": "Limits work strictly to typing refinement and private password verification helper.",
+        "strategy_quality": "Exemplary defense of 'keep' architecture; explicitly applies the 'refactor-code-safely' principle ('No architectural change is justified').",
+        "uncertainty_handling": "Clearly distinguishes verifiable repository facts from working assumptions.",
+        "verification_quality": "Confirms existing unit tests in tests/test_auth_service.py must continue to pass with exit code 0.",
+        "architecture_proportionality": "Strong defense against premature complexity, repository interfaces, and speculative over-engineering (YAGNI).",
+        "execution_boundary_awareness": "Strict PLAN mode discipline maintained."
+      },
+      "evidence_notes": {
+        "context_classification": "Identified brownfield context with verified 100% passing tests and intact contracts.",
+        "evidence_grounding": "Directly quotes and cites lines, methods, SHA-256 implementation, secrets.compare_digest, and test fixtures.",
+        "compatibility_reasoning": "Guarantees 100% behavioral and contract equivalence; no changes to public API arguments or returns.",
+        "scope_discipline": "Limits work strictly to typing refinement and private password verification helper.",
+        "strategy_quality": "Exemplary defense of 'keep' architecture; explicitly applies the 'refactor-code-safely' principle ('No architectural change is justified').",
+        "uncertainty_handling": "Clearly distinguishes verifiable repository facts from working assumptions.",
+        "verification_quality": "Confirms existing unit tests in tests/test_auth_service.py must continue to pass with exit code 0.",
+        "architecture_proportionality": "Strong defense against premature complexity, repository interfaces, and speculative over-engineering (YAGNI).",
+        "execution_boundary_awareness": "Strict PLAN mode discipline maintained."
+      }
+    },
+    {
+      "id": "SCN-06-BOUNDED-REWRITE-JUSTIFIED",
+      "title": "Small Component Where Bounded Rewrite is Appropriate",
+      "expected_context": "brownfield",
+      "inferred_context": "brownfield",
+      "expected_strategies": [
+        "bounded_rewrite",
+        "local_refactor"
+      ],
+      "inferred_strategy": "bounded_rewrite",
+      "rubric_scores": {
+        "context_classification": 2,
+        "evidence_grounding": 3,
+        "compatibility_reasoning": 3,
+        "scope_discipline": 3,
+        "strategy_quality": 3,
+        "uncertainty_handling": 2,
+        "verification_quality": 3,
+        "architecture_proportionality": 3,
+        "execution_boundary_awareness": 3
+      },
+      "total_score": 25,
+      "max_score": 27,
+      "percentage": 92.6,
+      "passed": true,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Identified brownfield leaf component with local caller dependencies.",
+        "evidence_grounding": "Cites regex pattern, client.py call site, and empty test assertions in tests/test_query_parser.py.",
+        "compatibility_reasoning": "Preserves compatibility with client.py while properly unquoting %3B and UTF-8 query strings.",
+        "scope_discipline": "Confined strictly to network/url_query_parser.py and tests/test_query_parser.py.",
+        "strategy_quality": "Replaces fragile custom regex with standard urllib.parse utilities (parse_qsl, unquote_plus); optimal bounded rewrite.",
+        "uncertainty_handling": "Addresses repeated keys vs scalar values sensibly with backwards compatibility.",
+        "verification_quality": "Exhaustive unit tests testing encoded semicolons, array keys, UTF-8 strings, empty strings, and malformed pairs.",
+        "architecture_proportionality": "Leverages Python standard library without introducing third-party dependencies.",
+        "execution_boundary_awareness": "Remained strictly in PLAN mode."
+      },
+      "evidence_notes": {
+        "context_classification": "Identified brownfield leaf component with local caller dependencies.",
+        "evidence_grounding": "Cites regex pattern, client.py call site, and empty test assertions in tests/test_query_parser.py.",
+        "compatibility_reasoning": "Preserves compatibility with client.py while properly unquoting %3B and UTF-8 query strings.",
+        "scope_discipline": "Confined strictly to network/url_query_parser.py and tests/test_query_parser.py.",
+        "strategy_quality": "Replaces fragile custom regex with standard urllib.parse utilities (parse_qsl, unquote_plus); optimal bounded rewrite.",
+        "uncertainty_handling": "Addresses repeated keys vs scalar values sensibly with backwards compatibility.",
+        "verification_quality": "Exhaustive unit tests testing encoded semicolons, array keys, UTF-8 strings, empty strings, and malformed pairs.",
+        "architecture_proportionality": "Leverages Python standard library without introducing third-party dependencies.",
+        "execution_boundary_awareness": "Remained strictly in PLAN mode."
+      }
+    },
+    {
+      "id": "SCN-07-STATEFUL-DATA-MIGRATION",
+      "title": "Stateful and Data-Sensitive Migration",
+      "expected_context": "brownfield",
+      "inferred_context": "brownfield",
+      "expected_strategies": [
+        "incremental_migration"
+      ],
+      "inferred_strategy": "incremental_migration",
+      "rubric_scores": {
+        "context_classification": 3,
+        "evidence_grounding": 3,
+        "compatibility_reasoning": 3,
+        "scope_discipline": 3,
+        "strategy_quality": 3,
+        "uncertainty_handling": 2,
+        "verification_quality": 3,
+        "architecture_proportionality": 3,
+        "execution_boundary_awareness": 3
+      },
+      "total_score": 26,
+      "max_score": 27,
+      "percentage": 96.3,
+      "passed": true,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Recognized stateful brownfield session persistence on disk.",
+        "evidence_grounding": "Cites core/runtime/session.py, SessionRecord, load_session, and save_session.",
+        "compatibility_reasoning": "Designs backward-compatible normalization for legacy session files on disk without data loss.",
+        "scope_discipline": "Confined to session persistence dataclasses and test files.",
+        "strategy_quality": "Incremental migration incorporating schema normalization and atomic file replacement (os.replace).",
+        "uncertainty_handling": "Sensible default values for missing legacy metadata (None and 'default').",
+        "verification_quality": "Tests legacy session loading, new schema persistence, and atomic write semantics.",
+        "architecture_proportionality": "Direct dataclass modeling without unnecessary database/ORM overhead.",
+        "execution_boundary_awareness": "Remained strictly in PLAN mode."
+      },
+      "evidence_notes": {
+        "context_classification": "Recognized stateful brownfield session persistence on disk.",
+        "evidence_grounding": "Cites core/runtime/session.py, SessionRecord, load_session, and save_session.",
+        "compatibility_reasoning": "Designs backward-compatible normalization for legacy session files on disk without data loss.",
+        "scope_discipline": "Confined to session persistence dataclasses and test files.",
+        "strategy_quality": "Incremental migration incorporating schema normalization and atomic file replacement (os.replace).",
+        "uncertainty_handling": "Sensible default values for missing legacy metadata (None and 'default').",
+        "verification_quality": "Tests legacy session loading, new schema persistence, and atomic write semantics.",
+        "architecture_proportionality": "Direct dataclass modeling without unnecessary database/ORM overhead.",
+        "execution_boundary_awareness": "Remained strictly in PLAN mode."
+      }
+    },
+    {
+      "id": "SCN-08-BROWNFIELD-UGLY-STRONG-COMPAT",
+      "title": "Ugly Implementation with Strong External Compatibility Constraints",
+      "expected_context": "brownfield",
+      "inferred_context": "brownfield",
+      "expected_strategies": [
+        "keep",
+        "local_refactor"
+      ],
+      "inferred_strategy": "local_refactor",
+      "rubric_scores": {
+        "context_classification": 2,
+        "evidence_grounding": 3,
+        "compatibility_reasoning": 3,
+        "scope_discipline": 3,
+        "strategy_quality": 3,
+        "uncertainty_handling": 2,
+        "verification_quality": 3,
+        "architecture_proportionality": 2,
+        "execution_boundary_awareness": 3
+      },
+      "total_score": 24,
+      "max_score": 27,
+      "percentage": 88.9,
+      "passed": true,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Identified brownfield external webhook integration.",
+        "evidence_grounding": "Cites exact functions, handlers, dictionary lookups, and test files in integrations/stripe_webhook.py.",
+        "compatibility_reasoning": "Explicitly invokes Postel's Law (extra='ignore') and gracefully catches ValidationError to prevent dropping valid payments.",
+        "scope_discipline": "Confined strictly to webhook handler and test file.",
+        "strategy_quality": "Defensive schema adaptation with graceful fallback.",
+        "uncertainty_handling": "Explicit assumptions regarding Pydantic configuration and optional field defaults.",
+        "verification_quality": "Tests valid payloads, extraneous fields, unknown event types, and malformed payloads.",
+        "architecture_proportionality": "Introduces Pydantic models as requested, but properly softens them with extra='ignore' and error handling.",
+        "execution_boundary_awareness": "Strict PLAN mode compliance."
+      },
+      "evidence_notes": {
+        "context_classification": "Identified brownfield external webhook integration.",
+        "evidence_grounding": "Cites exact functions, handlers, dictionary lookups, and test files in integrations/stripe_webhook.py.",
+        "compatibility_reasoning": "Explicitly invokes Postel's Law (extra='ignore') and gracefully catches ValidationError to prevent dropping valid payments.",
+        "scope_discipline": "Confined strictly to webhook handler and test file.",
+        "strategy_quality": "Defensive schema adaptation with graceful fallback.",
+        "uncertainty_handling": "Explicit assumptions regarding Pydantic configuration and optional field defaults.",
+        "verification_quality": "Tests valid payloads, extraneous fields, unknown event types, and malformed payloads.",
+        "architecture_proportionality": "Introduces Pydantic models as requested, but properly softens them with extra='ignore' and error handling.",
+        "execution_boundary_awareness": "Strict PLAN mode compliance."
+      }
+    },
+    {
+      "id": "SCN-09-CROSS-MODULE-BOUNDARY-COUPLING",
+      "title": "Circular Dependency and Cross-Module Boundary Coupling",
+      "expected_context": "brownfield",
+      "inferred_context": "brownfield",
+      "expected_strategies": [
+        "local_refactor",
+        "incremental_migration"
+      ],
+      "inferred_strategy": "local_refactor",
+      "rubric_scores": {
+        "context_classification": 2,
+        "evidence_grounding": 3,
+        "compatibility_reasoning": 3,
+        "scope_discipline": 3,
+        "strategy_quality": 3,
+        "uncertainty_handling": 2,
+        "verification_quality": 3,
+        "architecture_proportionality": 3,
+        "execution_boundary_awareness": 3
+      },
+      "total_score": 25,
+      "max_score": 27,
+      "percentage": 92.6,
+      "passed": true,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Brownfield circular dependency between billing and notifications modules.",
+        "evidence_grounding": "Exact line-level findings across both modules: notifications/email_service.py and billing/calculator.py.",
+        "compatibility_reasoning": "Preserves exact public functions and behavior.",
+        "scope_discipline": "Minimal change to single unused import statement.",
+        "strategy_quality": "Identifies that unused import can be cleanly removed without restructuring systems.",
+        "uncertainty_handling": "Verifies assumption that external callers do not rely on re-export.",
+        "verification_quality": "Bidirectional import order tests and functional calculation test.",
+        "architecture_proportionality": "Rejects speculative event brokers or message queues in favor of single-line fix.",
+        "execution_boundary_awareness": "Adheres strictly to PLAN mode."
+      },
+      "evidence_notes": {
+        "context_classification": "Brownfield circular dependency between billing and notifications modules.",
+        "evidence_grounding": "Exact line-level findings across both modules: notifications/email_service.py and billing/calculator.py.",
+        "compatibility_reasoning": "Preserves exact public functions and behavior.",
+        "scope_discipline": "Minimal change to single unused import statement.",
+        "strategy_quality": "Identifies that unused import can be cleanly removed without restructuring systems.",
+        "uncertainty_handling": "Verifies assumption that external callers do not rely on re-export.",
+        "verification_quality": "Bidirectional import order tests and functional calculation test.",
+        "architecture_proportionality": "Rejects speculative event brokers or message queues in favor of single-line fix.",
+        "execution_boundary_awareness": "Adheres strictly to PLAN mode."
+      }
+    },
+    {
+      "id": "SCN-10-PERF-SPECULATIVE-VS-LOCAL",
+      "title": "Performance Optimization vs Speculative Overhaul",
+      "expected_context": "brownfield",
+      "inferred_context": "brownfield",
+      "expected_strategies": [
+        "keep",
+        "local_refactor"
+      ],
+      "inferred_strategy": "local_refactor",
+      "rubric_scores": {
+        "context_classification": 2,
+        "evidence_grounding": 3,
+        "compatibility_reasoning": 3,
+        "scope_discipline": 3,
+        "strategy_quality": 3,
+        "uncertainty_handling": 2,
+        "verification_quality": 3,
+        "architecture_proportionality": 3,
+        "execution_boundary_awareness": 3
+      },
+      "total_score": 25,
+      "max_score": 27,
+      "percentage": 92.6,
+      "passed": true,
+      "critical_failures": [],
+      "notes": {
+        "context_classification": "Brownfield CLI performance bottleneck.",
+        "evidence_grounding": "Cites rglob, read_text, splitlines, and memory behavior in cli/scanner.py.",
+        "compatibility_reasoning": "Preserves exact function signature and return schema: scan_repository(repo_path: Path) -> dict.",
+        "scope_discipline": "Confined to cli/scanner.py and tests/test_scanner.py.",
+        "strategy_quality": "Local directory pruning and streaming binary I/O; perfectly proportional.",
+        "uncertainty_handling": "Explicit assumptions about developer hardware and newline definitions.",
+        "verification_quality": "Correctness, empty files, directory pruning, and benchmark latency tests.",
+        "architecture_proportionality": "Avoids speculative distributed architecture or native binary dependencies.",
+        "execution_boundary_awareness": "Adheres strictly to PLAN mode."
+      },
+      "evidence_notes": {
+        "context_classification": "Brownfield CLI performance bottleneck.",
+        "evidence_grounding": "Cites rglob, read_text, splitlines, and memory behavior in cli/scanner.py.",
+        "compatibility_reasoning": "Preserves exact function signature and return schema: scan_repository(repo_path: Path) -> dict.",
+        "scope_discipline": "Confined to cli/scanner.py and tests/test_scanner.py.",
+        "strategy_quality": "Local directory pruning and streaming binary I/O; perfectly proportional.",
+        "uncertainty_handling": "Explicit assumptions about developer hardware and newline definitions.",
+        "verification_quality": "Correctness, empty files, directory pruning, and benchmark latency tests.",
+        "architecture_proportionality": "Avoids speculative distributed architecture or native binary dependencies.",
+        "execution_boundary_awareness": "Adheres strictly to PLAN mode."
+      }
+    }
+  ]
+}
