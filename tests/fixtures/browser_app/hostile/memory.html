@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Memory exhaustion</title></head>
+<body>
+  <p id="marker">memory probe</p>
+  <script>
+    // Synthetic resource-exhaustion fixture: grows the renderer heap until the
+    // container memory limit or the renderer's own limit stops it.
+    var hoard = [];
+    function grow() {
+      for (var i = 0; i < 20; i++) { hoard.push(new Array(1 << 20).fill(i)); }
+      setTimeout(grow, 0);
+    }
+    grow();
+  </script>
+</body>
+</html>

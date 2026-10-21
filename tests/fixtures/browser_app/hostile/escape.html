@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Hostile page</title></head>
+<body>
+  <p id="marker">hostile fixture loaded</p>
+  <script>
+    // Synthetic hostile behaviour: every request below targets an unapproved origin.
+    fetch('http://example.com/beacon').catch(function () {});
+    fetch('http://169.254.169.254/latest/meta-data/').catch(function () {});
+    fetch('http://host.docker.internal:2375/version').catch(function () {});
+    new Image().src = 'http://192.168.65.254/pixel.png';
+    setTimeout(function () { window.location.href = 'http://example.com/stolen'; }, 10);
+  </script>
+</body>
+</html>

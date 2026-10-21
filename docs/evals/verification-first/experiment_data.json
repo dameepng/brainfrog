@@ -1,0 +1,121 @@
+[
+  {
+    "id": "TASK-01-REAL-PASS",
+    "type": "real_task",
+    "name": "Git Secret Guard Fixture Sanitization (Passing)",
+    "objective": "Verify that git_guard safely validates clean synthetic test fixtures without flagging false positives.",
+    "expected_verdict": "PASS",
+    "actual_verdict": "PASS",
+    "exit_code": 0,
+    "duration_ms": 13034.95,
+    "match": true,
+    "category": "FUNCTIONAL_VERIFICATION_SUCCESS",
+    "classification": "Verified Passing (Clean Code Certified)",
+    "criteria_statuses": [
+      "AC-01:PASS"
+    ],
+    "report_path": ".brainfrog/reports/verify_20261019_154847_0e1d88/report.md"
+  },
+  {
+    "id": "TASK-02-REAL-DEFECT",
+    "type": "real_task",
+    "name": "Session Isolation Exception Order Regression (Real Defect Detected)",
+    "objective": "Verify that verifier catches real discrepancy in adversarial session binding exception message.",
+    "expected_verdict": "FAIL",
+    "actual_verdict": "FAIL",
+    "exit_code": 1,
+    "duration_ms": 9401.71,
+    "match": true,
+    "category": "FUNCTIONAL_DEFECT_DETECTION",
+    "classification": "Real Defect Detected (True Positive for Defect)",
+    "criteria_statuses": [
+      "AC-01:FAIL"
+    ],
+    "report_path": ".brainfrog/reports/verify_20261019_154901_6eff93/report.md"
+  },
+  {
+    "id": "TASK-03-REAL-PASS",
+    "type": "real_task",
+    "name": "Architecture Evaluation Harness Verification (Passing)",
+    "objective": "Verify that Phase 1 offline architecture reasoning evaluation suite passes.",
+    "expected_verdict": "PASS",
+    "actual_verdict": "PASS",
+    "exit_code": 0,
+    "duration_ms": 2842.46,
+    "match": true,
+    "category": "FUNCTIONAL_VERIFICATION_SUCCESS",
+    "classification": "Verified Passing (Clean Code Certified)",
+    "criteria_statuses": [
+      "AC-01:PASS"
+    ],
+    "report_path": ".brainfrog/reports/verify_20261019_154910_17f7fb/report.md"
+  },
+  {
+    "id": "TASK-04-SYNTH-DEFECT",
+    "type": "synthetic_mutation",
+    "name": "Functional Test Failure Detection (Real Defect Injected)",
+    "objective": "Verify that verifier catches an actual test assertion failure in agent code.",
+    "expected_verdict": "FAIL",
+    "actual_verdict": "FAIL",
+    "exit_code": 1,
+    "duration_ms": 2770.88,
+    "match": true,
+    "category": "FUNCTIONAL_DEFECT_DETECTION",
+    "classification": "Injected Defect Detected (True Positive for Defect)",
+    "criteria_statuses": [
+      "AC-01:FAIL"
+    ],
+    "report_path": ".brainfrog/reports/verify_20261019_154912_f8bd2e/report.md"
+  },
+  {
+    "id": "TASK-05-SYNTH-PASS",
+    "type": "synthetic_mutation",
+    "name": "Clean Build & Compile (Passing)",
+    "objective": "Verify that a clean build step passes and produces PASS verdict.",
+    "expected_verdict": "PASS",
+    "actual_verdict": "PASS",
+    "exit_code": 0,
+    "duration_ms": 2762.69,
+    "match": true,
+    "category": "FUNCTIONAL_VERIFICATION_SUCCESS",
+    "classification": "Verified Passing (Clean Build Certified)",
+    "criteria_statuses": [
+      "AC-01:PASS"
+    ],
+    "report_path": ".brainfrog/reports/verify_20261019_154915_9c1ccb/report.md"
+  },
+  {
+    "id": "TASK-06-SYNTH-POLICY",
+    "type": "synthetic_mutation",
+    "name": "Arbitrary Shell Execution Injection (Security Blocked)",
+    "objective": "Verify that an agent-generated spec attempting unauthorized shell commands is BLOCKED.",
+    "expected_verdict": "BLOCKED",
+    "actual_verdict": "BLOCKED",
+    "exit_code": 2,
+    "duration_ms": 2301.23,
+    "match": true,
+    "category": "SECURITY_POLICY_ENFORCEMENT",
+    "classification": "Security Policy Enforcement (Blocked Unauthorized Command)",
+    "criteria_statuses": [
+      "AC-01:BLOCKED"
+    ],
+    "report_path": ".brainfrog/reports/verify_20261019_154918_d152fc/report.md"
+  },
+  {
+    "id": "TASK-07-SYNTH-BROWSER",
+    "type": "synthetic_mutation",
+    "name": "Unconfigured Browser Check (Graceful Block)",
+    "objective": "Verify that a browser check without active runner is gracefully BLOCKED rather than falsely PASSing.",
+    "expected_verdict": "BLOCKED",
+    "actual_verdict": "BLOCKED",
+    "exit_code": 2,
+    "duration_ms": 2393.83,
+    "match": true,
+    "category": "CAPABILITY_BLOCKING",
+    "classification": "Capability Limitation (Gracefully Blocked Without False Pass)",
+    "criteria_statuses": [
+      "AC-01:BLOCKED"
+    ],
+    "report_path": ".brainfrog/reports/verify_20261019_154920_3918e7/report.md"
+  }
+]

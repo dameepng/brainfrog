@@ -1,0 +1,8 @@
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, sans-serif; background: #f4f6f8; color: #1d2733; }
+.promo-banner { width: 100%; padding: 12px 16px; background: #2f6f4e; color: #fff; }
+.card { max-width: 420px; margin: 32px auto; padding: 24px; background: #fff; border-radius: 8px; }
+label { display: block; margin-top: 12px; }
+input { width: 100%; padding: 8px; margin-top: 4px; }
+button { margin-top: 16px; width: 100%; padding: 10px; }
+.field-error { color: #b00020; margin: 4px 0 0; }

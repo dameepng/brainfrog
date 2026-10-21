@@ -4191,12 +4191,77 @@ def main() -> int:
         default=False,
         help="Verify current workspace disk integrity against post-proof file hashes",
     )
+    p.add_argument(
+        "--spec",
+        default=None,
+        help="Path to specification file (e.g. spec.md) for independent acceptance verification",
+    )
+    p.add_argument(
+        "--trust-local-code",
+        action="store_true",
+        default=False,
+        help="Explicitly authorize running repository build/test scripts locally in TRUSTED_OPERATOR mode",
+    )
+    p.add_argument(
+        "--trust-reference",
+        default=None,
+        help="Optional audit label or ticket reference for operator authorization (recorded in report)",
+    )
+    p.add_argument(
+        "--check-report",
+        default=None,
+        help="Validate evidence authenticity and cryptographic integrity of a verification report directory",
+    )
+    p.add_argument(
+        "--sandbox",
+        choices=["auto", "docker", "none"],
+        default="auto",
+        help="Sandbox execution backend: auto (prefer docker sandbox), docker (require docker sandbox), none (fail closed unless --trust-local-code)",
+    )
+    p.add_argument(
+        "--app-profile",
+        default="python-static",
+        help="Approved application startup profile for browser verification (default: python-static)",
+    )
     p.add_argument("-v", "--version", action="version", version=f"BrainFrog {CLI_VERSION}")
 
     args = p.parse_args()
 
     repo_dir = find_git_root(Path(args.repo))
     load_all_envs(repo_dir)
+
+    if args.check_report:
+        from core.verifier import verify_report_integrity
+        c = globals().get("console") or Console(legacy_windows=False)
+        is_valid, findings = verify_report_integrity(args.check_report)
+        if is_valid:
+            c.print(f"[bold green]✓ Report integrity verified:[/bold green] {args.check_report}")
+            return 0
+        else:
+            c.print(f"[bold red]✗ Report integrity check failed:[/bold red] {args.check_report}")
+            for f in findings:
+                c.print(f"  [red]- {f}[/red]")
+            return 1
+
+    if args.spec:
+        from core.verifier import StandaloneVerifier, render_verification_console
+        c = globals().get("console") or Console(legacy_windows=False)
+        verifier = StandaloneVerifier(
+            repo_dir=repo_dir,
+            # None (not False) so --sandbox auto|docker selects the OCI backend; spec content cannot set trust.
+            trust_local_code=True if args.trust_local_code else None,
+            authorization_reference=args.trust_reference,
+            sandbox_mode=getattr(args, "sandbox", "auto"),
+            default_app_profile=getattr(args, "app_profile", "python-static"),
+        )
+        try:
+            report = verifier.verify_spec(args.spec)
+        except (ValueError, FileNotFoundError, PermissionError) as spec_err:
+            # Unusable spec is a setup problem (BLOCKED, exit 2), never an application FAIL.
+            c.print(f"[bold yellow]BLOCKED: cannot verify specification:[/bold yellow] {spec_err}")
+            return 2
+        render_verification_console(report, console=c)
+        return report.exit_code
 
     if args.list_proofs or args.proofs:
         return list_proofs_cli(repo_dir)
@@ -4251,6 +4316,68 @@ def main() -> int:
         or chosen_task in ("verify", "/verify")
     ):
         parts = chosen_task.split(maxsplit=1)
+        raw_tail = parts[1].strip() if len(parts) > 1 else ""
+
+        # Check for standalone spec verification: `bf verify --spec <file>` or `bf verify <spec.md>`
+        if "--spec" in raw_tail or raw_tail.endswith((".md", ".markdown")):
+            spec_file: Optional[str] = None
+            trust_code = args.trust_local_code or ("--trust-local-code" in raw_tail)
+            if "--spec" in raw_tail:
+                tail_tokens = raw_tail.split()
+                try:
+                    idx_spec = tail_tokens.index("--spec")
+                    if idx_spec + 1 < len(tail_tokens):
+                        spec_file = tail_tokens[idx_spec + 1]
+                except ValueError:
+                    pass
+            elif raw_tail.endswith((".md", ".markdown")):
+                spec_file = raw_tail.split()[0]
+
+            if spec_file:
+                from core.verifier import StandaloneVerifier, render_verification_console
+                c = globals().get("console") or Console(legacy_windows=False)
+                trust_ref = args.trust_reference
+                if "--trust-reference" in raw_tail:
+                    tokens = raw_tail.split()
+                    try:
+                        idx_ref = tokens.index("--trust-reference")
+                        if idx_ref + 1 < len(tokens):
+                            trust_ref = tokens[idx_ref + 1]
+                    except ValueError:
+                        pass
+                sandbox_opt = getattr(args, "sandbox", "auto")
+                if "--sandbox" in raw_tail:
+                    tokens = raw_tail.split()
+                    try:
+                        idx_sb = tokens.index("--sandbox")
+                        if idx_sb + 1 < len(tokens):
+                            sandbox_opt = tokens[idx_sb + 1]
+                    except ValueError:
+                        pass
+                app_prof = getattr(args, "app_profile", "python-static")
+                if "--app-profile" in raw_tail:
+                    tokens = raw_tail.split()
+                    try:
+                        idx_ap = tokens.index("--app-profile")
+                        if idx_ap + 1 < len(tokens):
+                            app_prof = tokens[idx_ap + 1]
+                    except ValueError:
+                        pass
+                verifier = StandaloneVerifier(
+                    repo_dir=repo_dir,
+                    trust_local_code=True if trust_code else None,
+                    authorization_reference=trust_ref,
+                    sandbox_mode=sandbox_opt,
+                    default_app_profile=app_prof,
+                )
+                try:
+                    report = verifier.verify_spec(spec_file)
+                except (ValueError, FileNotFoundError, PermissionError) as spec_err:
+                    c.print(f"[bold yellow]BLOCKED: cannot verify specification:[/bold yellow] {spec_err}")
+                    return 2
+                render_verification_console(report, console=c)
+                return report.exit_code
+
         if len(parts) > 1 and parts[1].strip():
             raw_target = parts[1].strip()
             check_ws = args.check_workspace
@@ -4263,7 +4390,7 @@ def main() -> int:
                 print_banner_box("Usage: brainfrog verify-proof <task_id or path/to/proof.json> [--check-workspace]", level="error", title="Missing Target")
                 return 1
         else:
-            print_banner_box("Usage: brainfrog verify-proof <task_id or path/to/proof.json> [--check-workspace]", level="error", title="Missing Target")
+            print_banner_box("Usage: brainfrog verify-proof <task_id or path/to/proof.json> [--check-workspace]\nOr standalone: brainfrog verify --spec <spec.md>", level="error", title="Missing Target")
             return 1
 
     if chosen_task.startswith("gateway") or chosen_task.startswith("/gateway"):

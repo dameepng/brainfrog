@@ -916,14 +916,19 @@ def validate_python_arguments(
             module_name = first_arg.split("=", 1)[1].lower()
             rem_args = args[1:]
 
-        if module_name not in ("pytest", "unittest"):
+        if module_name not in ("pytest", "unittest", "compileall", "py_compile"):
             return False, (
                 f"Unauthorized Python module execution: 'python -m {module_name}' "
-                f"(only pytest and unittest are authorized)"
+                f"(only pytest, unittest, compileall, and py_compile are authorized)"
             )
 
         if module_name == "pytest":
             return validate_pytest_arguments(rem_args, cwd)
+        elif module_name in ("compileall", "py_compile"):
+            for a in rem_args:
+                if a.startswith("@") or "\0" in a:
+                    return False, f"Disallowed argument '{a}' in python -m {module_name}"
+            return True, None
         elif module_name == "unittest":
             real_cwd = Path(os.path.realpath(str(cwd)))
             for a in rem_args:

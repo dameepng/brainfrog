@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>WebSocket egress</title></head>
+<body>
+  <p id="marker">WebSocket egress</p>
+  <p id="ws-state">pending</p>
+  <script>
+    var ws = new WebSocket('ws://example.com/socket');
+    ws.onerror = function () { document.getElementById('ws-state').textContent = 'failed'; };
+    ws.onopen = function () { document.getElementById('ws-state').textContent = 'open'; };
+  </script>
+</body>
+</html>
