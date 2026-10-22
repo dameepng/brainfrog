@@ -1,0 +1,159 @@
+# BrainFrog pull request verification gate (Verification-First Phase 1E).
+#
+# Trust model (docs/evals/verification-first/phase1e-threat-model.md):
+# - pull_request only (never pull_request_target / workflow_run): no secrets, read-only GITHUB_TOKEN.
+# - The verifier, acceptance policy/specs and dependency locks come from the PR *base* revision
+#   ("trusted"); the PR revision GitHub tested ("candidate") is data, executed only in OCI containers.
+# - This file itself comes from the PR merge commit, so a PR can edit it. The gate flags such edits,
+#   but real enforcement needs repository rules (CODEOWNERS review of .github/**, required check).
+# - No `${{ }}` expressions inside `run:` scripts; event text is never interpolated into a shell.
+name: BrainFrog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brainfrog-verify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verification:
+    name: Verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      manifest-sha256: ${{ steps.digest.outputs.manifest-sha256 }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Check out trusted verifier and policy (PR base revision)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out candidate source (revision under test)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidate
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install trusted hash-locked verifier dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/bf-venv"
+          "$RUNNER_TEMP/bf-venv/bin/python" -m pip install --disable-pip-version-check --no-deps --require-hashes --only-binary=:all: -r trusted/.github/brainfrog/requirements-verifier.txt
+
+      - name: Provision approved OCI images from the trusted recipe
+        run: |
+          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py provision --trusted trusted
+
+      - name: Run BrainFrog verification
+        id: gate
+        run: |
+          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py gate --trusted trusted --candidate candidate --out "$RUNNER_TEMP/bf-ci"
+
+      - name: Record evidence manifest digest
+        id: digest
+        if: always()
+        run: |
+          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py digest --out "$RUNNER_TEMP/bf-ci"
+
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brainfrog-ci-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bf-ci/brainfrog-ci-evidence
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: false
+
+      - name: Enforce verification outcome
+        if: always()
+        run: |
+          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py enforce --out "$RUNNER_TEMP/bf-ci"
+
+  linux-selftest:
+    name: Linux self-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Check out trusted policy (PR base revision)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out candidate source (revision under test)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidate
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install trusted hash-locked dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/bf-venv"
+          "$RUNNER_TEMP/bf-venv/bin/python" -m pip install --disable-pip-version-check --no-deps --require-hashes --only-binary=:all: -r trusted/.github/brainfrog/requirements-verifier.txt
+
+      - name: Provision approved Python image
+        run: |
+          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py provision --trusted trusted --python-only
+
+      - name: Run candidate unit tests on Linux (strict quarantine)
+        run: |
+          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py selftest --trusted trusted --candidate candidate --out "$RUNNER_TEMP/bf-selftest"
+
+      - name: Upload self-test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brainfrog-selftest-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bf-selftest
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: false
+
+  attest-evidence:
+    name: Attest evidence manifest (optional)
+    needs: verification
+    if: ${{ always() && needs.verification.outputs.manifest-sha256 != '' && vars.BRAINFROG_ATTEST_EVIDENCE == 'true' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      id-token: write # OIDC token for the Sigstore signing certificate (actions/attest)
+      attestations: write # store the evidence-manifest attestation in this repository
+      artifact-metadata: write # artifact metadata storage record created by actions/attest v4
+    steps:
+      - name: Attest the evidence manifest digest (no checkout, no PR code)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: brainfrog-ci-evidence-manifest.json
+          subject-digest: sha256:${{ needs.verification.outputs.manifest-sha256 }}

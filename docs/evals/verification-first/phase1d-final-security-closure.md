@@ -211,7 +211,9 @@ Phase 1C-shaped reports still verify.
 
 **Live (run 2):** `--check-report` returned exit 0 on all 7 real reports and exit 1 on both tampered copies.
 
-**Privacy:** the publication evidence (`phase1d-live-evidence/run1-…` and `run2-…`) contains:
+**Privacy:** the sanitized evidence copies (`phase1d-live-evidence/run1-…` and `run2-…`) contain the items below. These copies are **local-only**: the operator excluded them from the checkpoint commit `41c6f0f` (see [phase1d-commit-readiness.md](phase1d-commit-readiness.md)), so they are not in the repository. From Phase 1E on, reviewable evidence comes from CI artifacts instead (see [phase1e-evidence-provenance.md](phase1e-evidence-provenance.md)).
+
+The copies contain:
 
 - no user-profile or temp paths;
 - no usernames, credentials, cookies or authorization headers;

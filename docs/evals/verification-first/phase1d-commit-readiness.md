@@ -38,7 +38,7 @@
 | `__pycache__/` | F | Already git-ignored |
 | `phase1c-live-evidence/` (Phase 1C worktree only) | E | Contains user-profile paths. It was never transferred into this worktree. |
 | `%TEMP%\bf_*` test directories | F | Outside the repository. They are left by inherited test suites, not deleted. |
-| `docs/evals/verification-first/phase1d-live-evidence/` (44 files, class E below) | E. Generated evidence | **Excluded from the checkpoint commit by operator instruction.** Kept locally and unchanged. Links to it from `phase1d-final-report.md`, `phase1d-live-browser-results.md` and `phase1d-final-security-closure.md` stay unresolved in the commit until a separate publication decision is made. |
+| `docs/evals/verification-first/phase1d-live-evidence/` (44 files, class E below) | E. Generated evidence | **Excluded from the checkpoint commit by operator instruction.** Kept locally and unchanged. References to it in `phase1d-final-report.md`, `phase1d-live-browser-results.md` and `phase1d-final-security-closure.md` now mark it as local-only. That wording was corrected in Phase 1E; in commit `41c6f0f` one of them was a dangling relative link. |
 
 Suggested `.gitignore` additions for the same commit, not applied by this review: `.brainfrog/workspace.lock*` and `.brainfrog/reports/`.
 

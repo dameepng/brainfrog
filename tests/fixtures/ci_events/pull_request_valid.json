@@ -1,0 +1,25 @@
+{
+  "action": "synchronize",
+  "number": 7,
+  "pull_request": {
+    "number": 7,
+    "title": "Fix login validation",
+    "head": {
+      "sha": "1111111111111111111111111111111111111111",
+      "ref": "feature/login-fix",
+      "repo": {
+        "full_name": "dameepng/brainfrog"
+      }
+    },
+    "base": {
+      "sha": "2222222222222222222222222222222222222222",
+      "ref": "main",
+      "repo": {
+        "full_name": "dameepng/brainfrog"
+      }
+    }
+  },
+  "repository": {
+    "full_name": "dameepng/brainfrog"
+  }
+}

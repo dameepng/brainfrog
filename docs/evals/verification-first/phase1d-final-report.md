@@ -6,7 +6,7 @@
 > - **Browser runtime:** Playwright 1.49.1 / Chromium 131 has been replaced by Playwright 1.64.0 / Chromium 156.0.8078.4, an operator-approved upgrade.
 > - **Application alias:** the network alias is now `bf-app`, not `app`.
 >
-> The run-1 evidence cited below now lives in `phase1d-live-evidence/run1-chromium131-unsandboxed/`. The original text is preserved below as the record of run 1.
+> The run-1 evidence cited below now lives in `phase1d-live-evidence/run1-chromium131-unsandboxed/`. That directory is local-only: it was excluded from the checkpoint commit `41c6f0f` and is not in the repository. The SHA-256 values quoted in these documents identify the files. The original text is preserved below as the record of run 1.
 
 **Date:** 2026-10-21
 **Worktree:** `<PHASE_1D_WORKTREE>` (detached at `c78e798`; all changes uncommitted)
@@ -93,7 +93,7 @@ These ran through `python cli.py`; full detail is in [phase1d-live-browser-resul
   - timeout;
   - browser killed mid-run;
   - memory exhaustion (OOM-killed at a 768 MiB test limit).
-- **Screenshots:** real PNGs for both PASS and FAIL. The two FAIL screenshots are committed as evidence in `phase1d-live-evidence/`.
+- **Screenshots:** real PNGs for both PASS and FAIL. The two FAIL screenshots were kept as local-only evidence in `phase1d-live-evidence/`, which is not in the repository. Their hashes are listed in [phase1d-live-browser-results.md](phase1d-live-browser-results.md).
 - **Network isolation:**
   - **Hostile navigation:** `escape.html` is BLOCKED (`unapproved_navigation`), and all 5 off-origin requests were blocked: `example.com`, `169.254.169.254`, `host.docker.internal:2375`, `192.168.65.254`, and the navigation itself.
   - **Docker-level probe:** from the browser container, every external, metadata, host and gateway target is unreachable and external DNS doesn't resolve.

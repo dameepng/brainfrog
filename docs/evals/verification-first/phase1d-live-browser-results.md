@@ -1,6 +1,6 @@
 # Phase 1D — Live Browser Verification Results
 
-> **Note (2026-10-21):** These are the **run-1** results (Chromium 131, renderer sandbox off). Their evidence moved, unchanged, to `phase1d-live-evidence/run1-chromium131-unsandboxed/`. The re-run on Chromium 156 with the renderer sandbox enforced is in [phase1d-final-security-closure.md](phase1d-final-security-closure.md) and `phase1d-live-evidence/run2-chromium156-sandboxed/`.
+> **Note (2026-10-21):** These are the **run-1** results (Chromium 131, renderer sandbox off). Their evidence moved, unchanged, to `phase1d-live-evidence/run1-chromium131-unsandboxed/`. The re-run on Chromium 156 with the renderer sandbox enforced is in [phase1d-final-security-closure.md](phase1d-final-security-closure.md) and `phase1d-live-evidence/run2-chromium156-sandboxed/`. Both evidence directories are **local-only**: they were excluded from the checkpoint commit `41c6f0f` and are not in the repository.
 
 All results below were **observed** on 2026-10-20 (UTC) through the real CLI:
 
@@ -12,7 +12,7 @@ The environment was Docker Engine 29.1.3 (`desktop-linux`, WSL2), the app image 
 
 Each fixture was copied into a fresh disposable git repository in the session scratchpad and committed there; nothing was committed in BrainFrog.
 
-Sanitized transcripts, `--check-report` outputs and `demo_summary.json` are in [`phase1d-live-evidence/`](phase1d-live-evidence/), with `<scratch>` and `<userprofile>` substituted for local paths. The full report bundles stay outside the repository, because their effective container configuration records host temp paths.
+Sanitized transcripts, `--check-report` outputs and `demo_summary.json` were written to the local-only directory `phase1d-live-evidence/`, with `<scratch>` and `<userprofile>` substituted for local paths. The directory is not in the repository; the files are identified by the SHA-256 values below and in [phase1d-commit-readiness.md](phase1d-commit-readiness.md). Phase 1E publishes equivalent evidence as CI artifacts ([phase1e-evidence-provenance.md](phase1e-evidence-provenance.md)). The full report bundles stay outside the repository, because their effective container configuration records host temp paths.
 
 ## Fixtures
 

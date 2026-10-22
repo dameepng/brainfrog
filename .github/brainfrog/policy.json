@@ -1,0 +1,86 @@
+{
+  "schema": "brainfrog.ci-policy/1e",
+  "description": "Trusted BrainFrog CI policy. Read only from the PR base revision; changes take effect after review and merge.",
+  "targets": [
+    {
+      "id": "fixture-login-app",
+      "path": "tests/fixtures/browser_app/correct",
+      "spec": ".github/brainfrog/specs/fixture-login-app.md",
+      "required_criteria": ["CI-01", "CI-02", "CI-03", "CI-04", "CI-05", "CI-06"]
+    }
+  ],
+  "python_image": {
+    "tag": "python:3.12-slim",
+    "repo_digest": "python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1"
+  },
+  "browser_image": {
+    "tag": "brainfrog-browser-runner:v1.64.0",
+    "dockerfile": "docker/browser-runner/Dockerfile",
+    "dockerfile_sha256": "b860f73e252ddef736b832b41737699ca5a590013caa9edc339e29944a0c884c",
+    "requirements_lock": "docker/browser-runner/requirements.lock",
+    "requirements_lock_sha256": "1654ad6fd6ff2369f46976da410ee83e5be0384c7b2b9a4bccf7b6a6c02b89ef"
+  },
+  "trusted_paths": [
+    ".github/workflows/brainfrog-verify.yml",
+    ".github/brainfrog/"
+  ],
+  "evidence_limits": {
+    "max_total_bytes": 52428800,
+    "max_files": 400,
+    "max_file_bytes": 10485760
+  },
+  "selftest": {
+    "module_timeout_seconds": 900,
+    "modules": [
+      "tests.test_ci_gate",
+      "tests.test_ci_workflow_security",
+      "tests.test_ci_linux_symlinks",
+      "tests.test_verifier_evidence_integrity",
+      "tests.test_verifier_test_result_semantics",
+      "tests.test_verifier_sandbox_execution",
+      "tests.test_verifier_phase1c_blockers",
+      "tests.test_verifier_docker_integration",
+      "tests.test_standalone_verifier",
+      "tests.test_verifier_execution_integrity",
+      "tests.test_verifier_browser_plan",
+      "tests.test_verifier_browser_security",
+      "tests.test_verifier_browser_evidence",
+      "tests.test_runtime_boundary",
+      "tests.test_git_guard",
+      "tests.test_phase6b_cli_verification",
+      "tests.test_pr_proof",
+      "tests.test_proof_discovery_ux",
+      "tests.test_proof_inspection_ux",
+      "tests.test_cli_runtime_unification",
+      "tests.test_cli_workspace_verification",
+      "tests.test_runtime_permissions"
+    ],
+    "required_passing_tests": [
+      "tests.test_verifier_phase1c_blockers.TestSnapshotBinding.test_symlink_escape_not_followed",
+      "tests.test_verifier_docker_integration.TestDockerIntegration.test_symlink_in_repository_is_not_followed",
+      "tests.test_ci_linux_symlinks.TestSnapshotSymlinks.test_file_symlink_outside_root_is_not_copied",
+      "tests.test_ci_linux_symlinks.TestSnapshotSymlinks.test_directory_symlink_outside_root_is_not_traversed",
+      "tests.test_ci_linux_symlinks.TestSnapshotSymlinks.test_broken_symlink_is_skipped",
+      "tests.test_ci_linux_symlinks.TestSnapshotSymlinks.test_nested_and_internal_symlinks_are_never_followed",
+      "tests.test_ci_linux_symlinks.TestReportCheckerSymlinks.test_evidence_file_symlink_escape_is_rejected",
+      "tests.test_ci_linux_symlinks.TestReportCheckerSymlinks.test_evidence_directory_symlink_escape_is_rejected",
+      "tests.test_ci_linux_symlinks.TestReportCheckerSymlinks.test_run_evidence_symlink_escape_is_rejected",
+      "tests.test_ci_linux_symlinks.TestSpecPathSymlinks.test_spec_symlink_outside_root_is_refused",
+      "tests.test_ci_linux_symlinks.TestSpecPathSymlinks.test_absolute_dotdot_spec_path_is_refused",
+      "tests.test_ci_linux_symlinks.TestGateSymlinks.test_candidate_target_symlink_is_blocked",
+      "tests.test_ci_linux_symlinks.TestGateSymlinks.test_bundle_hygiene_rejects_links",
+      "tests.test_ci_linux_symlinks.TestGateSymlinks.test_trusted_path_replaced_by_symlink_is_a_change",
+      "tests.test_ci_linux_symlinks.TestGateSymlinks.test_enforce_rejects_symlink_in_published_bundle"
+    ],
+    "quarantine": {
+      "tests.test_proof_inspection_ux": {
+        "reference": "Pre-existing REPL test debt: reproduced on a clean c78e798 export (phase1d-regression-signoff.md).",
+        "known_errors": [
+          "tests.test_proof_inspection_ux.TestProofInspectionUX.test_11_repl_proof_aliases",
+          "tests.test_proof_inspection_ux.TestVerifyProofCLISemantics.test_11_repl_proof_aliases"
+        ],
+        "signature_prefix": "StopIteration"
+      }
+    }
+  }
+}

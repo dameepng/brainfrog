@@ -944,8 +944,12 @@ class StandaloneVerifier:
         sandbox_backend: Optional[VerificationExecutionBackend] = None,
         default_app_profile: str = "python-static",
         browser_backend: Optional[DockerBrowserSandbox] = None,
+        spec_root: Optional[Path] = None,
     ) -> None:
         self.repo_dir = Path(repo_dir).resolve()
+        # Operator/API-only: directory the spec must live in. Defaults to the repository; CI passes the
+        # trusted checkout so a candidate repository cannot supply or weaken its own acceptance criteria.
+        self.spec_root = Path(spec_root).resolve() if spec_root else self.repo_dir
         self.timeout = float(timeout)
         self.authorization_reference = str(authorization_reference) if authorization_reference else None
         self.sandbox_mode = sandbox_mode
@@ -1006,21 +1010,20 @@ class StandaloneVerifier:
 
     def verify_spec(self, spec_path: Union[str, Path]) -> VerificationReport:
         """Execute independent acceptance verification against spec.md."""
-        target_path = Path(spec_path)
-        if not target_path.is_absolute():
-            target_path = (self.repo_dir / target_path).resolve()
+        # Resolve absolute paths too: a lexical check alone accepts '<root>/../x' and symlinks out of the root.
+        target_path = (self.spec_root / Path(spec_path)).resolve()
 
         # Path traversal guard
         try:
-            target_path.relative_to(self.repo_dir)
+            target_path.relative_to(self.spec_root)
         except ValueError:
-            raise PermissionError(f"Specification path '{spec_path}' traverses outside workspace '{self.repo_dir}'")
+            raise PermissionError(f"Specification path '{spec_path}' traverses outside workspace '{self.spec_root}'")
 
         if not target_path.is_file():
             raise FileNotFoundError(f"Specification file '{spec_path}' not found.")
 
         raw_spec_content = target_path.read_text(encoding="utf-8")
-        rel_spec_path = str(target_path.relative_to(self.repo_dir)).replace("\\", "/")
+        rel_spec_path = str(target_path.relative_to(self.spec_root)).replace("\\", "/")
         spec_doc = parse_spec_markdown(raw_spec_content, spec_path=rel_spec_path)
 
         # 1. Sample Git provenance & Pre-Execution Source Snapshot
