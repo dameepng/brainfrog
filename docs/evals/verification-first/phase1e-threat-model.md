@@ -7,7 +7,7 @@
 
 | # | Component | Trust | Source in CI | Why |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | **Verifier implementation** (`core/verifier.py`, `core/runtime/*`, `core/ci_gate.py`, `scripts/brainfrog_ci.py`) | Trusted | `trusted/` checkout at `pull_request.base.sha` | Candidate code must not judge itself. The PR's own copies are never imported. |
+| 1 | **Verifier implementation** (`core/verifier.py`, `core/runtime/*`, `core/ci_gate.py`, `scripts/brainfrog_ci.py`) | Trusted | `trusted/` checkout at the verified first parent of the tested merge (`core/ci_trust.py`); not the event's `base.sha`, which can be stale | Candidate code must not judge itself. The PR's own copies are never imported. |
 | 2 | **Workflow definition** (`.github/workflows/brainfrog-verify.yml`) | **Not trustworthy on its own** | PR merge commit | For `pull_request`, GitHub runs the workflow in the context of the merge commit (GitHub docs, "Events that trigger workflows"), so a PR can edit the job that judges it. See "Self-modification" below. |
 | 3 | **Acceptance policy and specs** (`.github/brainfrog/policy.json`, `specs/*.md`, `requirements-verifier.txt`) | Trusted | `trusted/` checkout | A PR cannot delete or weaken required criteria for its own run. Its edits are detected and force BLOCKED. |
 | 4 | **Candidate source** | Untrusted data | `candidate/` checkout at `GITHUB_SHA`, the merge commit | It is snapshotted and executed only in OCI containers (Phase 1C/1D). Nothing from it is imported or run on the host in the Verification job. |
