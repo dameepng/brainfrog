@@ -242,6 +242,34 @@ class Isolation(unittest.TestCase):
         self.assertEqual(cfg["labels"][BRAINFROG_OWNER_LABEL], BRAINFROG_OWNER_VALUE)
         self.assertEqual(cfg["labels"][BRAINFROG_RUN_LABEL], report.run_id)
 
+    def test_staged_harness_is_readable_but_not_modifiable_by_container_user(self) -> None:
+        # T1 (GitHub Linux): a 0700 staging dir made the harness unreadable to UID 65532. The candidate's own
+        # test, run by that harness, checks it can read it and cannot change, replace or add to it.
+        self.write("hprobe/__init__.py", "")
+        self.write("hprobe/test_harness_mount.py",
+                   "import os, unittest\n"
+                   "H = '/bf-harness/verification_harness.py'\n"
+                   "class T(unittest.TestCase):\n"
+                   "    def test_mount(self):\n"
+                   "        self.assertEqual((os.getuid(), os.getgid()), (65532, 65532))\n"
+                   "        with open(H, 'rb') as f:\n"
+                   "            self.assertTrue(f.read(64))\n"
+                   "        self.assertTrue(os.access('/bf-harness', os.R_OK | os.X_OK))\n"
+                   "        for target, mode in ((H, 'ab'), (H, 'wb'), ('/bf-harness/planted.py', 'wb')):\n"
+                   "            with self.assertRaises(OSError, msg=f'{target} {mode}'):\n"
+                   "                open(target, mode).close()\n"
+                   "        for action in (lambda: os.chmod(H, 0o777), lambda: os.remove(H),\n"
+                   "                       lambda: os.rename(H, '/bf-harness/x.py')):\n"
+                   "            with self.assertRaises(OSError):\n"
+                   "                action()\n")
+        report = self.verify(self.crit("HM-1", "python -m unittest hprobe.test_harness_mount"))
+        c = report.criteria[0]
+        self.assertEqual(c.status, CriterionStatus.PASS, f"{c.failure_reason}\n{(c.stderr or '')[-1500:]}")
+        self.assertEqual(c.test_count, 1)
+        self.assertEqual(c.effective_container_config["user"], "65532:65532")
+        harness_mounts = [m for m in c.effective_container_config["mounts"] if m["destination"] == "/bf-harness"]
+        self.assertEqual([m["rw"] for m in harness_mounts], [False])
+
     def test_symlink_in_repository_is_not_followed(self) -> None:
         # Symlinks are created inside the container-visible tree only if the host permits.
         target = self.tmp / "outside.txt"

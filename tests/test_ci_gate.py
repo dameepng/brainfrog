@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -387,6 +388,7 @@ class TestGateWithoutDocker(_TmpCase):
         self.assertEqual(meta["tested_sha"], tested_sha)
         self.assertEqual(meta["overall_verdict"], "BLOCKED")
         self.assertEqual(meta["provenance"]["kind"], "unsigned-ci-context")
+        self.assertEqual(meta["runtime_platform"]["sys_platform"], sys.platform)
 
     def test_wrong_image_identity_blocks(self) -> None:
         trusted, candidate, base_sha, tested_sha = make_trusted_and_candidate(self.tmp)
@@ -499,6 +501,78 @@ class TestSelftestQuarantine(unittest.TestCase):
             "tests.test_proof_inspection_ux.TestProofInspectionUX.test_11_repl_proof_aliases",
             "tests.test_proof_inspection_ux.TestVerifyProofCLISemantics.test_11_repl_proof_aliases",
         ])
+        # Windows-only baseline: both tests pass on GitHub-hosted Linux (T1), so Linux gets no exception.
+        self.assertEqual(q["tests.test_proof_inspection_ux"]["platforms"], ["win32"])
+
+    def test_quarantine_applies_only_on_its_declared_platforms(self) -> None:
+        entry = dict(self.Q, platforms=["win32"])
+        self.assertEqual(ci_gate.quarantine_for_platform(entry, "win32"), (entry, None))
+        self.assertEqual(ci_gate.quarantine_for_platform(entry, "linux"), ({}, None))
+        self.assertEqual(ci_gate.quarantine_for_platform(None, "linux"), ({}, None))
+
+    def test_quarantine_without_explicit_platforms_grants_nothing(self) -> None:
+        for bad in (self.Q, dict(self.Q, platforms=[]), dict(self.Q, platforms="win32"), dict(self.Q, platforms=[""])):
+            applicable, problem = ci_gate.quarantine_for_platform(bad, "win32")
+            self.assertEqual(applicable, {})
+            self.assertIn("platforms", problem)
+
+    def test_linux_requires_the_windows_baseline_tests_to_pass(self) -> None:
+        entry = dict(self.Q, platforms=["win32"])
+        erroring = {self.KNOWN[0]: "ERROR", self.KNOWN[1]: "ERROR"}
+        sigs = {k: "StopIteration" for k in self.KNOWN}
+        passing = {self.KNOWN[0]: "ok", self.KNOWN[1]: "ok"}
+        on = lambda plat: ci_gate.quarantine_for_platform(entry, plat)[0]
+        # Windows: only the exact, signature-matched baseline is tolerated; a pass must be reviewed.
+        self.assertEqual(self.check(erroring, sigs, q=on("win32")), [])
+        self.assertTrue(any("no longer errors" in p for p in self.check(passing, rc=0, q=on("win32"))))
+        # Linux: the same errors are ordinary failures, and passing is simply correct.
+        linux = self.check(erroring, sigs, q=on("linux"))
+        self.assertEqual(sum("unexpected ERROR" in p for p in linux), 2)
+        self.assertEqual(self.check(passing, rc=0, q=on("linux")), [])
+
+
+class TestSelftestRunPlatforms(_TmpCase):
+    """run_selftest end to end with a real interpreter: the platform, not the candidate, selects the exception."""
+
+    MODULE = "tests.test_quarantine_probe"
+    KNOWN = ["tests.test_quarantine_probe.T.test_alias_a", "tests.test_quarantine_probe.T.test_alias_b"]
+
+    def candidate(self, body: str) -> Path:
+        root = self.tmp / f"cand_{len(list(self.tmp.iterdir()))}"
+        (root / "tests").mkdir(parents=True)
+        (root / "tests" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "tests" / "test_quarantine_probe.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n"
+            f"    def test_alias_a(self):\n        {body}\n"
+            f"    def test_alias_b(self):\n        {body}\n", encoding="utf-8")
+        return root
+
+    def run_on(self, platform: str, body: str):
+        policy = {"selftest": {"modules": [self.MODULE], "required_passing_tests": [], "quarantine": {
+            self.MODULE: {"platforms": ["win32"], "known_errors": self.KNOWN, "signature_prefix": "StopIteration"}}}}
+        out = self.tmp / f"out_{platform}_{len(list(self.tmp.iterdir()))}"
+        rc = ci_gate.run_selftest(policy, self.candidate(body), out, sys.executable, platform=platform)
+        return rc, json.loads((out / "selftest-summary.json").read_text(encoding="utf-8"))
+
+    def test_windows_tolerates_only_the_exact_baseline(self) -> None:
+        rc, summary = self.run_on("win32", "raise StopIteration")
+        self.assertEqual((rc, summary["problems"]), (0, []))
+        self.assertEqual(summary["runtime_platform"]["sys_platform"], "win32")
+
+    def test_linux_fails_on_the_baseline_errors(self) -> None:
+        rc, summary = self.run_on("linux", "raise StopIteration")
+        self.assertEqual(rc, 1)
+        self.assertEqual(sum("unexpected ERROR" in p for p in summary["problems"]), 2)
+        self.assertEqual(summary["runtime_platform"]["sys_platform"], "linux")
+
+    def test_linux_passes_when_the_tests_pass(self) -> None:
+        rc, summary = self.run_on("linux", "pass")
+        self.assertEqual((rc, summary["problems"]), (0, []))
+
+    def test_windows_baseline_with_another_error_type_is_rejected(self) -> None:
+        rc, summary = self.run_on("win32", "raise KeyError('x')")
+        self.assertEqual(rc, 1)
+        self.assertTrue(any("changed signature" in p for p in summary["problems"]))
 
 
 class TestStepSummary(_TmpCase):

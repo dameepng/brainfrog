@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform as _platform
 import re
 import shutil
 import subprocess
@@ -618,7 +619,8 @@ def run_gate(trusted_root: Path, candidate_root: Path, out_dir: Path, event: Map
     work = out_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
     reasons: List[str] = []
-    metadata: Dict[str, Any] = {"schema": CI_METADATA_SCHEMA, "generated_at": _now()}
+    metadata: Dict[str, Any] = {"schema": CI_METADATA_SCHEMA, "generated_at": _now(),
+                                "runtime_platform": runtime_platform()}
     evaluations: List[Dict[str, Any]] = []
     policy: Optional[Dict[str, Any]] = None
     try:
@@ -845,7 +847,27 @@ def evaluate_selftest_module(module: str, parsed: Mapping[str, Any], returncode:
     return problems
 
 
-def run_selftest(policy: Mapping[str, Any], candidate_root: Path, out_dir: Path, python_exe: str) -> int:
+def runtime_platform(platform: str = sys.platform) -> Dict[str, str]:
+    """The host the gate or self-test actually ran on (recorded as evidence, never read from the event)."""
+    return {"sys_platform": platform, "os": _platform.system(), "release": _platform.release(),
+            "machine": _platform.machine(), "python": _platform.python_version()}
+
+
+def quarantine_for_platform(entry: Any, platform: str) -> Tuple[Dict[str, Any], Optional[str]]:
+    """The trusted quarantine entry that applies on `platform` (a sys.platform value), and a policy problem.
+
+    An entry must name its platforms explicitly; one that does not, or names another platform, grants no
+    exception, so every error on this platform stays a failure (and an unexpected pass is just a pass)."""
+    if not entry:
+        return {}, None
+    platforms = entry.get("platforms") if isinstance(entry, Mapping) else None
+    if not (isinstance(platforms, list) and platforms and all(isinstance(p, str) and p for p in platforms)):
+        return {}, "quarantine entry has no explicit 'platforms' list; no exception granted"
+    return (dict(entry), None) if platform in platforms else ({}, None)
+
+
+def run_selftest(policy: Mapping[str, Any], candidate_root: Path, out_dir: Path, python_exe: str,
+                 platform: str = sys.platform) -> int:
     cfg = policy.get("selftest") or {}
     modules = cfg.get("modules") or []
     required_ok = cfg.get("required_passing_tests") or []
@@ -859,7 +881,7 @@ def run_selftest(policy: Mapping[str, Any], candidate_root: Path, out_dir: Path,
            if not re.search(r"TOKEN|SECRET|KEY|PASS|AUTH|CREDENTIAL", k.upper())
            and not k.upper().startswith(("GITHUB_", "ACTIONS_", "RUNNER_", "INPUT_"))}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    summary: Dict[str, Any] = {"modules": {}, "problems": []}
+    summary: Dict[str, Any] = {"runtime_platform": runtime_platform(platform), "modules": {}, "problems": []}
     timeout = float(cfg.get("module_timeout_seconds", 900))
     for mod in modules:
         try:
@@ -872,7 +894,10 @@ def run_selftest(policy: Mapping[str, Any], candidate_root: Path, out_dir: Path,
         (out_dir / f"{mod}.stderr.log").write_text(safe_scrub(stderr), encoding="utf-8")
         (out_dir / f"{mod}.stdout.log").write_text(safe_scrub(stdout), encoding="utf-8")
         parsed = parse_unittest_verbose(stderr)
-        problems = evaluate_selftest_module(mod, parsed, rc, required_ok, quarantine.get(mod) or {})
+        applicable, policy_problem = quarantine_for_platform(quarantine.get(mod), platform)
+        problems = evaluate_selftest_module(mod, parsed, rc, required_ok, applicable)
+        if policy_problem:
+            problems.append(f"{mod}: {policy_problem}")
         counts: Dict[str, int] = {}
         for res in parsed["results"].values():
             counts[res] = counts.get(res, 0) + 1

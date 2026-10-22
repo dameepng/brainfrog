@@ -40,6 +40,7 @@
       "tests.test_verifier_sandbox_execution",
       "tests.test_verifier_phase1c_blockers",
       "tests.test_verifier_docker_integration",
+      "tests.test_sandbox_harness_staging",
       "tests.test_standalone_verifier",
       "tests.test_verifier_execution_integrity",
       "tests.test_verifier_browser_plan",
@@ -56,6 +57,8 @@
       "tests.test_runtime_permissions"
     ],
     "required_passing_tests": [
+      "tests.test_verifier_docker_integration.TestDockerIntegration.test_staged_harness_is_readable_but_not_modifiable_by_container_user",
+      "tests.test_sandbox_harness_staging.TestHarnessStaging.test_container_staging_is_readable_by_other_and_writable_by_nobody_else",
       "tests.test_verifier_phase1c_blockers.TestSnapshotBinding.test_symlink_escape_not_followed",
       "tests.test_verifier_docker_integration.TestDockerIntegration.test_symlink_in_repository_is_not_followed",
       "tests.test_ci_linux_symlinks.TestSnapshotSymlinks.test_file_symlink_outside_root_is_not_copied",
@@ -74,7 +77,8 @@
     ],
     "quarantine": {
       "tests.test_proof_inspection_ux": {
-        "reference": "Pre-existing REPL test debt: reproduced on a clean c78e798 export (phase1d-regression-signoff.md).",
+        "reference": "Pre-existing REPL test debt: reproduced on a clean c78e798 export on Windows (phase1d-regression-signoff.md). Both tests pass on GitHub-hosted Linux (T1 run 39705364940), so on Linux they must pass.",
+        "platforms": ["win32"],
         "known_errors": [
           "tests.test_proof_inspection_ux.TestProofInspectionUX.test_11_repl_proof_aliases",
           "tests.test_proof_inspection_ux.TestVerifyProofCLISemantics.test_11_repl_proof_aliases"
