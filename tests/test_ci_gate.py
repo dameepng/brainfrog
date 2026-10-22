@@ -6,15 +6,19 @@ inspection seam. Real-container runs of the same gate are in test_ci_gate_live.p
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
 import re
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from core import ci_gate
+from core import ci_gate, ci_trust
 from core.ci_gate import (
     EVIDENCE_DIRNAME,
     PolicyError,
@@ -32,8 +36,9 @@ from core.ci_gate import (
     verify_evidence_bundle,
     write_step_summary,
 )
+from core.ci_trust import resolve_trusted_base
 from tests.ci_gate_helpers import (
-    ci_env,
+    advance_base_branch,
     commit_all,
     git,
     load_event,
@@ -66,7 +71,8 @@ class _TmpCase(unittest.TestCase):
 class TestTrustedPolicy(_TmpCase):
     def setUp(self) -> None:
         super().setUp()
-        self.trusted, self.candidate, self.base_sha, self.tested_sha = make_trusted_and_candidate(self.tmp)
+        self.repos = make_trusted_and_candidate(self.tmp)
+        self.trusted, self.candidate, self.base_sha, self.tested_sha = self.repos[:4]
 
     def test_committed_policy_is_valid_and_digest_is_byte_exact(self) -> None:
         policy, digest = load_policy(self.trusted)
@@ -100,8 +106,8 @@ class TestTrustedPolicy(_TmpCase):
 
     def test_missing_policy_blocks_the_gate(self) -> None:
         (self.trusted / ".github/brainfrog/policy.json").unlink()
-        decision = run_gate(self.trusted, self.candidate, self.tmp / "out", load_event("pull_request_valid.json"),
-                            ci_env(self.tested_sha), docker=MISSING_DOCKER)
+        decision = run_gate(self.trusted, self.candidate, self.tmp / "out", self.repos.event(), self.repos.env(),
+                            docker=MISSING_DOCKER, base_root=self.repos.base)
         self.assertEqual(decision["outcome"], "blocked")
         self.assertTrue(any("trusted policy" in r for r in decision["reasons"]))
         self.assertEqual(enforce(self.tmp / "out"), 2)
@@ -110,26 +116,30 @@ class TestTrustedPolicy(_TmpCase):
 class TestIdentityBinding(_TmpCase):
     def setUp(self) -> None:
         super().setUp()
-        self.trusted, self.candidate, self.base_sha, self.tested_sha = make_trusted_and_candidate(self.tmp)
+        self.repos = make_trusted_and_candidate(self.tmp)
+        self.trusted, self.candidate, self.base_sha, self.tested_sha = self.repos[:4]
 
-    def identity(self, event_name="pull_request_valid.json", **kw):
-        event = load_event(event_name, base_sha=self.base_sha, **({"head_sha": self.tested_sha} | kw))
-        return collect_identity(event, ci_env(self.tested_sha), self.trusted, self.candidate)
+    def identity(self, event_name="pull_request_valid.json", env=None, trusted=None, **kw):
+        return collect_identity(self.repos.event(event_name, **kw), env or self.repos.env(),
+                                trusted or self.trusted, self.candidate, self.repos.base)
 
     def test_valid_pull_request_binds_tested_head_and_base(self) -> None:
         ident = self.identity()
         self.assertEqual(ident["problems"], [])
         self.assertEqual(ident["tested_sha"], self.tested_sha)
         self.assertEqual(ident["trusted_verifier_revision"], self.base_sha)
+        self.assertEqual(ident["trusted_base"]["trusted_base_sha"], self.base_sha)
+        self.assertEqual(ident["trusted_base"]["merge_parents"], [self.base_sha, self.repos.head_sha])
+        self.assertFalse(ident["trusted_base"]["event_base_sha_is_stale"])
         self.assertEqual(ident["pull_request_number"], 7)
         self.assertEqual((ident["workflow_run_id"], ident["workflow_run_attempt"]), (987654321, 1))
         self.assertFalse(ident["is_fork_pull_request"])
 
     def test_merge_commit_is_reported_as_tested_not_as_pr_head(self) -> None:
-        ident = self.identity(head_sha="3" * 40)  # GitHub tested its synthetic merge commit
+        ident = self.identity()  # GitHub tested its synthetic merge commit
         self.assertEqual(ident["problems"], [])
         self.assertEqual(ident["tested_sha"], self.tested_sha)
-        self.assertEqual(ident["head_sha"], "3" * 40)
+        self.assertEqual(ident["head_sha"], self.repos.head_sha)
         self.assertFalse(ident["tested_sha_is_pr_head"])
 
     def test_fork_pull_request_is_recorded(self) -> None:
@@ -148,36 +158,234 @@ class TestIdentityBinding(_TmpCase):
 
     def test_missing_head_sha_blocks(self) -> None:
         event = load_event("pull_request_missing_head_sha.json", base_sha=self.base_sha)
-        ident = collect_identity(event, ci_env(self.tested_sha), self.trusted, self.candidate)
+        ident = collect_identity(event, self.repos.env(), self.trusted, self.candidate, self.repos.base)
         self.assertTrue(any("pull_request.head.sha" in p for p in ident["problems"]))
 
     def test_unexpected_checkout_sha_blocks(self) -> None:
-        event = load_event("pull_request_valid.json", base_sha=self.base_sha, head_sha=self.tested_sha)
-        ident = collect_identity(event, ci_env("4" * 40), self.trusted, self.candidate)
+        ident = self.identity(env=self.repos.env("4" * 40))
         self.assertTrue(any("candidate checkout is at" in p for p in ident["problems"]))
 
-    def test_trusted_checkout_must_be_the_pr_base(self) -> None:
-        event = load_event("pull_request_valid.json", base_sha="5" * 40, head_sha=self.tested_sha)
-        ident = collect_identity(event, ci_env(self.tested_sha), self.trusted, self.candidate)
-        self.assertTrue(any("not the PR base revision" in p for p in ident["problems"]))
+    def test_trusted_checkout_must_be_the_verified_merge_base(self) -> None:
+        # The trusted side checked out at the merge (or anything but its verified first parent) is refused.
+        ident = self.identity(trusted=self.candidate)
+        self.assertTrue(any("not the verified merge base" in p for p in ident["problems"]))
 
     def test_non_pull_request_event_blocks(self) -> None:
-        event = load_event("pull_request_valid.json", base_sha=self.base_sha, head_sha=self.tested_sha)
-        ident = collect_identity(event, ci_env(self.tested_sha, event_name="pull_request_target"),
-                                 self.trusted, self.candidate)
+        ident = self.identity(env=self.repos.env(event_name="pull_request_target"))
         self.assertTrue(any("unsupported event" in p for p in ident["problems"]))
 
     def test_rerun_records_the_new_attempt(self) -> None:
-        event = load_event("pull_request_valid.json", base_sha=self.base_sha, head_sha=self.tested_sha)
-        ident = collect_identity(event, ci_env(self.tested_sha, run_attempt=3), self.trusted, self.candidate)
+        ident = self.identity(env=self.repos.env(run_attempt=3))
         self.assertEqual(ident["workflow_run_attempt"], 3)
         self.assertEqual(ident["problems"], [])
+
+
+class TestTrustedBaseResolution(_TmpCase):
+    """T1 retest (run 39731332404): the event's base.sha was stale after the base branch moved, so the old
+    trusted verifier judged a merge built on the new base. The trusted revision is the merge's verified
+    first parent; the event base.sha is only a diagnostic."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repos = make_trusted_and_candidate(self.tmp)
+
+    def resolve(self, event=None, env=None, candidate=None, base="default"):
+        return resolve_trusted_base(event or self.repos.event(), env or self.repos.env(),
+                                    candidate or self.repos.candidate, self.repos.base if base == "default" else base)
+
+    def _event_with_base_ref(self, ref):
+        event = self.repos.event()
+        event["pull_request"]["base"]["ref"] = ref
+        return event
+
+    def _test_merge(self, first_parent: str, *others: str) -> str:
+        """Build a merge in upstream and make it the candidate checkout (what GitHub would test)."""
+        up = self.repos.upstream
+        git(up, "checkout", "-q", "--detach", first_parent)
+        git(up, "merge", "-q", "--no-ff", "-m", "test merge", *others)
+        merge = git(up, "rev-parse", "HEAD")
+        git(up, "checkout", "-q", "main")
+        git(self.repos.candidate, "fetch", "-q", "origin", merge)
+        git(self.repos.candidate, "checkout", "-q", "--detach", merge)
+        return merge
+
+    def test_fresh_event_base_sha_resolves_to_the_merge_first_parent(self) -> None:
+        r = self.resolve()
+        self.assertEqual(r["problems"], [])
+        self.assertEqual(r["trusted_base_sha"], self.repos.base_sha)
+        self.assertTrue(r["trusted_base_is_branch_tip"])
+        self.assertFalse(r["event_base_sha_is_stale"])
+
+    def test_stale_event_base_sha_uses_the_verified_updated_parent(self) -> None:
+        # The T1 retest shape: the merge is built on the current base, the event still names an older base.
+        old_base = self.repos.base_sha
+        new_base = advance_base_branch(self.repos, "hotfix on the base branch")
+        merge = self._test_merge(new_base, "pr-head")
+        r = self.resolve(event=self.repos.event(base_sha=old_base), env=self.repos.env(merge))
+        self.assertEqual(r["problems"], [])
+        self.assertEqual(r["trusted_base_sha"], new_base)
+        self.assertEqual(r["merge_parents"], [new_base, self.repos.head_sha])
+        self.assertTrue(r["event_base_sha_is_stale"])
+        self.assertEqual(r["event_base_sha"], old_base)
+        # The trusted gate accepts a trusted checkout at the new base and refuses the stale event revision.
+        git(self.repos.trusted, "fetch", "-q", "origin")
+        git(self.repos.trusted, "checkout", "-q", "--detach", new_base)
+        event, env = self.repos.event(base_sha=old_base), self.repos.env(merge)
+        ident = collect_identity(event, env, self.repos.trusted, self.repos.candidate, self.repos.base)
+        self.assertEqual(ident["problems"], [])
+        self.assertEqual(ident["trusted_verifier_revision"], new_base)
+        self.assertEqual(ident["base_sha"], old_base, "the event value is recorded as given")
+        git(self.repos.trusted, "checkout", "-q", "--detach", old_base)
+        ident = collect_identity(event, env, self.repos.trusted, self.repos.candidate, self.repos.base)
+        self.assertTrue(any(f"not the verified merge base {new_base}" in p for p in ident["problems"]))
+
+    def test_base_branch_moving_after_the_merge_keeps_its_first_parent(self) -> None:
+        tip = advance_base_branch(self.repos)
+        r = self.resolve()
+        self.assertEqual(r["problems"], [])
+        self.assertEqual(r["trusted_base_sha"], self.repos.base_sha)
+        self.assertEqual(r["base_branch_tip"], tip)
+        self.assertFalse(r["trusted_base_is_branch_tip"])
+
+    def test_missing_or_unreadable_merge_commit_blocks(self) -> None:
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        r = self.resolve(candidate=empty)
+        self.assertIsNone(r["trusted_base_sha"])
+        self.assertTrue(any("candidate checkout HEAD could not be read" in p for p in r["problems"]))
+
+    def test_non_merge_revision_blocks(self) -> None:
+        # A run on the PR head itself (one parent) is not GitHub's PR merge.
+        git(self.repos.candidate, "checkout", "-q", "--detach", self.repos.head_sha)
+        r = self.resolve(env=self.repos.env(self.repos.head_sha))
+        self.assertIsNone(r["trusted_base_sha"])
+        self.assertTrue(any("has 1 parent(s)" in p for p in r["problems"]))
+
+    def test_octopus_merge_blocks(self) -> None:
+        up = self.repos.upstream
+        git(up, "checkout", "-q", "-b", "extra", self.repos.base_sha)
+        (up / "extra.txt").write_text("extra\n", encoding="utf-8")
+        commit_all(up, "extra")
+        octopus = self._test_merge(self.repos.base_sha, "pr-head", "extra")
+        r = self.resolve(env=self.repos.env(octopus))
+        self.assertIsNone(r["trusted_base_sha"])
+        self.assertTrue(any("has 3 parent(s)" in p for p in r["problems"]))
+
+    def test_wrong_pr_head_parent_blocks(self) -> None:
+        r = self.resolve(event=self.repos.event(head_sha="3" * 40))
+        self.assertIsNone(r["trusted_base_sha"])
+        self.assertTrue(any("is not the PR head" in p for p in r["problems"]))
+
+    def test_wrong_repository_or_base_branch_blocks(self) -> None:
+        cases = {
+            "other repository": (self.repos.event(), self.repos.env(repository="attacker/brainfrog"),
+                                 "pull_request.base.repo is not this repository"),
+            "other base branch": (self.repos.event(), dict(self.repos.env(), GITHUB_BASE_REF="release"),
+                                  "GITHUB_BASE_REF disagrees"),
+            "not the PR merge ref": (self.repos.event(), dict(self.repos.env(), GITHUB_REF="refs/heads/main"),
+                                     "not testing GitHub's PR merge"),
+            "hostile base ref": (self._event_with_base_ref("main;id"), self.repos.env(),
+                                 "not a plain branch name"),
+            "traversal base ref": (self._event_with_base_ref("../main"), self.repos.env(),
+                                   "not a plain branch name"),
+        }
+        for label, (event, env, expected) in cases.items():
+            with self.subTest(label):
+                r = self.resolve(event=event, env=env)
+                self.assertIsNone(r["trusted_base_sha"])
+                self.assertTrue(any(expected in p for p in r["problems"]), r["problems"])
+
+    def test_base_checkout_from_another_repository_blocks(self) -> None:
+        r = self.resolve(env=dict(self.repos.env(), GITHUB_SERVER_URL="https://github.example"))
+        self.assertIsNone(r["trusted_base_sha"])
+        self.assertTrue(any("not fetched from this repository" in p for p in r["problems"]))
+
+    def test_base_checkout_on_another_branch_blocks(self) -> None:
+        git(self.repos.base, "checkout", "-q", "-b", "elsewhere")
+        r = self.resolve()
+        self.assertIsNone(r["trusted_base_sha"])
+        self.assertTrue(any("not on the PR base branch" in p for p in r["problems"]))
+
+    def test_falsified_first_parent_not_on_the_base_branch_blocks(self) -> None:
+        # A merge whose first parent never was on main (e.g. a branch the PR author controls).
+        up = self.repos.upstream
+        git(up, "checkout", "-q", "-b", "forged-base", self.repos.base_sha)
+        (up / "weakened.txt").write_text("weakened verifier\n", encoding="utf-8")
+        forged = commit_all(up, "forged base")
+        merge = self._test_merge(forged, "pr-head")
+        git(self.repos.base, "fetch", "-q", "origin")  # the forged commit object is present, but not on main
+        r = self.resolve(env=self.repos.env(merge))
+        self.assertIsNone(r["trusted_base_sha"])
+        self.assertTrue(any(f"merge first parent {forged} is not on base branch 'main'" in p for p in r["problems"]))
+
+    def test_first_parent_absent_from_base_history_blocks(self) -> None:
+        unknown = "5" * 40
+        self.assertIsNone(ci_trust.is_ancestor(self.repos.base, unknown, self.repos.base_sha))
+        with patch.object(ci_trust, "commit_parents", return_value=[unknown, self.repos.head_sha]):
+            r = self.resolve()
+        self.assertIsNone(r["trusted_base_sha"])
+        self.assertTrue(any("is not a commit of the base branch history" in p for p in r["problems"]))
+
+    def test_no_base_checkout_blocks(self) -> None:
+        r = self.resolve(base=None)
+        self.assertIsNone(r["trusted_base_sha"])
+        self.assertTrue(any("no base-branch checkout" in p for p in r["problems"]))
+
+    def test_resolve_cli_writes_only_a_verified_sha_to_the_step_output(self) -> None:
+        event_path, out = self.tmp / "event.json", self.tmp / "github_output"
+        event_path.write_text(json.dumps(self.repos.event()), encoding="utf-8")
+        env = dict(self.repos.env(), GITHUB_EVENT_PATH=str(event_path), GITHUB_OUTPUT=str(out))
+        argv = ["resolve", "--candidate", str(self.repos.candidate), "--base", str(self.repos.base)]
+        with patch.dict(os.environ, env), redirect_stdout(io.StringIO()):
+            self.assertEqual(ci_trust.main(argv), 0)
+        self.assertEqual(out.read_text(encoding="utf-8"), f"trusted-sha={self.repos.base_sha}\n")
+        out.unlink()
+        with patch.dict(os.environ, dict(env, GITHUB_SHA="4" * 40)), redirect_stdout(io.StringIO()):
+            self.assertEqual(ci_trust.main(argv), 2)
+        self.assertFalse(out.exists(), "no trusted-sha output when verification fails")
+
+    def test_gate_records_both_identities_and_the_policy_digest(self) -> None:
+        old_base = self.repos.base_sha
+        new_base = advance_base_branch(self.repos, "hotfix on the base branch")
+        merge = self._test_merge(new_base, "pr-head")
+        git(self.repos.trusted, "fetch", "-q", "origin")
+        git(self.repos.trusted, "checkout", "-q", "--detach", new_base)
+        decision = run_gate(self.repos.trusted, self.repos.candidate, self.tmp / "out",
+                            self.repos.event(base_sha=old_base), self.repos.env(merge),
+                            docker=MISSING_DOCKER, base_root=self.repos.base)
+        meta = json.loads((self.tmp / "out" / EVIDENCE_DIRNAME / "ci-metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(decision["outcome"], "blocked")  # no Docker here; the identity itself is clean
+        self.assertFalse(any(r.startswith("identity:") for r in decision["reasons"]), decision["reasons"])
+        self.assertEqual(meta["tested_sha"], merge)
+        self.assertEqual(meta["trusted_verifier_revision"], new_base)
+        self.assertEqual(meta["base_sha"], old_base)
+        self.assertEqual(meta["trusted_base"]["merge_parents"], [new_base, self.repos.head_sha])
+        self.assertTrue(meta["trusted_base"]["event_base_sha_is_stale"])
+        self.assertEqual(meta["trusted_policy_digest"], load_policy(self.repos.trusted)[1])
+
+    def test_gate_without_base_checkout_is_blocked(self) -> None:
+        decision = run_gate(self.repos.trusted, self.repos.candidate, self.tmp / "out", self.repos.event(),
+                            self.repos.env(), docker=MISSING_DOCKER)
+        self.assertTrue(any("identity: trusted base: no base-branch checkout" in r for r in decision["reasons"]))
+
+    def test_selftest_does_not_run_candidate_tests_against_an_unverified_trusted_side(self) -> None:
+        ident = collect_identity(self.repos.event(), self.repos.env(), self.repos.candidate, self.repos.candidate,
+                                 self.repos.base)  # trusted side = the merge itself
+        self.assertTrue(ident["problems"])
+        policy = {"selftest": {"modules": ["tests.test_never_runs"], "required_passing_tests": []}}
+        with patch.object(ci_gate.subprocess, "run") as run, redirect_stdout(io.StringIO()):
+            rc = ci_gate.run_selftest(policy, self.repos.candidate, self.tmp / "st", sys.executable, identity=ident)
+        run.assert_not_called()
+        self.assertEqual(rc, 2)
+        summary = json.loads((self.tmp / "st" / "selftest-summary.json").read_text(encoding="utf-8"))
+        self.assertTrue(any("not the verified merge base" in p for p in summary["problems"]))
+        self.assertEqual(summary["identity"]["tested_sha"], self.repos.tested_sha)
 
 
 class TestTrustedConfigChanges(_TmpCase):
     def setUp(self) -> None:
         super().setUp()
-        self.trusted, self.candidate, _, _ = make_trusted_and_candidate(self.tmp)
+        self.trusted, self.candidate = make_trusted_and_candidate(self.tmp)[:2]
         self.policy, _ = load_policy(self.trusted)
 
     def test_identical_trusted_paths_are_not_changes(self) -> None:
@@ -374,10 +582,11 @@ class TestGateWithoutDocker(_TmpCase):
     """Case E: no Docker capability -> BLOCKED, no criterion executes, no host fallback."""
 
     def test_missing_docker_blocks_without_host_execution(self) -> None:
-        trusted, candidate, base_sha, tested_sha = make_trusted_and_candidate(self.tmp)
-        event = load_event("pull_request_valid.json", base_sha=base_sha, head_sha=tested_sha)
+        repos = make_trusted_and_candidate(self.tmp)
+        trusted, candidate, tested_sha = repos.trusted, repos.candidate, repos.tested_sha
         with patch.object(ci_gate, "run_targets") as run_targets:
-            decision = run_gate(trusted, candidate, self.tmp / "out", event, ci_env(tested_sha), docker=MISSING_DOCKER)
+            decision = run_gate(trusted, candidate, self.tmp / "out", repos.event(), repos.env(),
+                                docker=MISSING_DOCKER, base_root=repos.base)
         run_targets.assert_not_called()
         self.assertEqual(decision["outcome"], "blocked")
         self.assertTrue(any("Docker engine unavailable" in r for r in decision["reasons"]))
@@ -387,9 +596,10 @@ class TestGateWithoutDocker(_TmpCase):
         self.assertEqual(meta["tested_sha"], tested_sha)
         self.assertEqual(meta["overall_verdict"], "BLOCKED")
         self.assertEqual(meta["provenance"]["kind"], "unsigned-ci-context")
+        self.assertEqual(meta["runtime_platform"]["sys_platform"], sys.platform)
 
     def test_wrong_image_identity_blocks(self) -> None:
-        trusted, candidate, base_sha, tested_sha = make_trusted_and_candidate(self.tmp)
+        trusted = make_trusted_and_candidate(self.tmp).trusted
         policy, _ = load_policy(trusted)
         fake = {
             ("version",): "29.0.0",
@@ -407,7 +617,7 @@ class TestGateWithoutDocker(_TmpCase):
         self.assertTrue(any("pinned registry digest" in p for p in images["problems"]))
 
     def test_tampered_trusted_recipe_blocks(self) -> None:
-        trusted, _, _, _ = make_trusted_and_candidate(self.tmp)
+        trusted = make_trusted_and_candidate(self.tmp).trusted
         policy, _ = load_policy(trusted)
         (trusted / "docker/browser-runner/Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
         with patch.object(ci_gate, "_docker_json", return_value=(None, "no docker")):
@@ -419,7 +629,7 @@ class TestGateWithoutDocker(_TmpCase):
         self.assertTrue(any("does not match its pinned sha256" in p for p in images["problems"]))
 
     def test_provisioning_refuses_to_run_outside_github_actions(self) -> None:
-        trusted, _, _, _ = make_trusted_and_candidate(self.tmp)
+        trusted = make_trusted_and_candidate(self.tmp).trusted
         policy, _ = load_policy(trusted)
         with patch.object(ci_gate, "_run_bounded") as bounded:
             problems = provision_images(policy, trusted, {"GITHUB_ACTIONS": "false"})
@@ -427,7 +637,7 @@ class TestGateWithoutDocker(_TmpCase):
         self.assertTrue(problems)
 
     def test_required_criterion_absent_from_trusted_spec_never_runs(self) -> None:
-        trusted, candidate, base_sha, tested_sha = make_trusted_and_candidate(self.tmp)
+        trusted, candidate = make_trusted_and_candidate(self.tmp)[:2]
         policy, _ = load_policy(trusted)
         policy["targets"][0]["required_criteria"].append("CI-99")
         runs = ci_gate.run_targets(policy, trusted, candidate, self.tmp / "work", {"browser": {"image_id": "x"}},
@@ -499,6 +709,78 @@ class TestSelftestQuarantine(unittest.TestCase):
             "tests.test_proof_inspection_ux.TestProofInspectionUX.test_11_repl_proof_aliases",
             "tests.test_proof_inspection_ux.TestVerifyProofCLISemantics.test_11_repl_proof_aliases",
         ])
+        # Windows-only baseline: both tests pass on GitHub-hosted Linux (T1), so Linux gets no exception.
+        self.assertEqual(q["tests.test_proof_inspection_ux"]["platforms"], ["win32"])
+
+    def test_quarantine_applies_only_on_its_declared_platforms(self) -> None:
+        entry = dict(self.Q, platforms=["win32"])
+        self.assertEqual(ci_gate.quarantine_for_platform(entry, "win32"), (entry, None))
+        self.assertEqual(ci_gate.quarantine_for_platform(entry, "linux"), ({}, None))
+        self.assertEqual(ci_gate.quarantine_for_platform(None, "linux"), ({}, None))
+
+    def test_quarantine_without_explicit_platforms_grants_nothing(self) -> None:
+        for bad in (self.Q, dict(self.Q, platforms=[]), dict(self.Q, platforms="win32"), dict(self.Q, platforms=[""])):
+            applicable, problem = ci_gate.quarantine_for_platform(bad, "win32")
+            self.assertEqual(applicable, {})
+            self.assertIn("platforms", problem)
+
+    def test_linux_requires_the_windows_baseline_tests_to_pass(self) -> None:
+        entry = dict(self.Q, platforms=["win32"])
+        erroring = {self.KNOWN[0]: "ERROR", self.KNOWN[1]: "ERROR"}
+        sigs = {k: "StopIteration" for k in self.KNOWN}
+        passing = {self.KNOWN[0]: "ok", self.KNOWN[1]: "ok"}
+        on = lambda plat: ci_gate.quarantine_for_platform(entry, plat)[0]
+        # Windows: only the exact, signature-matched baseline is tolerated; a pass must be reviewed.
+        self.assertEqual(self.check(erroring, sigs, q=on("win32")), [])
+        self.assertTrue(any("no longer errors" in p for p in self.check(passing, rc=0, q=on("win32"))))
+        # Linux: the same errors are ordinary failures, and passing is simply correct.
+        linux = self.check(erroring, sigs, q=on("linux"))
+        self.assertEqual(sum("unexpected ERROR" in p for p in linux), 2)
+        self.assertEqual(self.check(passing, rc=0, q=on("linux")), [])
+
+
+class TestSelftestRunPlatforms(_TmpCase):
+    """run_selftest end to end with a real interpreter: the platform, not the candidate, selects the exception."""
+
+    MODULE = "tests.test_quarantine_probe"
+    KNOWN = ["tests.test_quarantine_probe.T.test_alias_a", "tests.test_quarantine_probe.T.test_alias_b"]
+
+    def candidate(self, body: str) -> Path:
+        root = self.tmp / f"cand_{len(list(self.tmp.iterdir()))}"
+        (root / "tests").mkdir(parents=True)
+        (root / "tests" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "tests" / "test_quarantine_probe.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n"
+            f"    def test_alias_a(self):\n        {body}\n"
+            f"    def test_alias_b(self):\n        {body}\n", encoding="utf-8")
+        return root
+
+    def run_on(self, platform: str, body: str):
+        policy = {"selftest": {"modules": [self.MODULE], "required_passing_tests": [], "quarantine": {
+            self.MODULE: {"platforms": ["win32"], "known_errors": self.KNOWN, "signature_prefix": "StopIteration"}}}}
+        out = self.tmp / f"out_{platform}_{len(list(self.tmp.iterdir()))}"
+        rc = ci_gate.run_selftest(policy, self.candidate(body), out, sys.executable, platform=platform)
+        return rc, json.loads((out / "selftest-summary.json").read_text(encoding="utf-8"))
+
+    def test_windows_tolerates_only_the_exact_baseline(self) -> None:
+        rc, summary = self.run_on("win32", "raise StopIteration")
+        self.assertEqual((rc, summary["problems"]), (0, []))
+        self.assertEqual(summary["runtime_platform"]["sys_platform"], "win32")
+
+    def test_linux_fails_on_the_baseline_errors(self) -> None:
+        rc, summary = self.run_on("linux", "raise StopIteration")
+        self.assertEqual(rc, 1)
+        self.assertEqual(sum("unexpected ERROR" in p for p in summary["problems"]), 2)
+        self.assertEqual(summary["runtime_platform"]["sys_platform"], "linux")
+
+    def test_linux_passes_when_the_tests_pass(self) -> None:
+        rc, summary = self.run_on("linux", "pass")
+        self.assertEqual((rc, summary["problems"]), (0, []))
+
+    def test_windows_baseline_with_another_error_type_is_rejected(self) -> None:
+        rc, summary = self.run_on("win32", "raise KeyError('x')")
+        self.assertEqual(rc, 1)
+        self.assertTrue(any("changed signature" in p for p in summary["problems"]))
 
 
 class TestStepSummary(_TmpCase):

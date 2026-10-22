@@ -821,7 +821,10 @@ class TestResidualRiskCustomPathClosure:
             )
             assert is_allowed is True
             assert canonical == "python"
-            assert resolved == str(Path(os.path.realpath(sys.executable)))
+            # Executes the running interpreter as launched (a POSIX venv's bin/python is a
+            # symlink; its realpath would leave the venv), with the same canonical identity.
+            assert resolved == os.path.abspath(sys.executable)
+            assert os.path.realpath(resolved) == os.path.realpath(sys.executable)
 
     def test_caller_supplied_python_path_and_injection_vars_scrubbed(
         self, tmp_path: Path

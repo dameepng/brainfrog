@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "brainfrog-verify.yml"
@@ -56,19 +56,77 @@ def copy_repo_files(dest: Path, rels: Iterable[str]) -> None:
         shutil.copyfile(REPO_ROOT / rel, dest / rel)
 
 
-def make_trusted_and_candidate(base: Path, with_fixture: Optional[str] = "correct") -> Tuple[Path, Path, str, str]:
-    """A trusted repo (policy/spec/recipe/workflow) and a candidate repo carrying identical trusted files
-    plus the fixture app at the policy target path. Returns (trusted, candidate, base_sha, tested_sha)."""
-    trusted = init_repo(base / "trusted")
-    copy_repo_files(trusted, TRUSTED_FILES)
-    base_sha = commit_all(trusted, "trusted base")
-    candidate = init_repo(base / "candidate")
-    copy_repo_files(candidate, TRUSTED_FILES)
-    if with_fixture:
-        shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "browser_app" / with_fixture,
-                        candidate / "tests" / "fixtures" / "browser_app" / "correct")
-    tested_sha = commit_all(candidate, "candidate")
-    return trusted, candidate, base_sha, tested_sha
+REPOSITORY = "dameepng/brainfrog"
+BASE_BRANCH = "main"  # pull_request.base.ref in the event fixtures
+
+
+class CiRepos(NamedTuple):
+    """The checkouts of a simulated pull_request run, laid out like GitHub's.
+
+    upstream (<server_url>/dameepng/brainfrog): branch main at base_sha, a PR branch at head_sha and the
+    synthetic merge tested_sha = merge(base_sha, head_sha), parents in that order (refs/pull/N/merge).
+    trusted: detached at base_sha. candidate: detached at tested_sha. base: a full clone of main."""
+    trusted: Path
+    candidate: Path
+    base_sha: str
+    tested_sha: str
+    head_sha: str
+    base: Path
+    upstream: Path
+    server_url: str
+
+    def event(self, name: str = "pull_request_valid.json", **overrides: Any) -> Dict[str, Any]:
+        return load_event(name, **({"base_sha": self.base_sha, "head_sha": self.head_sha} | overrides))
+
+    def env(self, github_sha: Optional[str] = None, **kw: Any) -> Dict[str, str]:
+        return ci_env(github_sha or self.tested_sha, server_url=self.server_url, **kw)
+
+
+def clone(src: str, dest: Path, *args: str) -> Path:
+    subprocess.run(["git", "-c", "core.autocrlf=false", "clone", "-q", *args, src, str(dest)],
+                   capture_output=True, text=True, check=True)
+    return dest
+
+
+def make_pr_repos(root: Path, setup_base: Callable[[Path], None], setup_pr: Callable[[Path], None]) -> CiRepos:
+    """Build a CiRepos layout: setup_base writes the base-branch tree, setup_pr the PR's changes on top."""
+    server = root / "remote"
+    upstream = init_repo(server / REPOSITORY)
+    git(upstream, "symbolic-ref", "HEAD", f"refs/heads/{BASE_BRANCH}")
+    setup_base(upstream)
+    base_sha = commit_all(upstream, "trusted base")
+    git(upstream, "checkout", "-q", "-b", "pr-head")
+    setup_pr(upstream)
+    head_sha = commit_all(upstream, "candidate")
+    git(upstream, "checkout", "-q", "--detach", base_sha)
+    git(upstream, "merge", "-q", "--no-ff", "-m", f"Merge {head_sha} into {base_sha}", "pr-head")
+    tested_sha = git(upstream, "rev-parse", "HEAD")
+    git(upstream, "checkout", "-q", BASE_BRANCH)
+    url = f"{server.as_posix()}/{REPOSITORY}"
+    trusted = clone(url, root / "trusted")
+    git(trusted, "checkout", "-q", "--detach", base_sha)
+    candidate = clone(url, root / "candidate")
+    git(candidate, "checkout", "-q", "--detach", tested_sha)
+    base = clone(url, root / "base", "--branch", BASE_BRANCH)
+    return CiRepos(trusted, candidate, base_sha, tested_sha, head_sha, base, upstream, server.as_posix())
+
+
+def make_trusted_and_candidate(base: Path, with_fixture: Optional[str] = "correct") -> CiRepos:
+    """Trusted files (policy/spec/recipe/workflow) on the base branch; the PR adds the fixture app at the
+    policy target path. The candidate is the merge, so it carries identical trusted files."""
+    def add_fixture(repo: Path) -> None:
+        if with_fixture:
+            shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "browser_app" / with_fixture,
+                            repo / "tests" / "fixtures" / "browser_app" / "correct")
+    return make_pr_repos(base, lambda repo: copy_repo_files(repo, TRUSTED_FILES), add_fixture)
+
+
+def advance_base_branch(repos: CiRepos, message: str = "base moved on") -> str:
+    """Push one more commit to the upstream base branch and refresh the base checkout (fetch + reset)."""
+    sha = commit_all(repos.upstream, message)
+    git(repos.base, "fetch", "-q", "origin")
+    git(repos.base, "reset", "-q", "--hard", f"origin/{BASE_BRANCH}")
+    return sha
 
 
 def load_event(name: str, **overrides: Any) -> Dict[str, Any]:
@@ -85,11 +143,14 @@ def load_event(name: str, **overrides: Any) -> Dict[str, Any]:
 
 
 def ci_env(github_sha: str, run_attempt: int = 1, event_name: str = "pull_request",
-           repository: str = "dameepng/brainfrog") -> Dict[str, str]:
+           repository: str = REPOSITORY, server_url: str = "https://github.com") -> Dict[str, str]:
     return {
         "GITHUB_ACTIONS": "true",
         "GITHUB_EVENT_NAME": event_name,
         "GITHUB_REPOSITORY": repository,
+        "GITHUB_SERVER_URL": server_url,
+        "GITHUB_REF": "refs/pull/7/merge",
+        "GITHUB_BASE_REF": BASE_BRANCH,
         "GITHUB_SHA": github_sha,
         "GITHUB_RUN_ID": "987654321",
         "GITHUB_RUN_ATTEMPT": str(run_attempt),

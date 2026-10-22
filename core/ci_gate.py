@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform as _platform
 import re
 import shutil
 import subprocess
@@ -32,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from core.ci_trust import resolve_trusted_base
 from core.runtime.browser_sandbox import (
     APPROVED_BROWSER_IMAGES,
     BROWSER_SECCOMP_PROFILE_PATH,
@@ -207,8 +209,12 @@ def _event_str(value: Any, limit: int = 255) -> Optional[str]:
 
 
 def collect_identity(event: Mapping[str, Any], env: Mapping[str, str], trusted_root: Path,
-                     candidate_root: Path) -> Dict[str, Any]:
-    """Bind the run to the PR, the tested revision and the trusted revision. Problems make the gate BLOCKED."""
+                     candidate_root: Path, base_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Bind the run to the PR, the tested revision and the trusted revision. Problems make the gate BLOCKED.
+
+    The trusted revision must be the verified first parent of the tested PR merge (core.ci_trust), which is
+    re-derived here from the trusted code; the event's base.sha is recorded only as a diagnostic because
+    GitHub does not refresh it when the base branch moves."""
     problems: List[str] = []
     pr = event.get("pull_request") if isinstance(event.get("pull_request"), dict) else {}
     head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
@@ -238,10 +244,12 @@ def collect_identity(event: Mapping[str, Any], env: Mapping[str, str], trusted_r
         problems.append("candidate checkout HEAD could not be read")
     elif tested_sha != github_sha:
         problems.append(f"candidate checkout is at {tested_sha}, but the run is for GITHUB_SHA {github_sha}")
+    trust = resolve_trusted_base(event, env, Path(candidate_root), Path(base_root) if base_root else None)
+    problems.extend(f"trusted base: {p}" for p in trust["problems"])
     if trusted_sha is None:
         problems.append("trusted checkout HEAD could not be read")
-    elif trusted_sha != base_sha:
-        problems.append(f"trusted checkout is at {trusted_sha}, not the PR base revision {base_sha}")
+    elif trust["trusted_base_sha"] is not None and trusted_sha != trust["trusted_base_sha"]:
+        problems.append(f"trusted checkout is at {trusted_sha}, not the verified merge base {trust['trusted_base_sha']}")
 
     def _int(name: str) -> Optional[int]:
         v = env.get(name, "")
@@ -271,6 +279,7 @@ def collect_identity(event: Mapping[str, Any], env: Mapping[str, str], trusted_r
         "workflow_run_id": run_id,
         "workflow_run_attempt": run_attempt,
         "trusted_verifier_revision": trusted_sha,
+        "trusted_base": {k: v for k, v in trust.items() if k != "problems"},
         "problems": problems,
     }
 
@@ -612,13 +621,14 @@ def build_evidence(out_dir: Path, metadata: Dict[str, Any], decision: Dict[str, 
 
 
 def run_gate(trusted_root: Path, candidate_root: Path, out_dir: Path, event: Mapping[str, Any],
-             env: Mapping[str, str], docker: str = "docker") -> Dict[str, Any]:
+             env: Mapping[str, str], docker: str = "docker", base_root: Optional[Path] = None) -> Dict[str, Any]:
     """Identity -> images -> verification -> decision. Always returns (and records) a decision."""
     out_dir = Path(out_dir)
     work = out_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
     reasons: List[str] = []
-    metadata: Dict[str, Any] = {"schema": CI_METADATA_SCHEMA, "generated_at": _now()}
+    metadata: Dict[str, Any] = {"schema": CI_METADATA_SCHEMA, "generated_at": _now(),
+                                "runtime_platform": runtime_platform()}
     evaluations: List[Dict[str, Any]] = []
     policy: Optional[Dict[str, Any]] = None
     try:
@@ -627,7 +637,7 @@ def run_gate(trusted_root: Path, candidate_root: Path, out_dir: Path, event: Map
     except PolicyError as exc:
         reasons.append(f"trusted policy: {exc}")
 
-    identity = collect_identity(event, env, Path(trusted_root), Path(candidate_root))
+    identity = collect_identity(event, env, Path(trusted_root), Path(candidate_root), base_root)
     metadata.update({k: v for k, v in identity.items() if k != "problems"})
     reasons.extend(f"identity: {p}" for p in identity["problems"])
 
@@ -845,7 +855,27 @@ def evaluate_selftest_module(module: str, parsed: Mapping[str, Any], returncode:
     return problems
 
 
-def run_selftest(policy: Mapping[str, Any], candidate_root: Path, out_dir: Path, python_exe: str) -> int:
+def runtime_platform(platform: str = sys.platform) -> Dict[str, str]:
+    """The host the gate or self-test actually ran on (recorded as evidence, never read from the event)."""
+    return {"sys_platform": platform, "os": _platform.system(), "release": _platform.release(),
+            "machine": _platform.machine(), "python": _platform.python_version()}
+
+
+def quarantine_for_platform(entry: Any, platform: str) -> Tuple[Dict[str, Any], Optional[str]]:
+    """The trusted quarantine entry that applies on `platform` (a sys.platform value), and a policy problem.
+
+    An entry must name its platforms explicitly; one that does not, or names another platform, grants no
+    exception, so every error on this platform stays a failure (and an unexpected pass is just a pass)."""
+    if not entry:
+        return {}, None
+    platforms = entry.get("platforms") if isinstance(entry, Mapping) else None
+    if not (isinstance(platforms, list) and platforms and all(isinstance(p, str) and p for p in platforms)):
+        return {}, "quarantine entry has no explicit 'platforms' list; no exception granted"
+    return (dict(entry), None) if platform in platforms else ({}, None)
+
+
+def run_selftest(policy: Mapping[str, Any], candidate_root: Path, out_dir: Path, python_exe: str,
+                 platform: str = sys.platform, identity: Optional[Mapping[str, Any]] = None) -> int:
     cfg = policy.get("selftest") or {}
     modules = cfg.get("modules") or []
     required_ok = cfg.get("required_passing_tests") or []
@@ -859,7 +889,17 @@ def run_selftest(policy: Mapping[str, Any], candidate_root: Path, out_dir: Path,
            if not re.search(r"TOKEN|SECRET|KEY|PASS|AUTH|CREDENTIAL", k.upper())
            and not k.upper().startswith(("GITHUB_", "ACTIONS_", "RUNNER_", "INPUT_"))}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    summary: Dict[str, Any] = {"modules": {}, "problems": []}
+    summary: Dict[str, Any] = {"runtime_platform": runtime_platform(platform), "modules": {}, "problems": []}
+    if identity is not None:
+        summary["identity"] = {k: identity.get(k) for k in (
+            "tested_sha", "head_sha", "base_sha", "trusted_verifier_revision", "trusted_base", "trusted_policy_digest")}
+        if identity.get("problems"):
+            # Results against an unverified trusted revision would mean nothing: do not run the candidate.
+            summary["problems"] = [f"identity: {p}" for p in identity["problems"]]
+            _write_json(out_dir / "selftest-summary.json", summary)
+            for p in summary["problems"]:
+                print(f"[brainfrog-ci] selftest problem: {p}")
+            return 2
     timeout = float(cfg.get("module_timeout_seconds", 900))
     for mod in modules:
         try:
@@ -872,7 +912,10 @@ def run_selftest(policy: Mapping[str, Any], candidate_root: Path, out_dir: Path,
         (out_dir / f"{mod}.stderr.log").write_text(safe_scrub(stderr), encoding="utf-8")
         (out_dir / f"{mod}.stdout.log").write_text(safe_scrub(stdout), encoding="utf-8")
         parsed = parse_unittest_verbose(stderr)
-        problems = evaluate_selftest_module(mod, parsed, rc, required_ok, quarantine.get(mod) or {})
+        applicable, policy_problem = quarantine_for_platform(quarantine.get(mod), platform)
+        problems = evaluate_selftest_module(mod, parsed, rc, required_ok, applicable)
+        if policy_problem:
+            problems.append(f"{mod}: {policy_problem}")
         counts: Dict[str, int] = {}
         for res in parsed["results"].values():
             counts[res] = counts.get(res, 0) + 1
@@ -913,6 +956,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_gate = sub.add_parser("gate")
     p_gate.add_argument("--trusted", required=True)
     p_gate.add_argument("--candidate", required=True)
+    p_gate.add_argument("--base", required=True)
     p_gate.add_argument("--out", required=True)
     p_dig = sub.add_parser("digest")
     p_dig.add_argument("--out", required=True)
@@ -921,6 +965,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_self = sub.add_parser("selftest")
     p_self.add_argument("--trusted", required=True)
     p_self.add_argument("--candidate", required=True)
+    p_self.add_argument("--base", required=True)
     p_self.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     env = dict(os.environ)
@@ -938,7 +983,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 fh.write(f"manifest-sha256={digest}\n")
         return 0
     try:
-        policy, _ = load_policy(Path(args.trusted))
+        policy, policy_digest = load_policy(Path(args.trusted))
     except PolicyError as exc:
         if args.cmd != "gate":
             print(f"[brainfrog-ci] BLOCKED: trusted policy: {exc}")
@@ -950,11 +995,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"[brainfrog-ci] provisioning: {p}")
         return 2 if problems else 0
     if args.cmd == "selftest":
-        return run_selftest(policy, Path(args.candidate), Path(args.out), sys.executable)
+        identity = dict(collect_identity(_load_event(env), env, Path(args.trusted), Path(args.candidate),
+                                         Path(args.base)), trusted_policy_digest=policy_digest)
+        return run_selftest(policy, Path(args.candidate), Path(args.out), sys.executable, identity=identity)
 
     out_dir = Path(args.out)
     try:
-        decision = run_gate(Path(args.trusted), Path(args.candidate), out_dir, _load_event(env), env)
+        decision = run_gate(Path(args.trusted), Path(args.candidate), out_dir, _load_event(env), env,
+                            base_root=Path(args.base))
     except Exception as exc:  # last-resort diagnostic: never green, still produces an uploadable bundle
         decision = {"schema": CI_METADATA_SCHEMA, "outcome": "blocked", "exit_code": 2,
                     "reasons": [f"gate crashed: {type(exc).__name__}: {safe_scrub(str(exc))[:300]}"]}

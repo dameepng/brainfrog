@@ -13,7 +13,9 @@ brainfrog-ci-evidence/
 **`ci-metadata.json` fields:**
 - identity: `ci_provider`, `repository`, `event_name`, `pull_request_number`, `head_sha`, `base_sha`, `github_sha`, `tested_sha`, `tested_sha_is_pr_head`, `head_repository`, `is_fork_pull_request`, `head_ref` (inert data);
 - workflow: `workflow_ref`, `workflow_sha`, `workflow_run_id`, `workflow_run_attempt`;
-- trusted inputs: `trusted_verifier_revision`, `trusted_policy_digest`;
+- trusted inputs: `trusted_verifier_revision`, `trusted_policy_digest`, and `trusted_base`:
+  - `merge_parents`, `trusted_base_sha`, `base_ref`, `base_branch_tip`, `trusted_base_is_branch_tip`;
+  - `event_base_sha` and `event_base_sha_is_stale`, kept as diagnostics only;
 - images and engine: `python_image_identity` (tag, ID, `repo_digests`, required digest), `browser_image_identity` (tag, ID, base image, recipe hashes, expected Playwright/Chromium versions), `seccomp_profile_digest`, `docker_engine_version`;
 - per target: `targets[]`, each with `trusted_spec_sha256`, `verification_plan_digest` (the report's spec content hash), `source_snapshot_digest` (materialized digest), `report_run_id`, `criterion_results[]` (status plus per-file evidence hashes) and `evidence_published`;
 - review flags: `candidate_trusted_config_changes`;

@@ -555,11 +555,23 @@ def materialize_source_snapshot(
     return manifest.snapshot_dir, manifest.digest
 
 
-def stage_harness() -> Tuple[Path, str]:
-    """Copy the harness into a fresh BrainFrog-owned directory; return (dir, sha256)."""
+def stage_harness(container_readable: bool = False) -> Tuple[Path, str]:
+    """Copy the harness into a fresh BrainFrog-owned directory; return (dir, sha256).
+
+    container_readable: the OCI backend bind-mounts this directory read-only into a container whose
+    unprivileged UID differs from the staging user. mkdtemp's 0700 is untraversable for that UID on Linux
+    hosts (Docker Desktop on Windows does not enforce it), so the directory becomes 0755 and the script
+    0644: readable, never writable by anyone but the owner. Only the public harness is staged here; the
+    local backend keeps the private default because it writes a nonce file next to the script.
+    """
     data = HARNESS_SOURCE_PATH.read_bytes()
     harness_dir = Path(tempfile.mkdtemp(prefix="bf_harness_"))
-    (harness_dir / "verification_harness.py").write_bytes(data)
+    harness_file = harness_dir / "verification_harness.py"
+    harness_file.write_bytes(data)
+    if container_readable:
+        # Both paths were just created inside our private mkdtemp directory, so nothing can be swapped in.
+        os.chmod(harness_file, 0o644)
+        os.chmod(harness_dir, 0o755)
     return harness_dir, hashlib.sha256(data).hexdigest()
 
 
@@ -1056,7 +1068,7 @@ class DockerSandboxBackend(VerificationExecutionBackend):
 
         run_label = run_label or f"bf_{secrets.token_hex(8)}"
         container_name = f"bf_verify_{run_label}_{secrets.token_hex(4)}"
-        harness_dir, harness_sha = stage_harness()
+        harness_dir, harness_sha = stage_harness(container_readable=True)
         base.update(container_name=container_name, harness_sha256=harness_sha)
         state = {"created": False}
         try:

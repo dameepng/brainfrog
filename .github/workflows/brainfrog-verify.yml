@@ -4,6 +4,9 @@
 # - pull_request only (never pull_request_target / workflow_run): no secrets, read-only GITHUB_TOKEN.
 # - The verifier, acceptance policy/specs and dependency locks come from the PR *base* revision
 #   ("trusted"); the PR revision GitHub tested ("candidate") is data, executed only in OCI containers.
+# - The trusted revision is the verified first parent of the tested merge commit, resolved by
+#   core/ci_trust.py from the base-branch checkout and re-verified by the trusted gate. The event's
+#   pull_request.base.sha is not used: GitHub does not refresh it when the base branch moves.
 # - This file itself comes from the PR merge commit, so a PR can edit it. The gate flags such edits,
 #   but real enforcement needs repository rules (CODEOWNERS review of .github/**, required check).
 # - No `${{ }}` expressions inside `run:` scripts; event text is never interpolated into a shell.
@@ -35,23 +38,36 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: Check out trusted verifier and policy (PR base revision)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: trusted
-          persist-credentials: false
-
       - name: Check out candidate source (revision under test)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: candidate
           persist-credentials: false
 
+      - name: Check out base branch history (merge-base verification)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.base_ref }}
+          path: base
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+
+      - name: Resolve trusted revision from the tested merge
+        id: resolve
+        run: |
+          python -I base/core/ci_trust.py resolve --candidate candidate --base base
+
+      - name: Check out trusted verifier and policy (verified merge base)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.resolve.outputs.trusted-sha }}
+          path: trusted
+          persist-credentials: false
 
       - name: Install trusted hash-locked verifier dependencies
         run: |
@@ -65,7 +81,7 @@ jobs:
       - name: Run BrainFrog verification
         id: gate
         run: |
-          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py gate --trusted trusted --candidate candidate --out "$RUNNER_TEMP/bf-ci"
+          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py gate --trusted trusted --candidate candidate --base base --out "$RUNNER_TEMP/bf-ci"
 
       - name: Record evidence manifest digest
         id: digest
@@ -100,23 +116,36 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: Check out trusted policy (PR base revision)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: trusted
-          persist-credentials: false
-
       - name: Check out candidate source (revision under test)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: candidate
           persist-credentials: false
 
+      - name: Check out base branch history (merge-base verification)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.base_ref }}
+          path: base
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+
+      - name: Resolve trusted revision from the tested merge
+        id: resolve
+        run: |
+          python -I base/core/ci_trust.py resolve --candidate candidate --base base
+
+      - name: Check out trusted policy (verified merge base)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.resolve.outputs.trusted-sha }}
+          path: trusted
+          persist-credentials: false
 
       - name: Install trusted hash-locked dependencies
         run: |
@@ -129,7 +158,7 @@ jobs:
 
       - name: Run candidate unit tests on Linux (strict quarantine)
         run: |
-          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py selftest --trusted trusted --candidate candidate --out "$RUNNER_TEMP/bf-selftest"
+          "$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py selftest --trusted trusted --candidate candidate --base base --out "$RUNNER_TEMP/bf-selftest"
 
       - name: Upload self-test logs
         if: always()

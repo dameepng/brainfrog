@@ -319,6 +319,35 @@ def _build_safe_system_path(cwd: Path, env: Optional[Dict[str, str]] = None) -> 
     return os.pathsep.join(safe_dirs)
 
 
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(a) == os.path.normcase(b)
+
+
+def _trusted_interpreter_path(cwd_resolved: Path) -> Tuple[Optional[str], Optional[str]]:
+    """Path that launches the running interpreter, as launched (not its realpath).
+
+    On POSIX a virtualenv's bin/python is a symlink to the base interpreter; executing
+    the realpath leaves the venv and loses its packages. The path comes from
+    sys.executable, which the trusted parent process set, never from the command being
+    authorized. Its directory must lie outside the workspace, so the command cannot
+    have edited the pyvenv.cfg that selects the execution context.
+
+    Returns (path, rejection_reason).
+    """
+    exe = sys.executable
+    if not exe or not os.path.isabs(exe):
+        return None, "Running interpreter path (sys.executable) is unavailable"
+    launched = os.path.abspath(exe)
+    if not os.path.isfile(launched):
+        return None, f"Running interpreter path is missing or a broken link: '{launched}'"
+    if _is_relative_to(Path(launched).parent, cwd_resolved):
+        return (
+            None,
+            f"Running interpreter lives inside the untrusted workspace directory: '{launched}'",
+        )
+    return launched, None
+
+
 def resolve_and_authorize_executable(
     raw_exe: str,
     cwd: Path,
@@ -329,7 +358,9 @@ def resolve_and_authorize_executable(
     Trust Rule:
     An absolute executable path is authorized ONLY if its canonical realpath identity
     matches a known, immutable trusted identity:
-    1. Python: Must resolve to the running interpreter (sys.executable).
+    1. Python: Must resolve to the running interpreter (sys.executable), spelled either
+       as sys.executable itself or as its canonical file. It always executes as
+       sys.executable as launched, so a POSIX virtualenv keeps its packages.
     2. Taskkill (Windows): Must resolve strictly to SystemRoot\\System32\\taskkill.exe.
     3. Other tools (Git, GitHub CLI, Pytest): Must match the canonical executable
        resolved from the sanitized trusted system PATH (excluding cwd and temp dirs).
@@ -407,7 +438,21 @@ def resolve_and_authorize_executable(
             else (str(resolved_exe).lower() == str(sys_py).lower())
         )
         if is_python_match:
-            return True, str(resolved_exe), "python", None
+            # Only two spellings name the running interpreter: sys.executable as launched,
+            # and its canonical file. Any other alias (a caller-made symlink, or a path
+            # through a symlinked directory) could sit next to a pyvenv.cfg it controls.
+            given = os.path.abspath(exe_str)
+            if not (_same_path(given, os.path.abspath(sys.executable)) or _same_path(given, str(sys_py))):
+                return (
+                    False,
+                    None,
+                    None,
+                    f"Interpreter alias is not the running interpreter's own path: '{exe_str}'",
+                )
+            launched, why = _trusted_interpreter_path(cwd_resolved)
+            if launched is None:
+                return False, None, None, why
+            return True, launched, "python", None
 
         # Check taskkill on Windows
         if sys.platform == "win32" and resolved_exe.name.lower() == "taskkill.exe":
@@ -478,8 +523,10 @@ def resolve_and_authorize_executable(
 
         # Handle Python interpreter: Must resolve strictly to the running interpreter (sys.executable)
         if canonical_name in ("python", "python3"):
-            py_canonical = str(Path(os.path.realpath(sys.executable)))
-            return True, py_canonical, "python", None
+            launched, why = _trusted_interpreter_path(cwd_resolved)
+            if launched is None:
+                return False, None, None, why
+            return True, launched, "python", None
 
         if canonical_name not in AUTHORIZED_CANONICAL_EXECUTABLES:
             return (

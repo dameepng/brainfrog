@@ -9,10 +9,11 @@
 | `event_name` | `GITHUB_EVENT_NAME` | Must be `pull_request` |
 | `repository` | `GITHUB_REPOSITORY` | `owner/name` format |
 | `pull_request_number` | event `number` | Positive integer |
-| `head_sha`, `base_sha` | event `pull_request.head/base.sha` | 40-hex |
+| `head_sha`, `base_sha` | event `pull_request.head/base.sha` | 40-hex. `base_sha` is recorded as given; it does not select trusted code |
 | `github_sha` | `GITHUB_SHA` | 40-hex |
 | `tested_sha` | `git rev-parse HEAD` in `candidate/`, run with hooks and fsmonitor disabled and system/global config ignored | Must equal `GITHUB_SHA` |
-| `trusted_verifier_revision` | `git rev-parse HEAD` in `trusted/` | Must equal `base_sha` |
+| `trusted_base` | `core/ci_trust.py` over `candidate/` and `base/` | `merge_parents` (exactly 2; the second is `head_sha`), `trusted_base_sha` (the first parent, on the base branch of this repository), `base_branch_tip`, `event_base_sha_is_stale` (diagnostic) |
+| `trusted_verifier_revision` | `git rev-parse HEAD` in `trusted/` | Must equal `trusted_base.trusted_base_sha` |
 | `workflow_ref`, `workflow_sha`, `workflow_run_id`, `workflow_run_attempt` | `GITHUB_*` | Recorded; run id and attempt must be integers |
 
 `tested_sha` is normally GitHub's **merge commit**, not the PR head. The bundle records both, plus `tested_sha_is_pr_head`, and never claims the head was tested when it was not.

@@ -25,12 +25,9 @@ from core.verifier import verify_report_integrity
 from tests.ci_gate_helpers import (
     REPO_ROOT,
     TRUSTED_FILES,
-    ci_env,
-    commit_all,
     copy_repo_files,
-    init_repo,
-    load_event,
     load_policy_dict,
+    make_pr_repos,
 )
 
 FULL_SPEC = (REPO_ROOT / ".github/brainfrog/specs/fixture-login-app.md").read_text(encoding="utf-8")
@@ -102,24 +99,23 @@ class TestGateLive(unittest.TestCase):
         root = self.base / name
         policy = load_policy_dict()
         policy["targets"][0]["required_criteria"] = list(required)
-        repos = []
-        for side in ("trusted", "candidate"):
-            repo = init_repo(root / side)
+
+        def setup_base(repo):  # the trusted side: policy, spec, recipe and workflow on the base branch
             copy_repo_files(repo, TRUSTED_FILES)
             (repo / SPEC_REL).write_text(spec_text, encoding="utf-8")
             (repo / ".github/brainfrog/policy.json").write_text(json.dumps(policy, indent=2), encoding="utf-8")
-            repos.append(repo)
-        trusted, candidate = repos
-        shutil.copytree(REPO_ROOT / "tests/fixtures/browser_app" / fixture, candidate / FIXTURE)
-        if mutate_candidate:
-            mutate_candidate(candidate)
-        base_sha, tested_sha = commit_all(trusted), commit_all(candidate)
-        return root, trusted, candidate, base_sha, tested_sha
 
-    def gate(self, root, trusted, candidate, base_sha, tested_sha, github_sha=None):
-        event = load_event("pull_request_valid.json", base_sha=base_sha, head_sha=tested_sha)
+        def setup_pr(repo):  # the PR: the fixture app (and any candidate mutation) on top
+            shutil.copytree(REPO_ROOT / "tests/fixtures/browser_app" / fixture, repo / FIXTURE)
+            if mutate_candidate:
+                mutate_candidate(repo)
+
+        repos = make_pr_repos(root, setup_base, setup_pr)
+        return root, repos.trusted, repos.candidate, repos.base_sha, repos.tested_sha, repos
+
+    def gate(self, root, trusted, candidate, base_sha, tested_sha, repos, github_sha=None):
         out = root / "out"
-        decision = run_gate(trusted, candidate, out, event, ci_env(github_sha or tested_sha))
+        decision = run_gate(trusted, candidate, out, repos.event(), repos.env(github_sha), base_root=repos.base)
         bundle = out / EVIDENCE_DIRNAME
         meta = json.loads((bundle / "ci-metadata.json").read_text(encoding="utf-8"))
         return decision, out, bundle, meta
@@ -135,7 +131,7 @@ class TestGateLive(unittest.TestCase):
     # -- Case A ----------------------------------------------------------------------------------
     def test_case_a_valid_source_passes_with_bound_evidence_and_g_tamper_is_caught(self) -> None:
         case = self.make_case("a", FULL_SPEC, ["CI-01", "CI-02", "CI-03", "CI-04", "CI-05", "CI-06"])
-        root, trusted, candidate, base_sha, tested_sha = case
+        root, trusted, candidate, base_sha, tested_sha, _ = case
         decision, out, bundle, meta = self.gate(*case)
         self.assertEqual(decision["outcome"], "success", decision["reasons"])
         self.assertEqual(set(self.criteria(meta).values()), {"PASS"})

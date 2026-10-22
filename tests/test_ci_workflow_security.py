@@ -21,6 +21,8 @@ APPROVED_ACTIONS = {
     "actions/attest": ("1e69f48acb82d1966a394da916b4c1698aa569d6", "v4.2.2"),
 }
 CI_SCRIPT = '"$RUNNER_TEMP/bf-venv/bin/python" -I trusted/scripts/brainfrog_ci.py'
+RESOLVER = "python -I base/core/ci_trust.py resolve --candidate candidate --base base"
+TRUSTED_REF = "${{ steps.resolve.outputs.trusted-sha }}"
 
 
 def _steps(wf, job):
@@ -108,16 +110,40 @@ class TestScriptInjectionAndCheckouts(unittest.TestCase):
     def test_checkouts_do_not_persist_credentials_and_bind_the_right_revisions(self) -> None:
         for job in ("verification", "linux-selftest"):
             checkouts = [s for s in self.wf["jobs"][job]["steps"] if s.get("uses", "").startswith("actions/checkout@")]
-            self.assertEqual(len(checkouts), 2)
-            trusted, candidate = checkouts
+            self.assertEqual(len(checkouts), 3)
+            candidate, base, trusted = checkouts
             for co in checkouts:
                 self.assertIs(co["with"]["persist-credentials"], False)
                 self.assertNotIn("token", co["with"])
                 self.assertNotIn("allow-unsafe-pr-checkout", co["with"])
-            self.assertEqual(trusted["with"]["path"], "trusted")
-            self.assertEqual(trusted["with"]["ref"], "${{ github.event.pull_request.base.sha }}")
             self.assertEqual(candidate["with"]["path"], "candidate")
             self.assertNotIn("ref", candidate["with"], "candidate must be the revision GitHub tests (GITHUB_SHA)")
+            self.assertEqual(base["with"]["path"], "base")
+            self.assertEqual(base["with"]["ref"], "${{ github.base_ref }}")
+            self.assertEqual(base["with"]["fetch-depth"], 0, "merge-base verification needs the branch history")
+            self.assertEqual(trusted["with"]["path"], "trusted")
+            self.assertEqual(trusted["with"]["ref"], TRUSTED_REF)
+
+    def test_trusted_revision_is_resolved_from_the_tested_merge_before_its_checkout(self) -> None:
+        # T1 retest (run 39731332404): the event's base.sha was stale; it must never select trusted code.
+        raw = re.sub(r"(?m)^\s*#.*$", "", WORKFLOW_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn("pull_request.base.sha", raw)
+        for job in ("verification", "linux-selftest"):
+            steps = self.wf["jobs"][job]["steps"]
+            (resolve,) = [s for s in steps if s.get("id") == "resolve"]
+            self.assertEqual(resolve["run"].strip(), RESOLVER)
+            self.assertNotIn("if", resolve, "the resolver runs, and fails the job, like any normal step")
+            idx = steps.index(resolve)
+            paths = [(s.get("with") or {}).get("path") for s in steps]
+            self.assertLess(paths.index("candidate"), idx)
+            self.assertLess(paths.index("base"), idx)
+            self.assertLess([s.get("name") for s in steps].index("Set up Python"), idx)
+            self.assertEqual(paths.index("trusted"), idx + 1, "the trusted checkout immediately follows the resolver")
+            self.assertNotIn("if", steps[idx + 1], "no trusted checkout after a failed resolution")
+            entry = [s["run"] for s in steps if (s.get("run") or "").startswith((CI_SCRIPT + " gate ",
+                                                                                 CI_SCRIPT + " selftest "))]
+            self.assertEqual(len(entry), 1)
+            self.assertIn(" --base base ", entry[0], "the trusted code re-verifies the merge base")
 
     def test_dependencies_come_only_from_the_trusted_hash_lock(self) -> None:
         for job in ("verification", "linux-selftest"):
@@ -133,6 +159,8 @@ class TestScriptInjectionAndCheckouts(unittest.TestCase):
             for step in self.wf["jobs"][job]["steps"]:
                 if "brainfrog_ci.py" in step.get("run", ""):
                     self.assertTrue(step["run"].strip().startswith(CI_SCRIPT), step["name"])
+                if "ci_trust.py" in step.get("run", ""):
+                    self.assertEqual(step["run"].strip(), RESOLVER, "resolver runs isolated, from the base branch")
 
 
 class TestGateOrdering(unittest.TestCase):
@@ -192,8 +220,12 @@ class TestWorkflowIsTrustedConfiguration(unittest.TestCase):
             "write token": lambda wf: wf.update(permissions={"contents": "write"}),
             "hide failure": lambda wf: wf["jobs"]["verification"]["steps"][-1].update({"continue-on-error": True}),
             "skip enforcement": lambda wf: wf["jobs"]["verification"]["steps"].pop(),
-            "trust candidate verifier": lambda wf: wf["jobs"]["verification"]["steps"][1]["with"].update(
+            "trust candidate verifier": lambda wf: _trusted_checkout(wf)["with"].update(
                 ref="${{ github.event.pull_request.head.sha }}"),
+            "trust the stale event base": lambda wf: _trusted_checkout(wf)["with"].update(
+                ref="${{ github.event.pull_request.base.sha }}"),
+            "skip the resolver": lambda wf: wf["jobs"]["verification"]["steps"].remove(_resolver(wf)),
+            "weaken the resolver": lambda wf: _resolver(wf).update(run="exit 0\n"),
             "force green": lambda wf: wf["jobs"]["verification"]["steps"][-1].update(run="exit 0\n"),
             "shell interpolation": lambda wf: wf["jobs"]["verification"]["steps"][6].update(
                 run="echo ${{ github.event.pull_request.title }}\n"),
@@ -201,6 +233,14 @@ class TestWorkflowIsTrustedConfiguration(unittest.TestCase):
         for label, fn in attempts.items():
             with self.subTest(label):
                 self.assertTrue(edit(fn), f"{label} was not detected")
+
+
+def _trusted_checkout(wf) -> dict:
+    return next(s for s in wf["jobs"]["verification"]["steps"] if (s.get("with") or {}).get("path") == "trusted")
+
+
+def _resolver(wf) -> dict:
+    return next(s for s in wf["jobs"]["verification"]["steps"] if s.get("id") == "resolve")
 
 
 def contract_violations(wf) -> list:
@@ -219,9 +259,14 @@ def contract_violations(wf) -> list:
             v.append("continue-on-error")
         if "${{" in (s.get("run") or ""):
             v.append("expression in run")
-    checkouts = [s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@")]
-    if not checkouts or (checkouts[0].get("with") or {}).get("ref") != "${{ github.event.pull_request.base.sha }}":
+    trusted = [s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@")
+               and (s.get("with") or {}).get("path") == "trusted"]
+    if len(trusted) != 1 or trusted[0]["with"].get("ref") != TRUSTED_REF:
         v.append("trusted checkout ref")
+    resolvers = [s for s in steps if s.get("id") == "resolve"]
+    if len(resolvers) != 1 or (resolvers[0].get("run") or "").strip() != RESOLVER \
+            or (trusted and steps.index(resolvers[0]) > steps.index(trusted[0])):
+        v.append("trusted revision resolver")
     if not steps or not (steps[-1].get("run") or "").strip().startswith(CI_SCRIPT + " enforce ") \
             or steps[-1].get("if") != "always()":
         v.append("final enforcement")
@@ -248,6 +293,16 @@ class TestVerifierDependencyLock(unittest.TestCase):
                 pinned = set(re.findall(r"--hash=sha256:([0-9a-f]{64})", block))
                 self.assertTrue(pinned, "every requirement carries hashes")
                 self.assertTrue(pinned <= hashes[(m.group(1), m.group(2))], "hashes must come from uv.lock")
+
+    def test_pytest_and_its_runtime_dependencies_are_locked_for_the_ci_interpreter(self) -> None:
+        # T1: two self-tests run `sys.executable -m pytest`, but the CI venv had no pytest.
+        text = (REPO_ROOT / ".github/brainfrog/requirements-verifier.txt").read_text(encoding="utf-8")
+        for name in ("pytest", "pluggy", "iniconfig", "packaging"):
+            with self.subTest(name):
+                pins = re.findall(rf"(?m)^{name}==(\S+)(?: ; ([^\n]*?))? \\$", text)
+                ci = [ver for ver, marker in pins
+                      if not marker or marker == "python_full_version >= '3.10'"]
+                self.assertEqual(len(ci), 1, f"{name} must be pinned exactly once for CPython 3.12 on Linux")
 
 
 if __name__ == "__main__":

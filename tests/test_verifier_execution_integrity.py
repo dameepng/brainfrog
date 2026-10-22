@@ -150,6 +150,41 @@ class TestVerifierExecutionIntegrity(unittest.TestCase):
             self.assertFalse(allowed, f"Traversal '{cmd}' should be rejected")
             self.assertIn("traversal", (reason or "").lower())
 
+    def test_05b_path_arguments_are_judged_the_same_on_every_host(self) -> None:
+        """Invariant 5b: '/' and '\\' both separate; '..', rooted, drive and UNC arguments are rejected on any OS."""
+        rejected = {
+            "posix traversal": ["python", "-m", "unittest", "tests/../../etc/passwd"],
+            "windows traversal": ["python", "-m", "unittest", "..\\..\\windows\\system32"],
+            "mixed separators": ["python", "-m", "pytest", "tests\\../..\\secret"],
+            "bare parent": ["python", "-m", "compileall", ".."],
+            "option value traversal": ["python", "-m", "pytest", "--rootdir=../.."],
+            "posix absolute": ["python", "-m", "unittest", "/etc/passwd"],
+            "windows rooted": ["python", "-m", "unittest", "\\windows\\system32"],
+            "drive-qualified": ["python", "-m", "compileall", "C:\\Windows"],
+            "drive-relative": ["python", "-m", "compileall", "C:Windows"],
+            "drive forward slash": ["python", "-m", "pytest", "d:/data"],
+            "unc": ["python", "-m", "unittest", "\\\\server\\share\\x"],
+            "posix unc-style": ["python", "-m", "unittest", "//server/share"],
+            "option value absolute": ["python", "-m", "pytest", "--basetemp=/tmp/x"],
+        }
+        for name, cmd in rejected.items():
+            allowed, reason = validate_verification_command(cmd, cwd=self.repo_dir)
+            self.assertFalse(allowed, f"{name}: {cmd} should be rejected")
+            self.assertIn("traversal", (reason or "").lower(), name)
+        accepted = [
+            ["python", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+            ["python", "-m", "compileall", "-q", "."],
+            ["python", "-m", "unittest", "tests/test_login.py"],
+            ["python", "-m", "pytest", "tests\\unit\\test_x.py", "-k", "login and not slow"],
+            ["python", "-m", "pytest", "tests/test_x.py::TestA::test_b", "-v"],
+            ["python", "-m", "unittest", "pkg.module..Weird"],
+            ["python", "-m", "pytest", "--maxfail=1", "-x"],
+            ["npm", "run", "build"],
+        ]
+        for cmd in accepted:
+            allowed, reason = validate_verification_command(cmd, cwd=self.repo_dir)
+            self.assertTrue(allowed, f"{cmd} should be accepted: {reason}")
+
     def test_06_python_inline_command_c_rejected(self) -> None:
         """Invariant 6: Python inline code execution (-c) is rejected."""
         cmd = ["python", "-c", "print(1)"]

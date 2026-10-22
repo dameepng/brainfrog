@@ -568,6 +568,24 @@ DISALLOWED_TOKENS: Set[str] = {
 }
 
 
+_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _external_path_argument(token: str) -> Optional[str]:
+    """Why an argument could name a path outside the workspace on any host OS, or None."""
+    values = [token]
+    if token.startswith("-") and "=" in token:
+        values.append(token.split("=", 1)[1])
+    for value in values:
+        if value.startswith(("/", "\\")):
+            return "UNC path" if value.startswith(("//", "\\\\")) else "rooted path"
+        if _DRIVE_PREFIX_RE.match(value):
+            return "drive-qualified path"
+        if ".." in re.split(r"[\\/]", value):
+            return "'..' path component"
+    return None
+
+
 def validate_verification_command(
     cmd_tokens: List[str],
     cwd: Path,
@@ -597,7 +615,13 @@ def validate_verification_command(
     if clean_exe not in ALLOWED_VERIFICATION_BINARIES:
         return False, f"Unauthorized executable: '{clean_exe}' is not in the verification allowlist ({sorted(ALLOWED_VERIFICATION_BINARIES)})"
 
-    # Path traversal check on arguments
+    # Path traversal check on arguments. Host-independent first: commands run in Linux containers but specs
+    # may be authored on Windows, so '/' and '\' both separate, and no '..' component, rooted, drive or UNC
+    # path is accepted on any host (also for '--opt=value' values).
+    for token in cmd_tokens[1:]:
+        problem = _external_path_argument(token)
+        if problem:
+            return False, f"Path traversal attempt in argument: '{token}' ({problem})"
     real_cwd = Path(cwd).resolve()
     for token in cmd_tokens[1:]:
         if ".." in token:

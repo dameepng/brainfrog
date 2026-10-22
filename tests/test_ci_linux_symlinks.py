@@ -176,7 +176,7 @@ class TestSpecPathSymlinks(_SymlinkCase):
 
 class TestGateSymlinks(_SymlinkCase):
     def test_candidate_target_symlink_is_blocked(self) -> None:
-        trusted, candidate, _, _ = make_trusted_and_candidate(self.tmp / "ci", with_fixture=None)
+        trusted, candidate = make_trusted_and_candidate(self.tmp / "ci", with_fixture=None)[:2]
         target = candidate / "tests/fixtures/browser_app/correct"
         target.parent.mkdir(parents=True)
         os.symlink(self.outside, target, target_is_directory=True)
@@ -195,7 +195,7 @@ class TestGateSymlinks(_SymlinkCase):
         self.assertEqual(ev["outcome"], "blocked")
 
     def test_trusted_path_replaced_by_symlink_is_a_change(self) -> None:
-        trusted, candidate, _, _ = make_trusted_and_candidate(self.tmp / "ci")
+        trusted, candidate = make_trusted_and_candidate(self.tmp / "ci")[:2]
         shutil.rmtree(candidate / ".github/brainfrog")
         os.symlink(trusted / ".github/brainfrog", candidate / ".github/brainfrog", target_is_directory=True)
         policy, _ = load_policy(trusted)

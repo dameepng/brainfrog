@@ -32,6 +32,10 @@ bf = "cli:main"
 py-modules = ["cli", "orchestrator", "config", "modules", "plans", "memory", "skills", "auth_manager", "git_guard"]
 packages = ["brainfrog", "brainfrog.sdk", "core", "security", "system1", "system2", "tests"]
 
+[tool.uv]
+# Supply-chain cooldown: pluggy 1.7.0 was 7 days old when pytest entered the trusted CI lock (2026-10-22).
+exclude-newer-package = { pluggy = "2026-10-08T00:00:00Z" }
+
 [tool.pyrefly]
 search-path = [".github/scripts"]
 
